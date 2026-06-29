@@ -202,7 +202,11 @@ static bool load(model_bundle & b, const std::string & path, int ngl, int n_ctx,
     if (getenv("STAGE_RTR")) mp.repack_tensors = true;
     // -mla / MLA attention level for deepseek2/minimax: model param `mla` (int32_t).
     // The context-side mla_attn is set in cp below; both must agree (common.cpp sets both).
-    { const char * e = getenv("STAGE_MLA"); if (e) mp.mla = atoi(e); }
+    // MLA level: model param mp.mla (builds the wk_b/wv_b absorb tensors at load) and the
+    // context param cp.mla_attn (selects the graph path) MUST AGREE — common.cpp sets both
+    // from one value. Default 3 (matches common.h). A mismatch -> null wk_b -> segfault.
+    const int stage_mla = getenv("STAGE_MLA") ? atoi(getenv("STAGE_MLA")) : 3;
+    mp.mla = stage_mla;
     // A stage's layer window may fall entirely in one GPU's slice under the default
     // layer-split (which maps by full-model layer index). --tensor-split forces the
     // window to spread across the local GPUs.
@@ -239,7 +243,7 @@ static bool load(model_bundle & b, const std::string & path, int ngl, int n_ctx,
     // here (common.cpp defaults it true; -no-fmoe disables); STAGE_NO_FMOE turns it off.
     cp.fused_moe_up_gate = getenv("STAGE_NO_FMOE") ? false : true;
     // -mla / MLA attention level: context param `mla_attn` (int). Keep in sync with mp.mla.
-    { const char * e = getenv("STAGE_MLA"); if (e) cp.mla_attn = atoi(e); }
+    cp.mla_attn = stage_mla;   // MUST match mp.mla so wk_b/wv_b exist (else build_deepseek2:591 null deref)
     { const char * th = getenv("STAGE_THREADS"); if (th) { int n = atoi(th); if (n > 0) { cp.n_threads = n; cp.n_threads_batch = n; } } }
     // DROPPED for v1: STAGE_FA handling (flash-attn force on/off); left unset -> llama AUTO.
     if (const char * dp = getenv("STAGE_DUMP")) { cp.cb_eval = stage_eval_cb; cp.cb_eval_user_data = (void *) dp; }
@@ -450,6 +454,7 @@ int main(int argc, char ** argv) {
         for (int i = 0; i < h.n_rows; ++i) lastrow[h.seq[i]] = i;
         std::vector<int32_t> tok(C);
         for (int s = 0; s < C; ++s) { tok[s] = argmax_ith(b, lastrow[s]); }
+        if (getenv("STAGE_PRINT")) for (int s = 0; s < C; ++s) print_piece(b, tok[s], s);
         int gen = 1, dsteps = 0;
         auto t0 = std::chrono::steady_clock::now();   // time the decode loop only (prefill excluded)
         while (gen < max_tokens) {
@@ -460,6 +465,7 @@ int main(int argc, char ** argv) {
             if (!recv_hidden(fd, hd)) break;
             if (!run_hidden(b, hd, false, dummy)) break;
             for (int s = 0; s < C; ++s) tok[s] = argmax_ith(b, s);
+            if (getenv("STAGE_PRINT")) for (int s = 0; s < C; ++s) print_piece(b, tok[s], s);
             gen++; dsteps++;
         }
         double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
