@@ -1,6 +1,7 @@
 #include "../llama-build-context.h"
 #include "../llama-model.h"
 #include "../llama-context.h"
+#include "llm_stage.h"
 
 ggml_cgraph* llm_build_context::build_minimaxm2() {
     ggml_cgraph * gf = new_graph_custom();
@@ -17,10 +18,13 @@ ggml_cgraph* llm_build_context::build_minimaxm2() {
 
 
     //auto * inp_attn = build_attn_inp_kv();
-    ggml_tensor * inp_out_ids = build_inp_out_ids();
+    // --- multi-stage pipeline: window [il_start,il_end); only the tail reduces out_ids ---
+    const llama_stage_cfg sc = llama_stage_get_cfg(n_layer);
+    const bool consumes_last = llama_stage_consumes_last(sc, n_layer);
+    ggml_tensor * inp_out_ids = (consumes_last && !sc.emit_hidden) ? build_inp_out_ids() : nullptr;
     ggml_tensor * KQ_mask = build_inp_KQ_mask();
 
-    for (int il = 0; il < n_layer; ++il) {
+    for (int il = sc.il_start; il < sc.il_end; ++il) {
         ggml_tensor* inpSA = inpL;
 
         cur = inpL;
@@ -261,6 +265,14 @@ ggml_cgraph* llm_build_context::build_minimaxm2() {
 
         // input for next layer
         inpL = cur;
+    }
+
+    if (sc.active && sc.emit_hidden) {
+        // STAGE EMIT: export post-window residual (all rows); skip output_norm + lm_head.
+        // Named "result_norm" -> append_pooling renames it result_embd_pooled -> extracted to embd.
+        cb(inpL, "result_norm", -1);
+        ggml_build_forward_expand(gf, inpL);
+        return gf;
     }
 
     cur = build_output(lctx, ctx0, inpL, model.output, model.output_norm, cb);

@@ -4,6 +4,10 @@
 #include <hipblas/hipblas.h>
 #include <hip/hip_fp16.h>
 #include <hip/hip_bf16.h>
+// NOTE(stage): ik_llama's HIP vendor header was missing the CUDA->HIP bfloat16 type map,
+// so ggml-cuda code using nv_bfloat16 (e.g. binbcast.cu) failed to compile under HIP.
+#define nv_bfloat16 __hip_bfloat16
+#define nv_bfloat162 __hip_bfloat162
 #ifdef __HIP_PLATFORM_AMD__
 // for rocblas_initialize()
 #include "rocblas/rocblas.h"

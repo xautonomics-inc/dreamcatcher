@@ -477,6 +477,9 @@ if (GGML_HIPBLAS)
     add_compile_definitions(GGML_CUDA_DMMV_X=${GGML_CUDA_DMMV_X})
     add_compile_definitions(GGML_CUDA_MMV_Y=${GGML_CUDA_MMV_Y})
     add_compile_definitions(K_QUANTS_PER_ITERATION=${GGML_CUDA_KQUANTS_ITER})
+    # NOTE(stage): HIP block was missing these two (the CUDA block has them) -> common.cuh:854-855 undeclared
+    add_compile_definitions(GGML_CUDA_MIN_BATCH_OFFLOAD=${GGML_CUDA_MIN_BATCH_OFFLOAD})
+    add_compile_definitions(GGML_CUDA_FUSION=${GGML_CUDA_FUSION})
 
     if (GGML_HIP_UMA)
         add_compile_definitions(GGML_HIP_UMA)
