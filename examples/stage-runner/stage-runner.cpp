@@ -103,6 +103,27 @@ static bool recv_tokens(int fd, std::vector<int32_t> & toks, int32_t & eog) {
     toks.resize(h[0]); eog = h[1];
     return recv_all(fd, toks.data(), h[0] * sizeof(int32_t));
 }
+
+// MTP back-edge (wire-compatible with the mainline tail's run_tail_pipe_mtp): one record per
+// returned wave on the DIRECT tail->head socket. The tail owns verify/draft and dictates the
+// head's next verify wave = `issue` = [conf, d_1..d_k] (k+1 rows at p_base..p_base+k).
+struct mtp_msg {
+    int32_t eog = 0;
+    int32_t n_new = 0;             // # newly-confirmed real tokens this wave (0 = filler/dummy)
+    int32_t p_base = 0;            // base pos of the NEXT wave
+    std::vector<int32_t> issue;    // next wave tokens [conf, d_1..d_k]; empty for filler/eog
+    std::vector<int32_t> out;      // the n_new confirmed tokens to emit, in order
+};
+static bool recv_mtp_msg(int fd, mtp_msg & m) {
+    int32_t hdr[4];
+    if (!recv_all(fd, hdr, sizeof(hdr))) return false;
+    m.eog = hdr[0]; m.n_new = hdr[1]; m.p_base = hdr[2];
+    m.issue.resize(hdr[3] > 0 ? hdr[3] : 0);
+    m.out.resize(m.n_new > 0 ? m.n_new : 0);
+    if (hdr[3] > 0 && !recv_all(fd, m.issue.data(), (size_t) hdr[3] * sizeof(int32_t))) return false;
+    if (m.n_new > 0 && !recv_all(fd, m.out.data(), (size_t) m.n_new * sizeof(int32_t))) return false;
+    return true;
+}
 // DROPPED for v1: mtp_msg / send_mtp_msg / recv_mtp_msg (MTP back-edge protocol).
 
 static bool write_file(const char * path, const hidden_blob & h) {
@@ -392,7 +413,7 @@ static void print_piece(model_bundle & b, int tok, int slot) {
 
 int main(int argc, char ** argv) {
     std::string model_path, prompt, in_path, out_path, role, connect_to;
-    int ngl = 999, n_ctx = 4096, listen_port = 0, max_tokens = 64, slots = 1, n_ubatch = 0, amb = 0;
+    int ngl = 999, n_ctx = 4096, listen_port = 0, max_tokens = 64, slots = 1, n_ubatch = 0, amb = 0, return_listen = 0;
     bool last = false, use_mmap = true;
     std::vector<float> tsplit;
     std::vector<std::pair<std::string,std::string>> ot_specs;   // (regex, buft-name) from --override-tensor/--cpu-moe
@@ -412,6 +433,7 @@ int main(int argc, char ** argv) {
         else if (a=="--n-ctx")      n_ctx      = atoi(nx("--n-ctx"));
         else if (a=="--n-ubatch")   n_ubatch   = atoi(nx("--n-ubatch"));
         else if (a=="--amb")        amb        = atoi(nx("--amb"));
+        else if (a=="--return-listen") return_listen = atoi(nx("--return-listen"));
         else if (a=="--max-tokens") max_tokens = atoi(nx("--max-tokens"));
         else if (a=="--last")       last       = true;
         else if (a=="--no-mmap")    use_mmap   = false;
@@ -466,7 +488,49 @@ int main(int argc, char ** argv) {
     g_amb = amb;
     if (!load(b, model_path, ngl, n_ctx, use_mmap, tsplit, split_mode, n_ubatch, buft_ovr)) return 1;
 
-    if (role == "head") {
+    if (role == "head" && getenv("STAGE_MTP") && return_listen > 0) {
+        // ===== MTP verify head (sequential; mirrors mainline stage-server gen()) =====
+        // Downstream mainline tail runs run_tail_pipe_mtp (STAGE_MTP=1): it samples, drafts a
+        // k-chain via NextN, and returns mtp_msg records on the DIRECT return socket. We issue
+        // the dictated verify wave [conf, d_1..d_k] at p_base.., trimming our own KV for the
+        // re-issued positions (rejected-draft rollback) before each decode.
+        int plen = -llama_vocab_tokenize(b.vocab, prompt.c_str(), prompt.size(), nullptr, 0, true, true);
+        std::vector<llama_token> ptoks(plen);
+        llama_vocab_tokenize(b.vocab, prompt.c_str(), prompt.size(), ptoks.data(), ptoks.size(), true, true);
+        size_t colon = connect_to.find(':');
+        int fd = tcp_connect(connect_to.substr(0,colon), atoi(connect_to.substr(colon+1).c_str()));
+        if (fd < 0) return 1;
+        int rfd = tcp_listen_accept(return_listen);
+        if (rfd < 0) { fprintf(stderr, "stage[head/mtp]: return accept failed\n"); return 1; }
+        std::vector<int32_t> tok, seq, pos;
+        for (int p = 0; p < plen; ++p) { tok.push_back(ptoks[p]); seq.push_back(0); pos.push_back(p); }
+        hidden_blob h;
+        auto pt0 = std::chrono::steady_clock::now();
+        if (!run_tokens(b, tok, seq, pos, h)) { fprintf(stderr,"stage[head/mtp]: prefill failed\n"); return 1; }
+        if (!send_hidden(fd, h)) return 1;
+        mtp_msg m;
+        if (!recv_mtp_msg(rfd, m)) { fprintf(stderr,"stage[head/mtp]: prefill return failed\n"); return 1; }
+        double psec = std::chrono::duration<double>(std::chrono::steady_clock::now() - pt0).count();
+        fprintf(stderr, "stage[head/mtp]: PREFILL %d tok in %.2fs = %.1f tok/s (full-ring)\n", plen, psec, plen/psec);
+        long n_out = 0, n_waves = 0;
+        auto t0 = std::chrono::steady_clock::now();
+        for (;;) {
+            n_out += m.n_new;
+            if (getenv("STAGE_PRINT")) for (int t : m.out) print_piece(b, t, 0);
+            if (m.eog || m.issue.empty() || n_out >= max_tokens) break;
+            std::vector<int32_t> dt = m.issue, ds(m.issue.size(), 0), dp(m.issue.size());
+            for (size_t i = 0; i < m.issue.size(); ++i) dp[i] = m.p_base + (int) i;
+            llama_kv_cache_seq_rm(b.ctx, 0, m.p_base, -1);   // rollback rejected-draft KV in OUR window
+            hidden_blob hh;
+            if (!run_tokens(b, dt, ds, dp, hh)) { fprintf(stderr,"stage[head/mtp]: verify decode failed\n"); break; }
+            if (!send_hidden(fd, hh)) break;
+            if (!recv_mtp_msg(rfd, m)) break;
+            n_waves++;
+        }
+        double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+        fprintf(stderr, "stage[head/mtp]: %ld tokens in %ld waves in %.2fs = %.2f tok/s (%.2f tok/wave)\n",
+                n_out, n_waves, sec, sec > 0 ? n_out/sec : 0.0, n_waves > 0 ? (double) n_out/n_waves : 0.0);
+    } else if (role == "head") {
         // tokenize the prompt once; replicate across `slots` sequences
         int plen = -llama_vocab_tokenize(b.vocab, prompt.c_str(), prompt.size(), nullptr, 0, true, true);
         std::vector<llama_token> ptoks(plen);
