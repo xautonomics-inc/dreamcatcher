@@ -124,6 +124,17 @@ static bool read_file(const char * path, hidden_blob & h) {
               fread(h.data.data(), sizeof(float), h.data.size(), f) == h.data.size();
     fclose(f); return ok;
 }
+// caps HELLO interop with the mainline-fork stage_conn transport: every mainline stage
+// exchanges a 24-byte RDMA-caps blob at connect/accept (connector sends first). An all-zero
+// blob means "no RDMA" (qpn==0 -> clean TCP fallback on the peer), so this pre-RDMA build
+// just mirrors the exchange with zeros. Without it a hardened mainline peer drops the conn
+// ("caps_hello failed") or reads the first wave header as caps (byte desync).
+static const size_t STAGE_CAPS_SIZE = 24;
+static bool caps_hello_shim(int fd, bool client_first) {
+    uint8_t zeros[STAGE_CAPS_SIZE] = {0}, peer[STAGE_CAPS_SIZE];
+    if (client_first) return send_all(fd, zeros, sizeof(zeros)) && recv_all(fd, peer, sizeof(peer));
+    return recv_all(fd, peer, sizeof(peer)) && send_all(fd, zeros, sizeof(zeros));
+}
 static int tcp_listen_accept(int port) {
     int s = socket(AF_INET, SOCK_STREAM, 0);
     int one = 1; setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
@@ -131,9 +142,17 @@ static int tcp_listen_accept(int port) {
     if (bind(s, (sockaddr *) &a, sizeof(a)) < 0) { perror("bind"); return -1; }
     if (listen(s, 4) < 0) { perror("listen"); return -1; }
     fprintf(stderr, "stage: listening on :%d\n", port);
-    int c = accept(s, nullptr, nullptr); close(s);
-    if (c >= 0) { int f = 1; setsockopt(c, IPPROTO_TCP, TCP_NODELAY, &f, sizeof(f)); }
-    return c;
+    for (;;) {
+        int c = accept(s, nullptr, nullptr);
+        if (c < 0) { close(s); return -1; }
+        int f = 1; setsockopt(c, IPPROTO_TCP, TCP_NODELAY, &f, sizeof(f));
+        if (!caps_hello_shim(c, /*client_first=*/false)) {   // dead backlog conn: drop, re-accept
+            fprintf(stderr, "stage: accept caps_hello failed -> re-accept\n");
+            close(c); continue;
+        }
+        close(s);
+        return c;
+    }
 }
 static int tcp_connect(const std::string & host, int port) {
     int s = socket(AF_INET, SOCK_STREAM, 0);
@@ -141,7 +160,14 @@ static int tcp_connect(const std::string & host, int port) {
     inet_pton(AF_INET, host.c_str(), &a.sin_addr);
     for (int t = 0; t < 100; ++t) {
         if (connect(s, (sockaddr *) &a, sizeof(a)) == 0) {
-            int f = 1; setsockopt(s, IPPROTO_TCP, TCP_NODELAY, &f, sizeof(f)); return s;
+            int f = 1; setsockopt(s, IPPROTO_TCP, TCP_NODELAY, &f, sizeof(f));
+            if (!caps_hello_shim(s, /*client_first=*/true)) {   // peer dropped mid-hello: retry fresh
+                fprintf(stderr, "stage: connect caps_hello failed -> retry\n");
+                close(s);
+                s = socket(AF_INET, SOCK_STREAM, 0);
+                usleep(100000); continue;
+            }
+            return s;
         }
         usleep(100000);
     }
@@ -255,6 +281,20 @@ static bool load(model_bundle & b, const std::string & path, int ngl, int n_ctx,
 
 // DROPPED for v1: mtp_kv_trim (MTP KV rollback before re-decoding a rejected draft).
 
+// ---- per-stage compute timing (STAGE_TIMING=1): windowed avg llama_decode time ----
+// Each stage logs its own avg decode (compute) time; summing across stages vs the
+// end-to-end per-token latency isolates compute from node-to-node traversal.
+static void timing_tick(long dt_ns) {
+    static bool on = getenv("STAGE_TIMING") != nullptr;
+    if (!on) return;
+    static long w_ns = 0, w_n = 0;
+    w_ns += dt_ns; w_n++;
+    if (w_n >= 50) {
+        fprintf(stderr, "stage[compute]: avg %.2f ms/decode over last %ld\n", w_ns/1e6/(double)w_n, w_n);
+        w_ns = 0; w_n = 0;
+    }
+}
+
 // Decode a TOKEN batch (head): rows tagged by (seq,pos). Extract hidden per row.
 static bool run_tokens(model_bundle & b, const std::vector<int32_t> & tok,
                        const std::vector<int32_t> & seq, const std::vector<int32_t> & pos,
@@ -266,7 +306,9 @@ static bool run_tokens(model_bundle & b, const std::vector<int32_t> & tok,
         batch.token[i] = tok[i]; batch.pos[i] = pos[i];
         batch.n_seq_id[i] = 1; batch.seq_id[i][0] = seq[i]; batch.logits[i] = 1;
     }
+    auto _t0 = std::chrono::steady_clock::now();
     bool ok = llama_decode(b.ctx, batch) == 0;
+    timing_tick(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - _t0).count());
     if (ok) {
         out.resize(n, b.n_embd); out.seq = seq; out.pos = pos;
         for (int i = 0; i < n; ++i) {
@@ -304,7 +346,9 @@ static bool run_hidden(model_bundle & b, const hidden_blob & in, bool emit, hidd
             batch.pos[i] = in.pos[off + i];
             batch.n_seq_id[i] = 1; batch.seq_id[i][0] = in.seq[off + i]; batch.logits[i] = 1;
         }
+        auto _t0 = std::chrono::steady_clock::now();
         bool ok = llama_decode(b.ctx, batch) == 0;
+        timing_tick(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - _t0).count());
         if (ok && emit) {
             for (int i = 0; i < m; ++i) {
                 const float * h = llama_get_embeddings_ith(b.ctx, i);
