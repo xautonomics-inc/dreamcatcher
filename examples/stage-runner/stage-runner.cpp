@@ -49,6 +49,7 @@
 #include <unistd.h>
 #include <chrono>
 #include <cmath>
+#include <csignal>
 
 static const int32_t STAGE_MAGIC = 0x53544732; // "STG2" (v2: per-row tagged)
 
@@ -327,30 +328,52 @@ static void timing_tick(long dt_ns) {
     }
 }
 
+// MTP rollback (mirrors mainline mtp_kv_trim): before (re)decoding a wave, drop any KV
+// at/after each row's position for its seq. Forward-only waves are a no-op; a rejected-draft
+// re-issue (and the server's identical-prompt last-token re-seed) discards stale KV first.
+static bool g_mtp = false;   // set in main(): STAGE_MTP env OR role=="server"
+static void mtp_kv_trim(model_bundle & b, const std::vector<int32_t> & seq,
+                        const std::vector<int32_t> & pos) {
+    if (!g_mtp) return;
+    for (size_t i = 0; i < seq.size(); ++i) {
+        llama_kv_cache_seq_rm(b.ctx, (llama_seq_id) seq[i], (llama_pos) pos[i], -1);
+    }
+}
+
 // Decode a TOKEN batch (head): rows tagged by (seq,pos). Extract hidden per row.
+// Chunked to <= n_ubatch rows per llama_decode: hidden extraction (llama_get_embeddings_ith)
+// is only valid for ONE ubatch (same constraint run_hidden documents below), and
+// llama_decode rejects n > n_batch — the server's 256-token prefill waves need both fixed.
 static bool run_tokens(model_bundle & b, const std::vector<int32_t> & tok,
                        const std::vector<int32_t> & seq, const std::vector<int32_t> & pos,
                        hidden_blob & out) {
     int n = (int) tok.size();
-    llama_batch batch = llama_batch_init(n, 0, 1);
-    batch.n_tokens = n;
-    for (int i = 0; i < n; ++i) {
-        batch.token[i] = tok[i]; batch.pos[i] = pos[i];
-        batch.n_seq_id[i] = 1; batch.seq_id[i][0] = seq[i]; batch.logits[i] = 1;
-    }
-    auto _t0 = std::chrono::steady_clock::now();
-    bool ok = llama_decode(b.ctx, batch) == 0;
-    timing_tick(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - _t0).count());
-    if (ok) {
-        out.resize(n, b.n_embd); out.seq = seq; out.pos = pos;
-        for (int i = 0; i < n; ++i) {
-            const float * h = llama_get_embeddings_ith(b.ctx, i);
-            if (!h) { ok = false; break; }
-            memcpy(out.data.data() + (size_t) i * b.n_embd, h, b.n_embd * sizeof(float));
+    if (n <= 0) { out.resize(0, b.n_embd); out.seq = seq; out.pos = pos; return true; }
+    const int chunk = (b.n_ubatch > 0 && b.n_ubatch < n) ? b.n_ubatch : n;
+    out.resize(n, b.n_embd); out.seq = seq; out.pos = pos;
+    mtp_kv_trim(b, seq, pos);
+    for (int off = 0; off < n; off += chunk) {
+        const int m = (n - off < chunk) ? (n - off) : chunk;
+        llama_batch batch = llama_batch_init(m, 0, 1);
+        batch.n_tokens = m;
+        for (int i = 0; i < m; ++i) {
+            batch.token[i] = tok[off + i]; batch.pos[i] = pos[off + i];
+            batch.n_seq_id[i] = 1; batch.seq_id[i][0] = seq[off + i]; batch.logits[i] = 1;
         }
+        auto _t0 = std::chrono::steady_clock::now();
+        bool ok = llama_decode(b.ctx, batch) == 0;
+        timing_tick(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - _t0).count());
+        if (ok) {
+            for (int i = 0; i < m; ++i) {
+                const float * h = llama_get_embeddings_ith(b.ctx, i);   // i = row within THIS decode
+                if (!h) { ok = false; break; }
+                memcpy(out.data.data() + (size_t) (off + i) * b.n_embd, h, b.n_embd * sizeof(float));
+            }
+        }
+        llama_batch_free(batch);
+        if (!ok) return false;
     }
-    llama_batch_free(batch);
-    return ok;
+    return true;
 }
 
 // Decode an EMBD batch (middle/tail): rows tagged by (seq,pos).
@@ -411,9 +434,15 @@ static void print_piece(model_bundle & b, int tok, int slot) {
 // DROPPED for v1: run_relay_pipe / run_tail_pipe / run_*_pipe_mtp (pipelined depth-D ring).
 // DROPPED for v1: make_mtp_ctx / mtp_draft / mtp_draft_h / build_chain (NextN self-speculation).
 
+#ifdef STAGE_SERVER
+#include "stage-server.h"
+#endif
+
 int main(int argc, char ** argv) {
+    signal(SIGPIPE, SIG_IGN);   // ring-socket send must fail with EPIPE, not kill the process
     std::string model_path, prompt, in_path, out_path, role, connect_to;
     int ngl = 999, n_ctx = 4096, listen_port = 0, max_tokens = 64, slots = 1, n_ubatch = 0, amb = 0, return_listen = 0;
+    int http_port = 8080;
     bool last = false, use_mmap = true;
     std::vector<float> tsplit;
     std::vector<std::pair<std::string,std::string>> ot_specs;   // (regex, buft-name) from --override-tensor/--cpu-moe
@@ -434,6 +463,7 @@ int main(int argc, char ** argv) {
         else if (a=="--n-ubatch")   n_ubatch   = atoi(nx("--n-ubatch"));
         else if (a=="--amb")        amb        = atoi(nx("--amb"));
         else if (a=="--return-listen") return_listen = atoi(nx("--return-listen"));
+        else if (a=="--port")       http_port  = atoi(nx("--port"));   // server role: OpenAI HTTP port
         else if (a=="--max-tokens") max_tokens = atoi(nx("--max-tokens"));
         else if (a=="--last")       last       = true;
         else if (a=="--no-mmap")    use_mmap   = false;
@@ -484,10 +514,35 @@ int main(int argc, char ** argv) {
         }
         buft_ovr.push_back({ nullptr, nullptr });   // NULL terminator
     }
+    // The server head is an MTP emit stage: force the public-embeddings path (cp.embeddings=true
+    // via STAGE_EMIT=hidden, consumed by load()) and the run_tokens KV trim regardless of env,
+    // so a bare launch works.
+    g_mtp = getenv("STAGE_MTP") != nullptr || role == "server";
+    if (role == "server") setenv("STAGE_EMIT", "hidden", 1);
+
     model_bundle b;
     g_amb = amb;
     if (!load(b, model_path, ngl, n_ctx, use_mmap, tsplit, split_mode, n_ubatch, buft_ovr)) return 1;
 
+    if (role == "server") {
+#ifdef STAGE_SERVER
+        if (connect_to.empty() || !(return_listen > 0 || listen_port > 0)) {
+            fprintf(stderr, "stage[server]: --connect HOST:PORT and --return-listen PORT required\n");
+            return 1;
+        }
+        std::string mid = model_path; size_t sl = mid.find_last_of('/');
+        if (sl != std::string::npos) mid = mid.substr(sl + 1);
+        run_server(b, connect_to, return_listen > 0 ? return_listen : listen_port,
+                   http_port, max_tokens > 64 ? max_tokens : 4096,
+                   mid.empty() ? "glm-5.2" : mid);
+        llama_free(b.ctx); llama_free_model(b.model);
+        llama_backend_free();
+        return 0;
+#else
+        fprintf(stderr, "stage: built without STAGE_SERVER; server role unavailable.\n");
+        return 1;
+#endif
+    }
     if (role == "head" && getenv("STAGE_MTP") && return_listen > 0) {
         // ===== MTP verify head (sequential; mirrors mainline stage-server gen()) =====
         // Downstream mainline tail runs run_tail_pipe_mtp (STAGE_MTP=1): it samples, drafts a
