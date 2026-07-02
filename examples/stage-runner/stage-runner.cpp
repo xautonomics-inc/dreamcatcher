@@ -254,7 +254,7 @@ static bool load(model_bundle & b, const std::string & path, int ngl, int n_ctx,
     // n_ubatch override: A770 (Intel ARC) Vulkan MUL_MAT_ID (MoE expert matmul) for
     // i-quants HANGS the compute engine when the physical ubatch token count > 8.
     // Capping n_ubatch to 8 on A770 forces every prefill ubatch through the vec path.
-    cp.n_ctx = n_ctx; cp.n_batch = n_ctx; cp.n_ubatch = (n_ubatch > 0) ? n_ubatch : n_ctx;
+    cp.n_ctx = n_ctx; cp.n_batch = (n_ctx < 2048 ? n_ctx : 2048); cp.n_ubatch = (n_ubatch > 0) ? n_ubatch : cp.n_batch;   // mainline parity: unbounded n_batch sizes compute buffers for n_ctx-token batches (131 GiB/device at 16K)
     cp.n_seq_max = 64; cp.pooling_type = LLAMA_POOLING_TYPE_NONE;
     // NOTE: mainline's cp.no_perf does not exist on ik_llama's llama_context_params; dropped.
     // Emit stages need embeddings on so llama_get_embeddings_ith() returns the per-row
