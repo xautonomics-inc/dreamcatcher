@@ -218,6 +218,7 @@ struct model_bundle {
     const llama_vocab * vocab = nullptr; int n_embd = 0, n_vocab = 0;
     int n_ubatch = 0;   // physical ubatch cap (= cp.n_ubatch); run_hidden chunks the emit to this so embeddings extraction stays single-ubatch (multi-slot fix)
 };
+static int g_amb = 0;   // --amb: ik attn_max_batch (caps the attention compute scratch; mandatory at long ctx)
 static bool load(model_bundle & b, const std::string & path, int ngl, int n_ctx, bool use_mmap,
                  const std::vector<float> & tsplit, int split_mode, int n_ubatch,
                  const std::vector<llama_model_tensor_buft_override> & buft_ovr) {
@@ -256,6 +257,7 @@ static bool load(model_bundle & b, const std::string & path, int ngl, int n_ctx,
     // Capping n_ubatch to 8 on A770 forces every prefill ubatch through the vec path.
     cp.n_ctx = n_ctx; cp.n_batch = (n_ctx < 2048 ? n_ctx : 2048); cp.n_ubatch = (n_ubatch > 0) ? n_ubatch : cp.n_batch;   // mainline parity: unbounded n_batch sizes compute buffers for n_ctx-token batches (131 GiB/device at 16K)
     cp.n_seq_max = 64; cp.pooling_type = LLAMA_POOLING_TYPE_NONE;
+    if (g_amb > 0) cp.attn_max_batch = g_amb;
     // NOTE: mainline's cp.no_perf does not exist on ik_llama's llama_context_params; dropped.
     // Emit stages need embeddings on so llama_get_embeddings_ith() returns the per-row
     // hidden state (the staging handoff). Pooling stays NONE so rows are returned in
@@ -381,7 +383,7 @@ static void print_piece(model_bundle & b, int tok, int slot) {
 
 int main(int argc, char ** argv) {
     std::string model_path, prompt, in_path, out_path, role, connect_to;
-    int ngl = 999, n_ctx = 4096, listen_port = 0, max_tokens = 64, slots = 1, n_ubatch = 0;
+    int ngl = 999, n_ctx = 4096, listen_port = 0, max_tokens = 64, slots = 1, n_ubatch = 0, amb = 0;
     bool last = false, use_mmap = true;
     std::vector<float> tsplit;
     std::vector<std::pair<std::string,std::string>> ot_specs;   // (regex, buft-name) from --override-tensor/--cpu-moe
@@ -400,6 +402,7 @@ int main(int argc, char ** argv) {
         else if (a=="-ngl")         ngl        = atoi(nx("-ngl"));
         else if (a=="--n-ctx")      n_ctx      = atoi(nx("--n-ctx"));
         else if (a=="--n-ubatch")   n_ubatch   = atoi(nx("--n-ubatch"));
+        else if (a=="--amb")        amb        = atoi(nx("--amb"));
         else if (a=="--max-tokens") max_tokens = atoi(nx("--max-tokens"));
         else if (a=="--last")       last       = true;
         else if (a=="--no-mmap")    use_mmap   = false;
@@ -451,6 +454,7 @@ int main(int argc, char ** argv) {
         buft_ovr.push_back({ nullptr, nullptr });   // NULL terminator
     }
     model_bundle b;
+    g_amb = amb;
     if (!load(b, model_path, ngl, n_ctx, use_mmap, tsplit, split_mode, n_ubatch, buft_ovr)) return 1;
 
     if (role == "head") {
