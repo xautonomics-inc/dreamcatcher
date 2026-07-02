@@ -223,6 +223,13 @@ static bool load(model_bundle & b, const std::string & path, int ngl, int n_ctx,
                  const std::vector<float> & tsplit, int split_mode, int n_ubatch,
                  const std::vector<llama_model_tensor_buft_override> & buft_ovr) {
     llama_model_params mp = llama_model_default_params(); mp.n_gpu_layers = ngl; mp.use_mmap = use_mmap;
+    // ik's llm_load_tensors VRAM planner sizes per-device compute buffers from MODEL params
+    // (max_ctx_size, n_seq_max, n_ubatch, amb) — defaults left unset made it demand 128 GiB/device
+    // (n_seq_max=64 x 16K ctx) and misplace every layer. Feed it the real run shape.
+    mp.max_ctx_size = (uint32_t) n_ctx;
+    mp.n_seq_max    = 1;                     // single-slot stage; raise with --slots when multi-seq lands
+    mp.n_ubatch     = (n_ubatch > 0) ? n_ubatch : (n_ctx < 2048 ? n_ctx : 2048);
+    if (g_amb > 0) mp.amb = g_amb;
     if (split_mode >= 0) mp.split_mode = (enum llama_split_mode) split_mode;   // 1=layer(pipeline), 2=row/attn(TP)
     // ---- ik_llama fast-path model flags (mirror common.cpp's mparams.* mapping) ----
     // -rtr / run-time tensor repack: model param `repack_tensors` (confirmed include/llama.h).
