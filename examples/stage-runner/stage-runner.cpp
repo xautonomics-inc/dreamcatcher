@@ -230,6 +230,8 @@ static bool load(model_bundle & b, const std::string & path, int ngl, int n_ctx,
     mp.n_seq_max    = 1;                     // single-slot stage; raise with --slots when multi-seq lands
     mp.n_ubatch     = (n_ubatch > 0) ? n_ubatch : (n_ctx < 2048 ? n_ctx : 2048);
     if (g_amb > 0) mp.amb = g_amb;
+    mp.fit = true;   // ik auto-fit: planner adds per-layer expert-CPU overrides until the model fits
+                     // (fleet-preferred over manual -ot; no-op when everything fits on GPU)
     if (split_mode >= 0) mp.split_mode = (enum llama_split_mode) split_mode;   // 1=layer(pipeline), 2=row/attn(TP)
     // ---- ik_llama fast-path model flags (mirror common.cpp's mparams.* mapping) ----
     // -rtr / run-time tensor repack: model param `repack_tensors` (confirmed include/llama.h).
