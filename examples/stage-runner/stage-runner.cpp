@@ -241,6 +241,17 @@ struct model_bundle {
     int n_ubatch = 0;   // physical ubatch cap (= cp.n_ubatch); run_hidden chunks the emit to this so embeddings extraction stays single-ubatch (multi-slot fix)
 };
 static int g_amb = 0;   // --amb: ik attn_max_batch (caps the attention compute scratch; mandatory at long ctx)
+static int g_n_seq_max = 0;   // --n-seq-max: max concurrent KV sequences. per-seq ctx = n_ctx / n_seq_max
+                              // (llama's unified cache is partitioned by seq). 0 -> legacy default
+                              // (mp=1 seq / cp=64). The multi-slot pipelined server needs this >= slots
+                              // on EVERY stage (head+relays+tail) or a seq's positions overflow its
+                              // partition and the ring drops (the current default-64 relays cap a single
+                              // seq at 16384/64 = 256 positions).
+static int g_fit_margin = 0;  // --fit-margin MiB: VRAM auto-fit reserves per GPU before offloading
+                              // experts to CPU. ik's default is 1 GiB, which UNDER-counts the CUDA/NCCL
+                              // runtime context (~2.5 GiB/GPU) + co-tenant (k8s/Proxmox) VRAM on shared
+                              // nodes -> the planner keeps too many experts on GPU and OOMs at high KV.
+                              // Raise it (e.g. 4000) so fit sheds enough experts to leave real headroom.
 static bool load(model_bundle & b, const std::string & path, int ngl, int n_ctx, bool use_mmap,
                  const std::vector<float> & tsplit, int split_mode, int n_ubatch,
                  const std::vector<llama_model_tensor_buft_override> & buft_ovr) {
@@ -249,11 +260,16 @@ static bool load(model_bundle & b, const std::string & path, int ngl, int n_ctx,
     // (max_ctx_size, n_seq_max, n_ubatch, amb) — defaults left unset made it demand 128 GiB/device
     // (n_seq_max=64 x 16K ctx) and misplace every layer. Feed it the real run shape.
     mp.max_ctx_size = (uint32_t) n_ctx;
-    mp.n_seq_max    = 1;                     // single-slot stage; raise with --slots when multi-seq lands
+    mp.n_seq_max    = (g_n_seq_max > 0) ? (uint32_t) g_n_seq_max : 1;   // multi-slot: size the planner's
+                                             // per-device compute buffers for the real seq count (was
+                                             // hard 1). n_ubatch is tiny (32) so the growth is modest.
     mp.n_ubatch     = (n_ubatch > 0) ? n_ubatch : (n_ctx < 2048 ? n_ctx : 2048);
     if (g_amb > 0) mp.amb = g_amb;
-    mp.fit = true;   // ik auto-fit: planner adds per-layer expert-CPU overrides until the model fits
-                     // (fleet-preferred over manual -ot; no-op when everything fits on GPU)
+    if (g_fit_margin > 0) mp.fit_margin = g_fit_margin;   // per-GPU VRAM reserve before fit offloads (MiB)
+    mp.fit = buft_ovr.empty();   // ik auto-fit: planner adds per-layer expert-CPU overrides until the
+                     // model fits (fleet-preferred; no-op when everything fits). ik FORBIDS fit together
+                     // with MANUAL tensor overrides ("cannot be used with --fit"), so disable auto-fit
+                     // whenever -ot/-cmoe is given and honour the explicit overrides instead.
     if (split_mode >= 0) mp.split_mode = (enum llama_split_mode) split_mode;   // 1=layer(pipeline), 2=row/attn(TP)
     // ---- ik_llama fast-path model flags (mirror common.cpp's mparams.* mapping) ----
     // -rtr / run-time tensor repack: model param `repack_tensors` (confirmed include/llama.h).
@@ -287,7 +303,7 @@ static bool load(model_bundle & b, const std::string & path, int ngl, int n_ctx,
     // i-quants HANGS the compute engine when the physical ubatch token count > 8.
     // Capping n_ubatch to 8 on A770 forces every prefill ubatch through the vec path.
     cp.n_ctx = n_ctx; cp.n_batch = (n_ctx < 2048 ? n_ctx : 2048); cp.n_ubatch = (n_ubatch > 0) ? n_ubatch : cp.n_batch;   // mainline parity: unbounded n_batch sizes compute buffers for n_ctx-token batches (131 GiB/device at 16K)
-    cp.n_seq_max = 64; cp.pooling_type = LLAMA_POOLING_TYPE_NONE;
+    cp.n_seq_max = (g_n_seq_max > 0) ? g_n_seq_max : 64; cp.pooling_type = LLAMA_POOLING_TYPE_NONE;
     if (g_amb > 0) cp.attn_max_batch = g_amb;
     // NOTE: mainline's cp.no_perf does not exist on ik_llama's llama_context_params; dropped.
     // Emit stages need embeddings on so llama_get_embeddings_ith() returns the per-row
@@ -461,6 +477,8 @@ int main(int argc, char ** argv) {
         else if (a=="-ngl")         ngl        = atoi(nx("-ngl"));
         else if (a=="--n-ctx")      n_ctx      = atoi(nx("--n-ctx"));
         else if (a=="--n-ubatch")   n_ubatch   = atoi(nx("--n-ubatch"));
+        else if (a=="--n-seq-max")  g_n_seq_max = atoi(nx("--n-seq-max"));   // max concurrent KV seqs (per-seq ctx = n_ctx/this)
+        else if (a=="--fit-margin") g_fit_margin = atoi(nx("--fit-margin")); // per-GPU VRAM reserve (MiB) before auto-fit offloads experts
         else if (a=="--amb")        amb        = atoi(nx("--amb"));
         else if (a=="--return-listen") return_listen = atoi(nx("--return-listen"));
         else if (a=="--port")       http_port  = atoi(nx("--port"));   // server role: OpenAI HTTP port
@@ -532,9 +550,21 @@ int main(int argc, char ** argv) {
         }
         std::string mid = model_path; size_t sl = mid.find_last_of('/');
         if (sl != std::string::npos) mid = mid.substr(sl + 1);
-        run_server(b, connect_to, return_listen > 0 ? return_listen : listen_port,
-                   http_port, max_tokens > 64 ? max_tokens : 4096,
-                   mid.empty() ? "glm-5.2" : mid);
+        // --slots N (N>1) or STAGE_PIPELINE_SLOTS routes to the STAGGERED multi-slot scheduler:
+        // up to N independent requests keep one wave each in flight so different ring stages work
+        // on different requests simultaneously (pipeline parallelism). --slots 1 (default) keeps the
+        // proven synchronous prefix-cached single-slot path untouched.
+        int pslots = slots;
+        if (const char * e = getenv("STAGE_PIPELINE_SLOTS")) { int v = atoi(e); if (v > pslots) pslots = v; }
+        const int ret_p = return_listen > 0 ? return_listen : listen_port;
+        const int dmax  = max_tokens > 64 ? max_tokens : 4096;
+        if (pslots > 1) {
+            run_server_pipelined(b, connect_to, ret_p, http_port, dmax,
+                                 mid.empty() ? "glm-5.2" : mid, pslots,
+                                 g_n_seq_max > 0 ? g_n_seq_max : pslots);
+        } else {
+            run_server(b, connect_to, ret_p, http_port, dmax, mid.empty() ? "glm-5.2" : mid);
+        }
         llama_free(b.ctx); llama_free_model(b.model);
         llama_backend_free();
         return 0;
