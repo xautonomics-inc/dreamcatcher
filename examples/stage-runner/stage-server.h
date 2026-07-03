@@ -108,12 +108,20 @@ static void run_server(model_bundle & b, const std::string & connect_to, int ret
         static bool allow_cache = getenv("STAGE_NO_PREFIX_CACHE") == nullptr;
         static int mtp_k = []{ const char * e = getenv("STAGE_MTP_NDRAFT"); int k = e ? atoi(e) : 1; return k < 1 ? 1 : (k > 7 ? 7 : k); }();
         size_t L = 0; if (allow_cache) while (L < cached.size() && L < prompt.size() && cached[L] == prompt[L]) ++L;
-        // reset (full prefill) if: no connection, prompt diverges from cache, or the append delta is
-        // exactly 1+K rows (a tail verify wave is 1+K rows -> indistinguishable; the tail would misread it).
-        bool reset = (fd < 0) || (L < cached.size()) || ((int) (prompt.size() - L) == mtp_k + 1);
+        // reset (full prefill) only if there is no connection or the new prompt diverges from the cache.
+        // An append whose delta happens to be k+1 rows no longer forces a reset: the tail re-primes on
+        // ANY non-(k+1)-row wave, and we split any would-be k+1-row prefill wave into (k,1) below, so
+        // no prefill/append wave is ever mistaken for a verify wave. Appends therefore always stay fast.
+        bool reset = (fd < 0) || (L < cached.size());
         if (reset) { if (!ring_connect()) return 0; L = 0; }
+        // Re-seed the last accepted token on the append path. A partial-accept turn-end leaves the tail's
+        // KV at position L-1 holding a REJECTED draft: the tail dictated a next-verify wave that would
+        // have re-decoded L-1 with the accepted token, but generation stopped and that wave never went
+        // out. Re-decoding position L-1 here repairs it before the new suffix attends to it. (The tail
+        // re-prime then rebuilds its draft state around this wave.) Also covers the identical-prompt case.
         size_t start = L;
-        if (start >= prompt.size()) start = prompt.size() ? prompt.size() - 1 : 0;   // identical prompt: re-seed last token
+        if (!reset && L > 0) start = L - 1;
+        if (start >= prompt.size()) start = prompt.size() ? prompt.size() - 1 : 0;
         const size_t total = prompt.size();
         const size_t prefill_n = (total > start) ? total - start : 0;
         fprintf(stderr, "server: req prompt=%zu cached=%zu prefix=%zu prefill=%zu %s\n",
@@ -125,19 +133,25 @@ static void run_server(model_bundle & b, const std::string & connect_to, int ret
         // stay in the proven append regime; KV accumulates across waves. Intermediate waves' mtp
         // replies are mid-prompt samples (discarded); only the FINAL wave's m generates.
         static int pf_wave = []{ const char * e = getenv("STAGE_PREFILL_WAVE"); int w = e ? atoi(e) : 256; return w < 1 ? 256 : w; }();
-        // Build wave end-offsets; ensure NO wave is exactly mtp_k+1 rows (a primed tail would misread
-        // it as a verify wave). Only a trailing remainder can be small -> borrow a row from the prev wave.
-        std::vector<size_t> ends;
-        for (size_t off = start; off < total; ) { size_t e = (off + (size_t) pf_wave < total) ? off + (size_t) pf_wave : total; ends.push_back(e); off = e; }
-        if (ends.size() >= 2 && (int) (total - ends[ends.size() - 2]) == mtp_k + 1) ends[ends.size() - 2] -= 1;
+        // Build wave SIZES, chunking to <= pf_wave. HARD GUARANTEE: no wave is exactly mtp_k+1 rows --
+        // a primed tail re-primes on any non-(k+1)-row wave, so a k+1-row prefill/append wave would be
+        // misread as a verify wave. Any wave that would be k+1 rows is split into (k, 1); for k>=1 both
+        // k and 1 are strictly < k+1, so neither sub-wave can be mistaken either.
+        std::vector<size_t> wsz;
+        for (size_t rem = prefill_n; rem > 0; ) {
+            size_t w = rem < (size_t) pf_wave ? rem : (size_t) pf_wave;
+            if (w == (size_t) (mtp_k + 1)) { wsz.push_back((size_t) mtp_k); wsz.push_back(1); }
+            else                           { wsz.push_back(w); }
+            rem -= w;
+        }
         mtp_msg m;
         size_t woff = start;
-        for (size_t wi = 0; wi < ends.size(); ++wi) {
-            const size_t wend = ends[wi];
+        for (size_t wi = 0; wi < wsz.size(); ++wi) {
+            const size_t wend = woff + wsz[wi];
             std::vector<int32_t> tk, sq, ps;
             for (size_t p = woff; p < wend; ++p) { tk.push_back(prompt[p]); sq.push_back(0); ps.push_back((int) p); }
             hidden_blob h;
-            if (!run_tokens(b, tk, sq, ps, h)) { fprintf(stderr, "server: prefill run_tokens FAILED (wave %zu/%zu rows=%zu)\n", wi + 1, ends.size(), tk.size()); ring_close(); return 0; }
+            if (!run_tokens(b, tk, sq, ps, h)) { fprintf(stderr, "server: prefill run_tokens FAILED (wave %zu/%zu rows=%zu)\n", wi + 1, wsz.size(), tk.size()); ring_close(); return 0; }
             errno = 0;
             if (!send_hidden(fd, h))           { fprintf(stderr, "server: prefill send_hidden FAILED errno=%d (%s)\n", errno, strerror(errno)); ring_close(); return 0; }
             errno = 0;
