@@ -7,9 +7,10 @@
 #   curl -s http://${STAGE_HEAD_HOST}:8080/v1/completions -d '{"prompt":"Hello","max_tokens":32}'
 #   curl -sN http://${STAGE_HEAD_HOST}:8080/v1/chat/completions \
 #        -d '{"messages":[{"role":"user","content":"hi"}],"stream":true,"max_tokens":32}'
-# Prefix-cache append is ON by default (STAGE_NO_PREFIX_CACHE to disable). Single-turn +
-# streaming validated end-to-end; multi-turn append-then-generate hits the tail return-edge
-# re-prime rough edge (see ring-debug-quickstart.md). MTP k is a TAIL env knob only.
+# Prefix-cache append is ON by default (STAGE_NO_PREFIX_CACHE to disable). Append path FIXED
+# 2026-07-03 (tail re-prime 55513d47 + server re-seed b0d4575): /v1/completions multi-turn append
+# runs MTP correctly (64% accept, no churn). Chat multi-turn still full-prefills (retok roundtrip;
+# correct, no cache reuse). Requires the tail on binary >= .reprime2. MTP k is a TAIL env knob only.
 set -u
 NV=${STAGE_HEAD_HOST}
 PORT=${1:-8080}
