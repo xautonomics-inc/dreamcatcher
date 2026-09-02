@@ -4,6 +4,7 @@
 #include "llama-model.h"
 #include "ggml.h"
 #include <memory>
+#include <cinttypes>
 //#include "ggml-backend.h"
 
 #ifdef GGML_USE_CUDA
@@ -303,7 +304,8 @@ static void coalesce_ranges(std::vector<llama_file_range> & ranges) {
 llama_model_loader::llama_model_loader(const std::string & fname, int ncmoe, bool use_mmap, bool check_tensors,
         bool repack_tensors, bool use_thp, bool merge_qkv, bool merge_up_gate_exps, bool defer_experts,
         const llama_model_kv_override * param_overrides_p,
-        const llama_model_tensor_buft_override * param_tensor_buft_overrides_p) {
+        const llama_model_tensor_buft_override * param_tensor_buft_overrides_p,
+        const llama_model_part * parts, size_t n_parts) {
     int trace = 0;
     if (getenv("LLAMA_TRACE")) {
         trace = atoi(getenv("LLAMA_TRACE"));
@@ -341,22 +343,152 @@ llama_model_loader::llama_model_loader(const std::string & fname, int ncmoe, boo
         /*.ctx      = */ &ctx,
     };
 
-    meta = gguf_init_from_file(fname.c_str(), params);
-    if (!meta) {
-        throw std::runtime_error(format("%s: failed to load model from %s\n", __func__, fname.c_str()));
-    }
+    if (parts != nullptr && n_parts > 0) {
+        // Layer-library assembly (llama_model_load_from_parts): combine N GGUF part
+        // files (per-layer slices + embd/output/nextn parts, see slice_gguf_layers.py)
+        // into ONE logical model. Every file's blk.J tensors are remapped to
+        // blk.(blk_base+J); the window-shape keys (block_count,
+        // leading_dense_block_count, nextn_predict_layers) are re-derived as the SUM of
+        // the per-file values and injected as internal KV overrides, so hparams see
+        // exactly what a monolithic slice of the same window would carry. All other KV
+        // metadata comes from parts[0].
+        if (!fname.empty()) {
+            throw std::runtime_error(format("%s: parts assembly and fname are mutually exclusive", __func__));
+        }
 
-    get_key(llm_kv(LLM_KV_GENERAL_ARCHITECTURE), arch_name, false);
-    llm_kv = LLM_KV(llm_arch_from_string(arch_name));
+        std::set<int32_t> blk_seen;
 
-    files.emplace_back(new llama_file(fname.c_str(), "rb"));
-    contexts.emplace_back(ctx);
+        // window-shape keys, summed across part files
+        static const enum llm_kv shape_kv[3] = { LLM_KV_BLOCK_COUNT, LLM_KV_LEADING_DENSE_BLOCK_COUNT, LLM_KV_NEXTN_PREDICT_LAYERS };
+        int64_t sum_shape[3]  = { 0, 0, 0 };
+        bool    have_shape[3] = { false, false, false };
 
-    // Save tensors data offset of the main file.
-    // For subsidiary files, `meta` tensor data offset must not be used,
-    // so we build a unified tensors index for weights.
-    for (ggml_tensor * cur = ggml_get_first_tensor(ctx); cur; cur = ggml_get_next_tensor(ctx, cur)) {
-        weights.emplace_back(files.back().get(), 0, cur->name, meta, cur);
+        auto gguf_get_int = [](const gguf_context * g, int kid) -> int64_t {
+            switch (gguf_get_kv_type(g, kid)) {
+                case GGUF_TYPE_UINT8:  return gguf_get_val_u8 (g, kid);
+                case GGUF_TYPE_INT8:   return gguf_get_val_i8 (g, kid);
+                case GGUF_TYPE_UINT16: return gguf_get_val_u16(g, kid);
+                case GGUF_TYPE_INT16:  return gguf_get_val_i16(g, kid);
+                case GGUF_TYPE_UINT32: return gguf_get_val_u32(g, kid);
+                case GGUF_TYPE_INT32:  return gguf_get_val_i32(g, kid);
+                case GGUF_TYPE_UINT64: return (int64_t) gguf_get_val_u64(g, kid);
+                case GGUF_TYPE_INT64:  return gguf_get_val_i64(g, kid);
+                default:
+                    throw std::runtime_error("part assembly: window-shape key is not an integer type");
+            }
+        };
+
+        for (size_t i = 0; i < n_parts; ++i) {
+            const char *  fname_part = parts[i].path;
+            const int32_t blk_base   = parts[i].blk_base;
+
+            ctx = NULL;
+            struct gguf_context * meta_part = gguf_init_from_file(fname_part, params);
+            if (!meta_part) {
+                throw std::runtime_error(format("%s: failed to load GGUF part from %s", __func__, fname_part));
+            }
+
+            if (i == 0) {
+                meta = meta_part;
+
+                get_key(llm_kv(LLM_KV_GENERAL_ARCHITECTURE), arch_name, false);
+                llm_kv = LLM_KV(llm_arch_from_string(arch_name));
+            }
+
+            files.emplace_back(new llama_file(fname_part, "rb"));
+            contexts.emplace_back(ctx);
+
+            for (int s = 0; s < 3; ++s) {
+                const std::string key = llm_kv(shape_kv[s]);
+                const int kid = gguf_find_key(meta_part, key.c_str());
+                if (kid >= 0) {
+                    sum_shape[s] += gguf_get_int(meta_part, kid);
+                    have_shape[s] = true;
+                }
+            }
+
+            // resolve each tensor's data offset via its ORIGINAL name, then remap
+            // blk.J -> blk.(blk_base+J) before registering it in the weights index
+            for (ggml_tensor * cur = ggml_get_first_tensor(ctx); cur; cur = ggml_get_next_tensor(ctx, cur)) {
+                const std::string name_orig = ggml_get_name(cur);
+                std::string name_new = name_orig;
+                if (name_orig.compare(0, 4, "blk.") == 0) {
+                    const size_t dot = name_orig.find('.', 4);
+                    if (dot != std::string::npos) {
+                        const int j = atoi(name_orig.substr(4, dot - 4).c_str());
+                        name_new = format("blk.%d%s", blk_base + j, name_orig.c_str() + dot);
+                        blk_seen.insert(blk_base + j);
+                    }
+                }
+                for (auto & w : weights) {
+                    if (name_new == w.tensor->name) {
+                        throw std::runtime_error(format("invalid assembly: tensor '%s' (from %s) is duplicated", name_new.c_str(), fname_part));
+                    }
+                }
+                llama_tensor_weight w(files.back().get(), (uint16_t) i, name_orig.c_str(), meta_part, cur);
+                ggml_set_name(cur, name_new.c_str());
+                weights.emplace_back(std::move(w));
+
+                if (trace > 0) {
+                    LLAMA_LOG_INFO("%s: - part %2zu (base %3d): %s -> %s\n", __func__, i, blk_base, name_orig.c_str(), name_new.c_str());
+                }
+            }
+
+            // only parts[0]'s metadata is kept (as `meta`); the rest is needed no longer
+            if (i > 0) {
+                gguf_free(meta_part);
+            }
+        }
+
+        // the assembled window must cover blk.0 .. blk.(block_count-1) with no gaps
+        const int64_t n_blk = have_shape[0] ? sum_shape[0] : 0;
+        for (int64_t j = 0; j < n_blk; ++j) {
+            if (blk_seen.find((int32_t) j) == blk_seen.end()) {
+                throw std::runtime_error(format("invalid assembly: no tensors for blk.%d (window block_count=%d)", (int) j, (int) n_blk));
+            }
+        }
+        if (!blk_seen.empty() && (int64_t) *blk_seen.rbegin() >= n_blk) {
+            throw std::runtime_error(format("invalid assembly: blk.%d beyond window block_count=%d", (int) *blk_seen.rbegin(), (int) n_blk));
+        }
+
+        // inject the summed window-shape values as internal overrides (an explicit
+        // user override for the same key wins)
+        for (int s = 0; s < 3; ++s) {
+            if (!have_shape[s]) {
+                continue;
+            }
+            const std::string key = llm_kv(shape_kv[s]);
+            if (kv_overrides.find(key) != kv_overrides.end()) {
+                continue;
+            }
+            llama_model_kv_override o;
+            memset(&o, 0, sizeof(o));
+            o.tag = LLAMA_KV_OVERRIDE_TYPE_INT;
+            snprintf(o.key, sizeof(o.key), "%s", key.c_str());
+            o.val_i64 = sum_shape[s];
+            kv_overrides.emplace(key, o);
+        }
+
+        LLAMA_LOG_INFO("%s: assembled %zu parts: block_count=%d leading_dense_block_count=%d nextn_predict_layers=%d (%zu tensors)\n",
+                __func__, n_parts, (int) sum_shape[0], (int) sum_shape[1], (int) sum_shape[2], weights.size());
+    } else {
+        meta = gguf_init_from_file(fname.c_str(), params);
+        if (!meta) {
+            throw std::runtime_error(format("%s: failed to load model from %s\n", __func__, fname.c_str()));
+        }
+
+        get_key(llm_kv(LLM_KV_GENERAL_ARCHITECTURE), arch_name, false);
+        llm_kv = LLM_KV(llm_arch_from_string(arch_name));
+
+        files.emplace_back(new llama_file(fname.c_str(), "rb"));
+        contexts.emplace_back(ctx);
+
+        // Save tensors data offset of the main file.
+        // For subsidiary files, `meta` tensor data offset must not be used,
+        // so we build a unified tensors index for weights.
+        for (ggml_tensor * cur = ggml_get_first_tensor(ctx); cur; cur = ggml_get_next_tensor(ctx, cur)) {
+            weights.emplace_back(files.back().get(), 0, cur->name, meta, cur);
+        }
     }
     uint16_t n_split = 0;
     get_key(llm_kv(LLM_KV_SPLIT_COUNT), n_split, false);
@@ -434,7 +566,9 @@ llama_model_loader::llama_model_loader(const std::string & fname, int ncmoe, boo
     }
 
     LLAMA_LOG_INFO("%s: loaded meta data with %d key-value pairs and %d tensors from %s (version %s)\n",
-            __func__, n_kv, n_tensors, fname.c_str(), llama_file_version_name(fver));
+            __func__, n_kv, n_tensors,
+            !fname.empty() ? fname.c_str() : (n_parts > 0 ? format("(assembly of %zu parts, first: %s)", n_parts, parts[0].path).c_str() : "(file*)"),
+            llama_file_version_name(fver));
 
     // determine file type based on the number of tensors for each quantization and print meta data
     // TODO: make optional
@@ -1368,6 +1502,39 @@ bool llama_model_loader::load_all_data(
     }
     if (validation_failed) {
         throw std::runtime_error("found tensors with invalid data");
+    }
+
+    // LLAMA_DUMP_TENSOR_HASH=1: log a FNV-1a 64 hash of every loaded tensor's
+    // in-memory data. Lets a layer-library assembly be proven byte-identical to
+    // the equivalent monolithic slice (debug only; reads every tensor back).
+    if (getenv("LLAMA_DUMP_TENSOR_HASH")) {
+        LLAMA_LOG_INFO("\ntensor-hash: === ctx %p ===\n", (void *) ctx);
+        std::vector<uint8_t> hbuf;
+        for (ggml_tensor * t = ggml_get_first_tensor(ctx); t != nullptr; t = ggml_get_next_tensor(ctx, t)) {
+            if (t->buffer == nullptr && t->data == nullptr) {
+                LLAMA_LOG_INFO("tensor-hash: %-48s SKIP (no data)\n", ggml_get_name(t));
+                continue;
+            }
+            const size_t nb = ggml_nbytes(t);
+            uint64_t h = 0xcbf29ce484222325ull;
+            auto fnv = [&h](const uint8_t * p, size_t n) {
+                for (size_t k = 0; k < n; ++k) {
+                    h = (h ^ p[k]) * 0x100000001b3ull;
+                }
+            };
+            if (t->buffer == nullptr || ggml_backend_buffer_is_host(t->buffer)) {
+                fnv((const uint8_t *) t->data, nb);
+            } else {
+                const size_t chunk = 8u*1024*1024;
+                hbuf.resize(std::min(nb, chunk));
+                for (size_t off = 0; off < nb; off += chunk) {
+                    const size_t n = std::min(chunk, nb - off);
+                    ggml_backend_tensor_get(t, hbuf.data(), off, n);
+                    fnv(hbuf.data(), n);
+                }
+            }
+            LLAMA_LOG_INFO("tensor-hash: %-48s %016" PRIx64 " (%zu bytes)\n", ggml_get_name(t), h, nb);
+        }
     }
 
     // check if this is the last call and do final cleanup

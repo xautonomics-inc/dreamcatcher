@@ -4962,12 +4962,13 @@ static bool llm_load_tensors(
 }
 
 // Returns 0 on success, -1 on error, and -2 on cancellation via llama_progress_callback
-static int llama_model_load(const std::string & fname, llama_model & model, llama_model_params & params) {
+static int llama_model_load(const std::string & fname, llama_model & model, llama_model_params & params,
+        const llama_model_part * parts = nullptr, size_t n_parts = 0) {
     try {
         llama_model_loader ml(fname, params.ncmoe, params.use_mmap, params.check_tensors,
                 params.repack_tensors, params.use_thp, params.merge_qkv, params.merge_up_gate_exps,
                 params.defer_experts,
-                params.kv_overrides, params.tensor_buft_overrides);
+                params.kv_overrides, params.tensor_buft_overrides, parts, n_parts);
 
         model.hparams.vocab_only = params.vocab_only;
 
@@ -7740,9 +7741,11 @@ static std::string create_rpc_name(std::string endpoint, uint32_t device) {
     return dev_name;
 }
 
-struct llama_model * llama_model_load_from_file(
+static llama_model * llama_model_load_common(
         const char * path_model,
-        struct llama_model_params   params) {
+        struct llama_model_params   params,
+        const llama_model_part * parts,
+        size_t n_parts) {
     ggml_time_init();
 
     llama_model * model = new llama_model;
@@ -7843,7 +7846,7 @@ struct llama_model * llama_model_load_from_file(
                 description_size / 1024 / 1024);
         }
     }
-    int status = llama_model_load(path_model, *model, params);
+    int status = llama_model_load(path_model ? path_model : "", *model, params, parts, n_parts);
     GGML_ASSERT(status <= 0);
     if (status < 0) {
         if (status == -1) {
@@ -7858,6 +7861,23 @@ struct llama_model * llama_model_load_from_file(
     llama_all_loaded_models().push_back(model);
 
     return model;
+}
+
+struct llama_model * llama_model_load_from_file(
+        const char * path_model,
+        struct llama_model_params   params) {
+    return llama_model_load_common(path_model, params, nullptr, 0);
+}
+
+struct llama_model * llama_model_load_from_parts(
+        const struct llama_model_part * parts,
+        size_t   n_parts,
+        struct llama_model_params    params) {
+    if (parts == nullptr || n_parts == 0) {
+        LLAMA_LOG_ERROR("%s: list of parts is empty\n", __func__);
+        return nullptr;
+    }
+    return llama_model_load_common(/*path_model*/ nullptr, params, parts, n_parts);
 }
 
 void llama_free_model(struct llama_model * model) {
