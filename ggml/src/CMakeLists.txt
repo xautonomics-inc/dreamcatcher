@@ -608,8 +608,37 @@ if (GGML_RPC)
         set(GGML_EXTRA_LIBS ${GGML_EXTRA_LIBS} ws2_32)
     endif()
 
-    set(GGML_HEADERS_RPC ../include/ggml-rpc.h)
-    set(GGML_SOURCES_RPC ggml-rpc.cpp)
+    set(GGML_HEADERS_RPC ../include/ggml-rpc.h
+                         ggml-rpc/transport.h
+                         ggml-rpc/rma-channel.h)
+    set(GGML_SOURCES_RPC ggml-rpc.cpp
+                         ggml-rpc/transport.cpp)
+    set(GGML_EXTRA_INCLUDES ${GGML_EXTRA_INCLUDES} ${CMAKE_CURRENT_SOURCE_DIR}/ggml-rpc)
+
+    # RDMA transport tier (Linux only, auto-detected via libibverbs). OFF →
+    # transport.cpp compiles as a pure TCP byte stream, no libibverbs dep.
+    if (NOT WIN32 AND NOT APPLE)
+        find_library(IBVERBS_LIB ibverbs)
+        if (IBVERBS_LIB)
+            option(GGML_RPC_RDMA "ggml: enable RDMA (RoCE) transport for RPC" ON)
+        else()
+            option(GGML_RPC_RDMA "ggml: enable RDMA (RoCE) transport for RPC" OFF)
+        endif()
+    else()
+        set(GGML_RPC_RDMA OFF CACHE BOOL "RDMA not available on this platform" FORCE)
+    endif()
+
+    if (GGML_RPC_RDMA)
+        if (NOT IBVERBS_LIB)
+            find_library(IBVERBS_LIB ibverbs REQUIRED)
+        endif()
+        set_source_files_properties(ggml-rpc.cpp ggml-rpc/transport.cpp PROPERTIES
+                                    COMPILE_DEFINITIONS GGML_RPC_RDMA)
+        set(GGML_EXTRA_LIBS ${GGML_EXTRA_LIBS} ${IBVERBS_LIB})
+        message(STATUS "  RPC RDMA transport enabled (libibverbs: ${IBVERBS_LIB})")
+    else()
+        message(STATUS "  RPC RDMA transport disabled (TCP only)")
+    endif()
 endif()
 
 function(detect_host_compiler)
