@@ -1,4 +1,4 @@
-// OpenAI-compatible server: ik-llama-stage-runner-as-head driving the multi-stage MTP ring.
+// OpenAI-compatible server: ik-llama-stage-runner-as-head driving a multi-stage MTP ring.
 // Ported from the mainline fork's stage-server.h onto the ik_llama stage driver: included by
 // stage-runner.cpp before main() so it sees model_bundle, run_tokens, send_hidden, recv_mtp_msg,
 // tcp_connect, tcp_listen_accept, mtp_msg, etc. Compiled only under STAGE_SERVER.
