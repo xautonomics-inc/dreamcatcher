@@ -75,13 +75,15 @@ Debug: `LLAMA_DUMP_TENSOR_HASH=1` logs a FNV-1a-64 hash of every tensor's
 in-memory bytes after load (stage-runner also disables repack "extra" bufts under
 this env so hashes are byte-comparable across load paths).
 
-## 3. Stage binary: launch parameters (planned wiring)
+## 3. Stage binary: launch parameters
 
-NOT WIRED YET in this branch: `stage-runner.cpp` does not accept these flags.
-This branch ships the slicer (§1) and the libllama assembly API (§2); the
-stage-binary plumbing below is the planned surface on top of it, so the
-parameter design is recorded here and stage launches keep using `-m` slices
-until it lands.
+WIRED in `stage-runner.cpp` (port of the mainline driver's assembly block):
+`--model-dir` / `--layers` / `--stage-parts` select and assemble the part files
+exactly as designed below; stage launches may use `--model-dir` in place of
+`-m` slices. Deviations in the ik v1 runner (see its header comment): no
+`--pipeline` (depth==slots, non-pipelined v1) and no `gen` role, so the
+equivalence harness below runs in FILE mode (`--prompt … --last`) or as the
+loader-level tensor-hash check instead; `STAGE_EMIT=hidden` file emit is kept.
 
 ```
 --model-dir DIR       layer library directory (alternative to -m; mutually exclusive)
