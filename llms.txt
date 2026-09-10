@@ -1,0 +1,12 @@
+# ik_llama.cpp
+
+> ik_llama.cpp is a distributed inference engine fork supporting multi-stage pipeline parallelism, dynamic per-layer model loading, and hidden-state tensor transfer over TCP and RoCEv2.
+
+## Navigation
+
+- [AGENTS.md](AGENTS.md): Operational orientation and house rules for autonomous coding agents.
+- [docs/BRING-UP.md](docs/BRING-UP.md): Canonical bring-up guide for two-stage loopback and multi-node TCP deployment.
+- [docs/RELEASE-INTEGRITY.md](docs/RELEASE-INTEGRITY.md): Release integrity contract, build attestations, and smoke test specifications.
+- [README.md](README.md): Repository overview, build prerequisites, and compilation instructions.
+- [.agents/skills/ik-fork-bring-up/SKILL.md](.agents/skills/ik-fork-bring-up/SKILL.md): Antigravity and Codex skill registration for bring-up workflows.
+- [.claude/skills/ik-fork-bring-up/SKILL.md](.claude/skills/ik-fork-bring-up/SKILL.md): Claude Code skill registration for bring-up workflows.
