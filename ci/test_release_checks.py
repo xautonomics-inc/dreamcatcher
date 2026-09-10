@@ -17,6 +17,7 @@ import smoke_serve
 class Handler(BaseHTTPRequestHandler):
     mode = "ok"
     requests: list[str] = []
+    payload: object = None
 
     def log_message(self, format: str, *args: object) -> None:
         pass
@@ -29,7 +30,9 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         self.requests.append(self.path)
-        self.rfile.read(int(self.headers["Content-Length"]))
+        Handler.payload = json.loads(
+            self.rfile.read(int(self.headers["Content-Length"]))
+        )
         if self.mode == "http_error":
             self.send_response(503)
             self.end_headers()
@@ -45,12 +48,21 @@ class Handler(BaseHTTPRequestHandler):
         if self.mode == "invalid_json":
             self.wfile.write(b"not json")
             return
-        content = "" if self.mode == "empty" else "A bird flew."
+        content = "" if self.mode in ("empty", "reasoning") else "A bird flew."
         tokens: object = 0 if self.mode == "zero" else 8
         if self.mode == "bool_tokens":
             tokens = True
         reply: dict[str, object] = {
-            "choices": [{"message": {"content": content}}],
+            "choices": [
+                {
+                    "message": {
+                        "content": content,
+                        "reasoning_content": "Thinking"
+                        if self.mode == "reasoning"
+                        else "",
+                    }
+                }
+            ],
             "usage": {"completion_tokens": tokens},
         }
         if self.mode == "missing_usage":
@@ -77,6 +89,10 @@ class SmokeTests(unittest.TestCase):
         self.assertTrue(result["ok"])
         self.assertEqual(result["completion_tokens"], 8)
         self.assertEqual(Handler.requests, ["/v1/models", "/v1/chat/completions"])
+        self.assertEqual(
+            smoke_serve.obj(Handler.payload)["chat_template_kwargs"],
+            {"enable_thinking": False},
+        )
         self.assertIn("started_at", result)
         self.assertIn("completed_at", result)
         self.assertNotIn("A bird flew", json.dumps(result))
@@ -90,6 +106,7 @@ class SmokeTests(unittest.TestCase):
     def test_refusals_and_no_redirect(self) -> None:
         for mode in [
             "empty",
+            "reasoning",
             "zero",
             "bool_tokens",
             "missing_usage",
@@ -101,6 +118,13 @@ class SmokeTests(unittest.TestCase):
                 Handler.mode = mode
                 result = smoke_serve.smoke(self.base, 0, "fixture", "test-value", 2)
                 self.assertFalse(result["ok"])
+                if mode == "reasoning":
+                    self.assertEqual(result["error"], "reasoning_only")
+                    with (
+                        patch("sys.argv", ["smoke", self.base]),
+                        patch("builtins.print"),
+                    ):
+                        self.assertEqual(smoke_serve.main(), 1)
                 self.assertNotIn("test-value", json.dumps(result))
                 self.assertNotIn("private diagnostic", json.dumps(result))
         self.assertNotIn("/unexpected", Handler.requests)

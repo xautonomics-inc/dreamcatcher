@@ -112,7 +112,9 @@ requires exactly one model. `SMOKE_API_KEY` supplies an optional bearer token;
 Redirects are rejected. URLs containing credentials, queries, or fragments are
 rejected. Output omits endpoint, key, model name, and completion text.
 
-The script sends one non-streaming chat completion with a 32-token limit. Success
+The script sends one non-streaming chat completion with a 32-token limit and
+`chat_template_kwargs: {"enable_thinking": false}`. An empty answer with nonempty
+`reasoning_content` fails with `reasoning_only`; reasoning is not an answer. Success
 requires nonempty generated text and a positive integer `usage.completion_tokens`.
 It emits one JSON result with UTC start/end timestamps, request duration, token
 count, text length, and throughput. Exit zero means those checks and the optional

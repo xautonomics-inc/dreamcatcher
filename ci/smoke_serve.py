@@ -113,6 +113,7 @@ def smoke(
                 "max_tokens": 32,
                 "stream": False,
                 "temperature": 0,
+                "chat_template_kwargs": {"enable_thinking": False},
             },
         )
         seconds = time.monotonic() - request_started
@@ -120,11 +121,15 @@ def smoke(
         if not isinstance(choices, list) or not choices:
             raise SmokeError("missing_choices")
         choice = obj(choices[0])
-        content = obj(choice.get("message")).get("content")
+        message = obj(choice.get("message"))
+        content = message.get("content")
         if isinstance(content, list):
             pieces = [obj(item).get("text") for item in content]
             content = "".join(p for p in pieces if isinstance(p, str))
         if not isinstance(content, str) or not content.strip():
+            reasoning = message.get("reasoning_content")
+            if isinstance(reasoning, str) and reasoning.strip():
+                raise SmokeError("reasoning_only")
             raise SmokeError("no_completion_text")
         usage = obj(reply.get("usage"))
         tokens = usage.get("completion_tokens")
