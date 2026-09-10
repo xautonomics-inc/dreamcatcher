@@ -33,12 +33,15 @@
 // llama_*_pre_norm staging API. ik_llama exposes the public embeddings API
 // instead (llama_get_embeddings_ith / llama_set_embeddings), so that include is
 // dropped here and every *_pre_norm call is rewired below.
+#include <dirent.h>
 #include <sys/stat.h>
 
+#include <algorithm>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <string>
 #include <vector>
 
@@ -252,7 +255,90 @@ static int g_fit_margin = 0;  // --fit-margin MiB: VRAM auto-fit reserves per GP
                               // runtime context (~2.5 GiB/GPU) + co-tenant (k8s/Proxmox) VRAM on shared
                               // nodes -> the planner keeps too many experts on GPU and OOMs at high KV.
                               // Raise it (e.g. 4000) so fit sheds enough experts to leave real headroom.
-static bool load(model_bundle & b, const std::string & path, int ngl, int n_ctx, bool use_mmap,
+// ---- layer-library assembly (--model-dir) -----------------------------------
+// A "layer library" is a directory produced by slice_gguf_layers.py:
+//   blk-NNNNN.gguf          one transformer layer (abs index NNNNN), tensors blk.0.*
+//   parts-embd.gguf         token_embd.weight
+//   parts-output.gguf       output_norm.weight (+ output.weight if untied)
+//   parts-nextn-NNNNN.gguf  one NextN/MTP block (abs index NNNNN), tensors blk.0.*
+//   parts-other.gguf        any other non-blk tensors (rare; e.g. rope_freqs)
+//   manifest.json           provenance + per-tensor hashes (not needed at load time)
+// assemble_layer_dir() composes the file list for window [A,B) and the blk_base
+// remap each file gets, mirroring what a monolithic slice_gguf.py A B slice holds.
+struct asm_spec { std::string path; int32_t blk_base; };
+static bool assemble_layer_dir(const std::string & dir, int win_a, int win_b, const std::string & parts_spec,
+                               std::vector<asm_spec> & out) {
+    std::map<int, std::string> layers, nextn;   // abs index -> filename
+    std::string f_embd, f_output, f_other;
+    DIR * d = opendir(dir.c_str());
+    if (!d) { fprintf(stderr, "stage: cannot open --model-dir %s\n", dir.c_str()); return false; }
+    for (struct dirent * e; (e = readdir(d)); ) {
+        int idx; char tail8[8] = {0};
+        if      (sscanf(e->d_name, "blk-%d.ggu%1s",         &idx, tail8) == 2 && !strcmp(tail8, "f")) layers[idx] = e->d_name;
+        else if (sscanf(e->d_name, "parts-nextn-%d.ggu%1s", &idx, tail8) == 2 && !strcmp(tail8, "f")) nextn[idx]  = e->d_name;
+        else if (!strcmp(e->d_name, "parts-embd.gguf"))   f_embd   = e->d_name;
+        else if (!strcmp(e->d_name, "parts-output.gguf")) f_output = e->d_name;
+        else if (!strcmp(e->d_name, "parts-other.gguf"))  f_other  = e->d_name;
+    }
+    closedir(d);
+    if (layers.empty() && nextn.empty()) { fprintf(stderr, "stage: no blk-*.gguf in %s\n", dir.c_str()); return false; }
+    int n_total = -1;
+    if (!layers.empty()) n_total = layers.rbegin()->first;
+    if (!nextn.empty())  n_total = std::max(n_total, nextn.rbegin()->first);
+    n_total += 1;
+    if (win_a < 0) win_a = 0;
+    if (win_b < 0) win_b = n_total;   // default: full model
+    if (win_a >= win_b || win_b > n_total) {
+        fprintf(stderr, "stage: bad --layers window [%d,%d) (library has %d blocks)\n", win_a, win_b, n_total);
+        return false;
+    }
+    // parts selection: "auto" mirrors today's monolithic slices (embd+output in EVERY
+    // slice; nextn blocks iff the window covers them); "none" = bare layers (NOTE:
+    // most archs require token_embd at load); or an explicit comma list.
+    bool inc_embd = false, inc_output = false, inc_nextn = false, inc_other = false;
+    if (parts_spec.empty() || parts_spec == "auto") {
+        inc_embd = !f_embd.empty(); inc_output = !f_output.empty(); inc_nextn = true;
+        inc_other = !f_other.empty();
+        if (inc_other) fprintf(stderr, "stage: including parts-other.gguf (present in library)\n");
+    } else if (parts_spec != "none") {
+        std::string s = parts_spec; size_t p = 0;
+        while (p <= s.size()) {
+            size_t c = s.find(',', p);
+            std::string one = s.substr(p, c == std::string::npos ? std::string::npos : c - p);
+            if      (one == "embd")   inc_embd   = true;
+            else if (one == "output") inc_output = true;
+            else if (one == "nextn")  inc_nextn  = true;
+            else if (one == "other")  inc_other  = true;
+            else if (!one.empty()) { fprintf(stderr, "stage: unknown --stage-parts item '%s'\n", one.c_str()); return false; }
+            if (c == std::string::npos) break; p = c + 1;
+        }
+    }
+    if (inc_embd   && f_embd.empty())   { fprintf(stderr, "stage: parts-embd.gguf not in library\n");   return false; }
+    if (inc_output && f_output.empty()) { fprintf(stderr, "stage: parts-output.gguf not in library\n"); return false; }
+    if (inc_other  && f_other.empty())  { fprintf(stderr, "stage: parts-other.gguf not in library\n");  return false; }
+    if (inc_embd) out.push_back({ dir + "/" + f_embd, 0 });
+    for (int i = win_a; i < win_b; ++i) {
+        auto li = layers.find(i);
+        if (li != layers.end()) { out.push_back({ dir + "/" + li->second, i - win_a }); continue; }
+        auto ni = nextn.find(i);
+        if (ni != nextn.end()) {
+            if (!inc_nextn) { fprintf(stderr, "stage: window [%d,%d) covers NextN blk %d but --stage-parts excludes nextn\n", win_a, win_b, i); return false; }
+            out.push_back({ dir + "/" + ni->second, i - win_a });
+            continue;
+        }
+        fprintf(stderr, "stage: library %s has no file for blk %d (window [%d,%d))\n", dir.c_str(), i, win_a, win_b);
+        return false;
+    }
+    if (inc_output) out.push_back({ dir + "/" + f_output, 0 });
+    if (inc_other)  out.push_back({ dir + "/" + f_other,  0 });
+    fprintf(stderr, "stage: assembling window [%d,%d) from %zu part files in %s (embd=%d output=%d other=%d)\n",
+            win_a, win_b, out.size(), dir.c_str(), (int) inc_embd, (int) inc_output, (int) inc_other);
+    return true;
+}
+// -----------------------------------------------------------------------------
+
+static bool load(model_bundle & b, const std::string & path, const std::vector<asm_spec> & asm_parts,
+                 int ngl, int n_ctx, bool use_mmap,
                  const std::vector<float> & tsplit, int split_mode, int n_ubatch,
                  const std::vector<llama_model_tensor_buft_override> & buft_ovr) {
     llama_model_params mp = llama_model_default_params(); mp.n_gpu_layers = ngl; mp.use_mmap = use_mmap;
@@ -293,7 +379,16 @@ static bool load(model_bundle & b, const std::string & path, int ngl, int n_ctx,
     // (e.g. an in-window layer's MoE experts) off-GPU to free VRAM so a middle stage can absorb
     // more layers shed from the slow tail. NULL-terminated list ({nullptr,nullptr} last element).
     if (!buft_ovr.empty()) mp.tensor_buft_overrides = buft_ovr.data();
-    b.model = llama_model_load_from_file(path.c_str(), mp);
+    if (!asm_parts.empty()) {
+        // layer-library assembly: N part files -> one in-memory slice (loader remaps
+        // blk indices and re-derives the window-shape KVs; equivalent to a monolithic
+        // slice of the same window)
+        std::vector<llama_model_part> pv(asm_parts.size());
+        for (size_t i = 0; i < asm_parts.size(); ++i) pv[i] = { asm_parts[i].path.c_str(), asm_parts[i].blk_base };
+        b.model = llama_model_load_from_parts(pv.data(), pv.size(), mp);
+    } else {
+        b.model = llama_model_load_from_file(path.c_str(), mp);
+    }
     if (!b.model) { fprintf(stderr, "stage: load failed\n"); return false; }
     b.vocab = llama_model_get_vocab(b.model);
     b.n_embd = llama_model_n_embd(b.model);
@@ -457,6 +552,8 @@ static void print_piece(model_bundle & b, int tok, int slot) {
 int main(int argc, char ** argv) {
     signal(SIGPIPE, SIG_IGN);   // ring-socket send must fail with EPIPE, not kill the process
     std::string model_path, prompt, in_path, out_path, role, connect_to;
+    std::string model_dir, stage_parts;   // layer-library assembly (--model-dir/--stage-parts)
+    int win_a = -1, win_b = -1;           // --layers A,B : ABSOLUTE window into the layer library
     int ngl = 999, n_ctx = 4096, listen_port = 0, max_tokens = 64, slots = 1, n_ubatch = 0, amb = 0, return_listen = 0;
     int http_port = 8080;
     bool last = false, use_mmap = true;
@@ -467,6 +564,12 @@ int main(int argc, char ** argv) {
         std::string a = argv[i];
         auto nx = [&](const char * nm) -> const char * { if (i+1>=argc){fprintf(stderr,"stage: %s needs arg\n",nm);exit(1);} return argv[++i]; };
         if      (a=="-m")           model_path = nx("-m");
+        else if (a=="--model-dir")  model_dir  = nx("--model-dir");      // layer library (per-layer GGUFs; alternative to -m)
+        else if (a=="--layers")   { std::string v = nx("--layers");      // "A,B" absolute window [A,B) into the library
+                                    size_t c = v.find(',');
+                                    if (c == std::string::npos) { fprintf(stderr, "stage: --layers wants A,B\n"); return 1; }
+                                    win_a = atoi(v.substr(0,c).c_str()); win_b = atoi(v.substr(c+1).c_str()); }
+        else if (a=="--stage-parts") stage_parts = nx("--stage-parts");  // auto|none|embd,output,nextn,other
         else if (a=="--prompt")     prompt     = nx("--prompt");
         else if (a=="--in")         in_path    = nx("--in");
         else if (a=="--out")        out_path   = nx("--out");
@@ -505,7 +608,8 @@ int main(int argc, char ** argv) {
         }
         else { fprintf(stderr,"stage: unknown arg %s\n", a.c_str()); return 1; }
     }
-    if (model_path.empty()) { fprintf(stderr,"stage: -m required\n"); return 1; }
+    if (model_path.empty() && model_dir.empty()) { fprintf(stderr,"stage: -m or --model-dir required\n"); return 1; }
+    if (!model_path.empty() && !model_dir.empty()) { fprintf(stderr,"stage: -m and --model-dir are mutually exclusive\n"); return 1; }
     fprintf(stderr, "stage: IL=[%s,%s) EMIT=%s role=%s slots=%d\n",
             getenv("STAGE_IL_START")?getenv("STAGE_IL_START"):"-",
             getenv("STAGE_IL_END")?getenv("STAGE_IL_END"):"-",
@@ -540,7 +644,9 @@ int main(int argc, char ** argv) {
 
     model_bundle b;
     g_amb = amb;
-    if (!load(b, model_path, ngl, n_ctx, use_mmap, tsplit, split_mode, n_ubatch, buft_ovr)) return 1;
+    std::vector<asm_spec> asm_parts;
+    if (!model_dir.empty() && !assemble_layer_dir(model_dir, win_a, win_b, stage_parts, asm_parts)) return 1;
+    if (!load(b, model_path, asm_parts, ngl, n_ctx, use_mmap, tsplit, split_mode, n_ubatch, buft_ovr)) return 1;
 
     if (role == "server") {
 #ifdef STAGE_SERVER
