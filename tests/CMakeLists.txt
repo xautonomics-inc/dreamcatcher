@@ -208,6 +208,7 @@ target_include_directories(test-iq4-ks-kt-decode PRIVATE ${PROJECT_SOURCE_DIR}/g
 # llama_target_and_test(test-opt.cpp) # SLOW
 
 llama_target_and_test(test-model-load-cancel.cpp  LABEL "model")
+llama_build_and_test(test-model-loader-metadata.cpp LABEL "model")
 llama_target_and_test(test-autorelease.cpp        LABEL "model")
 
 
@@ -215,5 +216,4 @@ llama_target_and_test(test-autorelease.cpp        LABEL "model")
 get_filename_component(TEST_TARGET test-c.c NAME_WE)
 add_executable(${TEST_TARGET} test-c.c)
 target_link_libraries(${TEST_TARGET} PRIVATE llama)
-
 

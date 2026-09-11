@@ -265,7 +265,12 @@ static int g_fit_margin = 0;  // --fit-margin MiB: VRAM auto-fit reserves per GP
 //   manifest.json           provenance + per-tensor hashes (not needed at load time)
 // assemble_layer_dir() composes the file list for window [A,B) and the blk_base
 // remap each file gets, mirroring what a monolithic slice_gguf.py A B slice holds.
-struct asm_spec { std::string path; int32_t blk_base; };
+struct asm_spec {
+    std::string path;
+    int32_t blk_base;
+    int32_t source_blk_start;
+    int32_t source_blk_count;
+};
 static bool assemble_layer_dir(const std::string & dir, int win_a, int win_b, const std::string & parts_spec,
                                std::vector<asm_spec> & out) {
     std::map<int, std::string> layers, nextn;   // abs index -> filename
@@ -316,21 +321,21 @@ static bool assemble_layer_dir(const std::string & dir, int win_a, int win_b, co
     if (inc_embd   && f_embd.empty())   { fprintf(stderr, "stage: parts-embd.gguf not in library\n");   return false; }
     if (inc_output && f_output.empty()) { fprintf(stderr, "stage: parts-output.gguf not in library\n"); return false; }
     if (inc_other  && f_other.empty())  { fprintf(stderr, "stage: parts-other.gguf not in library\n");  return false; }
-    if (inc_embd) out.push_back({ dir + "/" + f_embd, 0 });
+    if (inc_embd) out.push_back({ dir + "/" + f_embd, 0, win_a, n_total });
     for (int i = win_a; i < win_b; ++i) {
         auto li = layers.find(i);
-        if (li != layers.end()) { out.push_back({ dir + "/" + li->second, i - win_a }); continue; }
+        if (li != layers.end()) { out.push_back({ dir + "/" + li->second, i - win_a, win_a, n_total }); continue; }
         auto ni = nextn.find(i);
         if (ni != nextn.end()) {
             if (!inc_nextn) { fprintf(stderr, "stage: window [%d,%d) covers NextN blk %d but --stage-parts excludes nextn\n", win_a, win_b, i); return false; }
-            out.push_back({ dir + "/" + ni->second, i - win_a });
+            out.push_back({ dir + "/" + ni->second, i - win_a, win_a, n_total });
             continue;
         }
         fprintf(stderr, "stage: library %s has no file for blk %d (window [%d,%d))\n", dir.c_str(), i, win_a, win_b);
         return false;
     }
-    if (inc_output) out.push_back({ dir + "/" + f_output, 0 });
-    if (inc_other)  out.push_back({ dir + "/" + f_other,  0 });
+    if (inc_output) out.push_back({ dir + "/" + f_output, 0, win_a, n_total });
+    if (inc_other)  out.push_back({ dir + "/" + f_other,  0, win_a, n_total });
     fprintf(stderr, "stage: assembling window [%d,%d) from %zu part files in %s (embd=%d output=%d other=%d)\n",
             win_a, win_b, out.size(), dir.c_str(), (int) inc_embd, (int) inc_output, (int) inc_other);
     return true;
@@ -384,7 +389,14 @@ static bool load(model_bundle & b, const std::string & path, const std::vector<a
         // blk indices and re-derives the window-shape KVs; equivalent to a monolithic
         // slice of the same window)
         std::vector<llama_model_part> pv(asm_parts.size());
-        for (size_t i = 0; i < asm_parts.size(); ++i) pv[i] = { asm_parts[i].path.c_str(), asm_parts[i].blk_base };
+        for (size_t i = 0; i < asm_parts.size(); ++i) {
+            pv[i] = {
+                asm_parts[i].path.c_str(),
+                asm_parts[i].blk_base,
+                asm_parts[i].source_blk_start,
+                asm_parts[i].source_blk_count,
+            };
+        }
         b.model = llama_model_load_from_parts(pv.data(), pv.size(), mp);
     } else {
         b.model = llama_model_load_from_file(path.c_str(), mp);

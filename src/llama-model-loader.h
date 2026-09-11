@@ -20,6 +20,15 @@ enum llama_fver {
     GGUF_FILE_VERSION_V3 = 3,
 };
 
+// Slice every source-block-length GGUF metadata array to an assembled block window.
+// Kept separate from model loading so synthetic metadata can cover every GGUF scalar
+// array type without constructing model tensors.
+void llama_model_loader_slice_block_arrays(
+        gguf_context * meta,
+              int32_t source_blk_count,
+              int32_t source_blk_start,
+              int32_t assembled_blk_count);
+
 static const char * llama_file_version_name(llama_fver version) {
     switch (version) {
         case GGUF_FILE_VERSION_V1: return "GGUF V1 (support until nov 2023)";

@@ -58,7 +58,12 @@ discovered by name, shape KVs come from the GGUF headers).
 ## 2. Loader: `llama_model_load_from_parts()` (libllama)
 
 ```c
-struct llama_model_part { const char * path; int32_t blk_base; };
+struct llama_model_part {
+    const char * path;
+    int32_t blk_base;
+    int32_t source_blk_start;
+    int32_t source_blk_count;
+};
 struct llama_model * llama_model_load_from_parts(const struct llama_model_part *, size_t, struct llama_model_params);
 ```
 
@@ -66,10 +71,12 @@ Backend-agnostic (pure loader level, one mmap/file handle per part, no data copi
 twice, monolithic path untouched). Each file's `blk.J` tensors are remapped to
 `blk.(blk_base+J)`; `{arch}.block_count`, `{arch}.leading_dense_block_count` and
 `{arch}.nextn_predict_layers` are re-derived as the SUM of the per-file values and
-injected as internal KV overrides (an explicit user `--override-kv` wins). So a
-window's KV cache is sized by the window's block_count, never the full model —
-exactly like today's monolithic slices. Gaps or out-of-window blk indices abort
-the load with a clear error.
+injected as internal KV overrides (an explicit user `--override-kv` wins).
+Metadata arrays with `source_blk_count` elements are sliced from
+`source_blk_start` to the assembled window length. So a window's KV cache and
+per-layer hyperparameters both describe the selected blocks, exactly like today's
+monolithic slices. Gaps, invalid metadata windows, or out-of-window block indices
+abort the load with a clear error.
 
 Debug: `LLAMA_DUMP_TENSOR_HASH=1` logs a FNV-1a-64 hash of every tensor's
 in-memory bytes after load (stage-runner also disables repack "extra" bufts under
@@ -156,4 +163,3 @@ a loader-level harness (`check54`: `llama_model_load_from_parts` over explicit
   `n_layer=5`, 48 tensors;
 - gap in the window (blk 0,1,3): load aborts — `invalid assembly: no tensors
   for blk.2 (window block_count=3)`.
-
