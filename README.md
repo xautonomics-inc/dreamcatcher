@@ -67,7 +67,7 @@ cmake -B build -DGGML_VULKAN=ON
 cmake --build build --config Release -j$(nproc)
 ```
 
-Vulkan backend support covers RDNA2/RDNA4 (RADV and NVIDIA), and Intel ANV (self-consistent).
+Vulkan backend support: AMD RDNA4 (RADV) verified CPU-exact; NVIDIA verified with coopmat1 (NV_coopmat2 is declined by default); Intel ANV self-consistent but not CPU-exact; AMD RDNA3 pending verification.
 See [Vulkan backend docs](docs/VULKAN-BACKEND.md) for device compatibility, build prerequisites
 (including the new `spirv-headers` dependency), and the `-ngl 0` semantics.
 
@@ -77,7 +77,7 @@ See [Vulkan backend docs](docs/VULKAN-BACKEND.md) for device compatibility, buil
 |---------|-----------|--------|-------|
 | CPU | `-DGGML_NATIVE=ON` | Production | `AVX2` or better, `ARM_NEON` or better |
 | CUDA | `-DGGML_CUDA=ON` | Production | Turing or newer |
-| Vulkan | `-DGGML_VULKAN=ON` | Verified | RDNA2/RDNA4 (RADV + NVIDIA), Intel ANV (self-consistent) |
+| Vulkan | `-DGGML_VULKAN=ON` | Verified | AMD RDNA4 (RADV, CPU-exact), NVIDIA (coopmat1, CPU-exact), Intel ANV (self-consistent); AMD RDNA3 pending |
 | Expert-server | N/A | Verified | Distributed MoE; CPU byte-exact all-remote on x86_64/aarch64 |
 
 Distributed MoE inference is supported via the expert-server role (`llama-expert-server`),
