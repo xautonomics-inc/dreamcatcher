@@ -2,6 +2,7 @@
 #include "../llama-context.h"
 #include "../llama-build-context.h"
 #include "../llama-dsv4.h"
+#include "llm_stage.h"
 
 #include <algorithm>
 #include <cmath>
@@ -1298,6 +1299,13 @@ ggml_cgraph * llm_build_context::build_deepseek4() {
     const int n_layer_begin = is_mtp ? n_layer - hparams.nextn_predict_layers : 0;
     const int n_layer_end   = is_mtp ? n_layer : n_layer - hparams.nextn_predict_layers;
 
+    // --- multi-stage pipeline: a head stage emits the post-window residual, not logits.
+    // Only the normal (non-MTP) path is staged; an MTP companion always finishes to logits.
+    const int n_proc_layers  = n_layer - hparams.nextn_predict_layers;
+    const llama_stage_cfg sc = llama_stage_get_cfg(n_proc_layers);
+    const bool stage_emit    = !is_mtp && sc.active && sc.emit_hidden &&
+                               llama_stage_consumes_last(sc, n_proc_layers);
+
     if (kv_self.any_compacted()) {
         // an MTP companion walks only its dense NextN layer while its other layers compact
         bool walked_compacted = false, walked_dense = false;
@@ -1479,7 +1487,8 @@ ggml_cgraph * llm_build_context::build_deepseek4() {
         ggml_build_forward_expand(gf, h_nextn);
     }
 
-    if (n_outputs != n_tokens) {
+    // an emitting stage hands every row to the next stage, so it never reduces to out_ids
+    if (n_outputs != n_tokens && !stage_emit) {
         ggml_tensor * inp_out_ids = build_inp_out_ids();
         ggml_tensor * flat = ggml_reshape_2d(ctx0, inpL, n_embd*hc, n_tokens);
         flat = ggml_get_rows(ctx0, flat, inp_out_ids);
@@ -1492,6 +1501,18 @@ ggml_cgraph * llm_build_context::build_deepseek4() {
             model.hc_head_scale,
             model.hc_head_base);
     cb(out, "hc_head", -1);
+
+    if (stage_emit) {
+        // STAGE EMIT: export the post-window residual hidden state (all rows) for the
+        // next stage; skip output_norm + lm_head. Named "result_norm" so the existing
+        // embeddings extraction (POOLING_NONE -> lctx.embd) picks it up. NOTE: in emit
+        // mode llama_get_embeddings_ith therefore returns the PRE-norm residual, by design.
+        // The hyper-connection multiplicity is collapsed by build_hc_head above because the
+        // stage hidden-state transport carries n_embd floats per row.
+        cb(out, "result_norm", -1);
+        ggml_build_forward_expand(gf, out);
+        return gf;
+    }
 
     if (model.output_norm != nullptr) {
         out = llm_build_norm(ctx0, out, hparams, model.output_norm, nullptr, LLM_NORM_RMS, cb, -1);
