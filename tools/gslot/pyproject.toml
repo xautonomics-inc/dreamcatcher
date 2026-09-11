@@ -1,0 +1,85 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gslot"
+version = "0.1.0"
+description = "Global slot compute arbiter: host-local CPU/GPU co-tenancy scheduler for multi-model inference"
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [
+    { name = "ik_llama.cpp contributors" }
+]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Operating System :: POSIX :: Linux",
+]
+
+# Intentionally EMPTY.  The daemon is stdlib-only BY CONTRACT: a GPU host has no
+# uv, no venv and often no pip, so `scp -r tools/gslot` + `python3 -m gslot` is
+# the entire install story (meta#58).  Adding a dependency here breaks the hosts,
+# not just the build.
+dependencies = []
+
+# Test/lint tooling only — NEVER imported by the package itself. Kept out of
+# `dependencies` so installing gslot on a GPU host pulls nothing.
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.24",
+    "ruff>=0.7",
+    "mypy>=1.13",
+]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["gslot*"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+# Deliberately the rule set this code was authored and reviewed under,
+# carried over so the move stays behaviour-preserving. In particular it omits
+# `N` (pep8-naming) and `C4`: `Infeasible` and `from gslot import protocol as P`
+# are established public/import names other lanes already reference, and this
+# lane's contract is "behaviour unchanged", not a rename.
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # flake8-bugbear
+    "UP",  # pyupgrade
+    "SIM", # flake8-simplify
+    "RUF", # ruff-specific rules
+]
+
+[tool.ruff.format]
+# Ruff >=0.16 formats fenced code blocks inside Markdown; SPEC-016 uses
+# deliberately-aligned illustrative snippets, so keep the formatter to Python.
+exclude = ["*.md"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+check_untyped_defs = true
+disallow_untyped_decorators = true
+no_implicit_optional = true
+warn_redundant_casts = true
+warn_unused_ignores = true
+warn_no_return = true
+warn_unreachable = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+# The daemon tests are coroutines with no per-test marker, same as at the source.
+asyncio_mode = "auto"
