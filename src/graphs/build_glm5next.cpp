@@ -2,6 +2,7 @@
 #include "../llama-context.h"
 #include "../llama-delta-net.h"
 #include "../llama-model.h"
+#include "llm_stage.h"
 
 // Score-chunk size for the k-pool indexer: bounds the [n_pool, n_head, Tc] score tensor so it
 // stays under the int32 element-count limit of the RELU kernel and the GPU compute buffer.
@@ -383,6 +384,14 @@ ggml_cgraph * llm_build_context::build_glm5next() {
 
     const int64_t hc    = hparams.dsv4_hc_mult;
 
+    // --- multi-stage pipeline: a head stage emits the post-window residual, not logits.
+    // glm5next loads the NextN/MTP block but never builds an MTP graph here, so there is no
+    // is_mtp leg to exclude; n_proc_layers is the trunk (== hparams.n_layer_kv_from_start).
+    const int n_proc_layers  = n_layer - hparams.nextn_predict_layers;
+    const llama_stage_cfg sc = llama_stage_get_cfg(n_proc_layers);
+    const bool stage_emit    = sc.active && sc.emit_hidden &&
+                               llama_stage_consumes_last(sc, n_proc_layers);
+
     // NoPE: no YaRN mscale correction
     const float kq_scale = 1.0f / sqrtf(float(hparams.n_embd_head_k_full));
 
@@ -390,7 +399,9 @@ ggml_cgraph * llm_build_context::build_glm5next() {
 
     auto inpL = llm_build_inp_embd(ctx0, lctx, hparams, batch, model.tok_embd, cb);
     auto KQ_mask = build_inp_KQ_mask();
-    auto inp_out_ids = build_inp_out_ids();
+    // only a stage that finishes to logits reduces to the output rows; an emitting
+    // stage must hand every row to the next stage.
+    ggml_tensor * inp_out_ids = stage_emit ? nullptr : build_inp_out_ids();
 
     // KDA recurrent state slot routing
     lctx.inp_s_seq_qnext = ggml_new_tensor_2d(ctx0, GGML_TYPE_I32, 1, n_tokens);
@@ -530,7 +541,9 @@ ggml_cgraph * llm_build_context::build_glm5next() {
     // inp_out_ids to skip unused output tokens
     {
         auto flat = ggml_reshape_2d(ctx0, inpL, n_embd * hc, n_tokens);
-        flat = ggml_get_rows(ctx0, flat, inp_out_ids);
+        if (inp_out_ids) {
+            flat = ggml_get_rows(ctx0, flat, inp_out_ids);
+        }
         const int64_t n_out = flat->ne[1];
         // sum the hc streams
         ggml_tensor * summed = nullptr;
@@ -541,6 +554,18 @@ ggml_cgraph * llm_build_context::build_glm5next() {
         }
         inpL = ggml_scale(ctx0, summed, 1.0f / hc);
         cb(inpL, "hc_collapse", -1);
+    }
+
+    if (stage_emit) {
+        // STAGE EMIT: export the post-window residual hidden state (all rows) for the
+        // next stage; skip output_norm + lm_head. Named "result_norm" so the existing
+        // embeddings extraction (POOLING_NONE -> lctx.embd) picks it up. NOTE: in emit
+        // mode llama_get_embeddings_ith therefore returns the PRE-norm residual, by design.
+        // The hyper-connection multiplicity is collapsed by the hc mean above because the
+        // stage hidden-state transport carries n_embd floats per row, not hc*n_embd.
+        cb(inpL, "result_norm", -1);
+        ggml_build_forward_expand(gf, inpL);
+        return gf;
     }
 
     auto cur = build_output(lctx, ctx0, inpL, model.output, model.output_norm, cb);
