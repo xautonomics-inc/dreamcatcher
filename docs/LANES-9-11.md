@@ -95,29 +95,49 @@ materialized locally.
 
 ## Lane 11: gslot runtime
 
-**Status:** Pending (emma)
+**Status:** Merged into `fork-base` (commit `1c26dd49`)
+**Date:** 2026-09-11 (emma's review PASS)
 
 ### Summary
 
 The gslot runtime provides a configuration-driven approach to GPU slot allocation and
-multi-stage pipeline management. Documentation for the gslot runtime parameters and
-configuration is in progress.
+multi-stage pipeline management. It gates the head/relay/tail/server stages behind a
+global slot router: when the arbiter is running, each stage requests a grant before
+proceeding; when it is not running, the gate fails open and stages proceed unconditionally.
 
-### Layout
+### What changed
 
-The runtime lives at `tools/gslot/` and includes:
+- **`tools/gslot/arbiter.py`** (new): Slot allocation arbiter (daemon). Maintains a pool
+  of GPU slots and grants leases to requesting stages via an NDJSON protocol.
+- **`tools/gslot-run`** (new): Tenant launcher that registers a lease with the arbiter
+  and execs a command pinned to the granted resources.
+- **`c/gslot_client.h`** (new): C tenant client (speaks the NDJSON protocol).
+- **Gate integration**: `gslot_client.h` is included in the stage-runner; the gate is
+  controlled by `STAGE_GSLOT_*` environment variables and defaults **OFF** (fail-open).
 
-- `gslot/arbiter.py`: Slot allocation arbiter (daemon).
-- `gslot-run`: Tenant launcher that registers a lease and execs a command pinned to the granted resources.
-- `c/gslot_client.h`: C tenant client (speaks the NDJSON protocol).
+### Configuration
 
----
+The slot router is controlled by environment variables (no command-line flags):
 
-## Replay sequence
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `STAGE_GSLOT_ENABLE` | `0` | Master switch. When `0` (or unset), the gate is bypassed and stages run unconditionally (fail-open). |
+| `STAGE_GSLOT_HOST` | `127.0.0.1` | Arbiter host. |
+| `STAGE_GSLOT_PORT` | `9876` | Arbiter port. |
+| `STAGE_GSLOT_TIMEOUT` | `5.0` | Timeout (seconds) for lease acquisition. |
+
+### Proof
+
+emma's acceptance proof: two-stage Gemma-4 loopback under a live arbiter, 28 grants /
+0 overruns, byte-identical to the reference. The arbiter was started with 4 GPU slots;
+each stage requested and held its lease for the duration of the forward pass, then
+released it. No stage was starved or overrun.
+
+### Replay sequence
 
 ```
 lane 9 (Vulkan) → lane 10 (expert-server) → lane 11 (gslot)
 ```
 
-Lane 9 is merged into `fork-base`. Lanes 10 and 11 are pending and will be replayed in
-sequence after lane 9.
+Lane 9 is merged into `fork-base`. Lanes 10 and 11 are merged into `fork-base` and will
+be replayed in sequence.
