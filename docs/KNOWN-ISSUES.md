@@ -81,24 +81,72 @@ the fix is expected to come from upstream first.
 
 ---
 
-## `meta#85` — Vulkan flash attention is wrong on AMD RDNA3 (RX 7900 XT, RADV)
+## `meta#85` — Vulkan on AMD RDNA3 (RX 7900 XT, RADV): flash attention verified, two fp16 overflows fixed, one prompt still rounding-sensitive
 
-The grafted Vulkan backend produces wrong output on AMD RDNA3 (RX 7900 XT) via
-RADV, while RDNA4 is CPU-exact. The head/tail loopback reproduced single-process
-Vulkan output byte-for-byte, so the stage transport is fine — the defect is in
-the flash-attention kernel on RDNA3. `test-backend-ops` pins it on
-`FLASH_ATTN_EXT` (208 of 216 failures, NMSE ~0.18 across all KV types incl.
-Gemma's head size 256); `MUL_MAT` is clean for the model's types.
+**What was reported.** The grafted Vulkan backend gave ` 寿司<|channel>…` for the bare
+prompt below on an RX 7900 XT while RDNA4 and NVIDIA reproduced the CPU's
+` Europe.\n<|channel>thought\n<channel|>It appears there is a`, and `test-backend-ops`
+failed 208 of its 362 `FLASH_ATTN_EXT` cases on the device (NMSE 0.17-0.19 on every
+K/V type and head size, plus `inf` for `q8_0` K/V at batch 1).
 
-**Repro:**
+**What it was.** Three separate things, none of them the RDNA3 flash-attention kernel
+the report pointed at:
+
+1. *The sweep's reference was wrong, not the backend.* The old harness filled the
+   attention mask with uniform random values; ik's CPU flash-attention kernels only
+   implement 0 / -inf masks (they binarise or mis-scale anything else), so every
+   `mask=1, max_bias=0` case on the head sizes those kernels cover failed against a
+   wrong CPU answer -- on this device and on every other one. With a 0 / -inf mask the
+   same shapes pass. Current mainline `test-backend-ops` on the same card passed
+   5179/5179 `FLASH_ATTN_EXT` cases against its own CPU, and a mainline build from the
+   graft's era (identical flash-attention SPIR-V, byte for byte) passed 4420/4420, which
+   is what pointed at the reference rather than the kernel.
+2. *Two real fp16 overflows in the integer-dot (MMQ) scalar flash-attention path*, the
+   path taken for `q8_0` / `q4_0` K/V at batch 1 with the default fp16 accumulator:
+   the Q block scale was computed in fp16 (a denormal `qd` made `1/qd` infinite;
+   mainline fixed this later as "FA MMQ should use fp32 for Q quantization
+   calculations"), and the 32-wide int8 dot product (up to 32*127*127 for `q8_0`) was
+   converted to fp16 before scaling. Both now compute in fp32. These are device
+   independent; they only showed here because nothing had run the sweep with a valid
+   reference before. They do not touch f16 K/V, which is what the Gemma-4 run uses.
+3. *The bare prompt is rounding-order sensitive on Gemma-4.* With the backend
+   op-exact (`GGML_VULKAN_CHECK_RESULTS` over the whole Gemma-4 run, prefill and four
+   decode steps: flash attention within 2e-4 of the CPU, every other op within 1e-6,
+   mat-vec at the quantized-activation noise floor of a few 1e-3, and every one of
+   those mat-vec shapes passing the op sweep standalone), the bare prompt still gives
+   ` 寿司…` on Vulkan.
+   Switching the Vulkan mat-vec kernels (`GGML_VK_DISABLE_INTEGER_DOT_PRODUCT=1`) moves
+   it to ` Europe<|channel>…` -- a different rounding order, not a different answer --
+   without reaching the CPU string, and the same switch leaves a mainline build's
+   output unchanged. A well-posed prompt is exact: the chat-formatted `What is the
+   capital of France?` gives `<|channel>thought\n<channel|>The capital of France is
+   Paris.` on the CPU and on Vulkan, and Qwen3 8B `The capital of France is` gives
+   ` Paris. The capital of the United States is Washington, D` on both, with `-fa on`
+   and `-fa off`. The remaining "wrong" tokens are the model's low-confidence
+   continuation of a prompt it was not trained on, decided by rounding order.
+
+**Repro (still differs, by the nature of the prompt):**
 ```
 llama-cli -m gemma-4-12b-it-Q4_0.gguf -p "The capital of France is" -n 12 --temp 0 --seed 0 -ngl 99   # Vulkan build, RX 7900 XT, RADV
 ```
-**Symptom:** ` 寿司<|channel>…` (deterministic wrong output) vs the CPU reference
-` Europe.\n<|channel>thought\n<channel|>It appears there is a`.
-**Secondary:** `-fa off` is broken for Gemma-4 **on CPU** in this fork (stock
-behaviour) — see `meta#86`.
-**Status:** the Vulkan backend is **not** claimed as working on RDNA3 in this
-snapshot. Fix candidates: sync flash-attention shaders from current mainline, or
-decline flash attention on GFX11.0 once the non-FA path is confirmed working.
-**Workaround:** use a different GPU (RDNA4, NVIDIA via `KHR_coopmat`, or CPU).
+**Symptom:** ` 寿司<|channel><|channel>thought…` vs the CPU's ` Europe.\n<|channel>thought…`.
+The head/tail loopback on the same card gives the single-process Vulkan output, so the
+stage transport is not involved.
+
+**Repro (exact):**
+```
+llama-cli -m gemma-4-12b-it-Q4_0.gguf -p "<start_of_turn>user\nWhat is the capital of France?<end_of_turn>\n<start_of_turn>model\n" -n 12 --temp 0 --seed 0 -ngl 99
+build/bin/test-backend-ops -b Vulkan0 -o FLASH_ATTN_EXT    # 830 cases, all pass, on the RX 7900 XT
+build/bin/test-backend-ops -b Vulkan0                      # 2144/2152; the 8 left are the pre-existing CPY f32->q4_0/iq4_nl, iq4_xs / bf16 MUL_MAT, iq4_xs MUL_MAT_ID and PAD cases
+```
+**Status:** the Vulkan backend **is** claimed as working on RDNA3 (RADV) in this
+snapshot, with the caveat above about bare-prompt token matching. `-fa off` remains
+broken for Gemma-4 on the CPU (`meta#86`), so it is not a usable control for this
+model. Still owed on the device, cut short by a host outage: a perplexity comparison
+CPU vs Vulkan, and the CPU-only batch-size / thread-count variation of the bare prompt
+that would show the flip is not specific to the GPU.
+
+**CPU-side observations from the same work** (not fixed here): ik's generic CPU flash
+attention returns NaN for `q8_0` / `q4_0` K/V when there is no mask or when
+`max_bias > 0`; the iqk kernels' mask contract is 0 / -inf only (see the harness notes
+in `docs/VULKAN-BACKEND.md`). Neither combination is emitted by a graph.
