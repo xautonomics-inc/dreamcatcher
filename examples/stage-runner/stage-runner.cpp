@@ -58,6 +58,10 @@
 static const int32_t STAGE_MAGIC = 0x53544732; // "STG2" (v2: per-row tagged)
 
 // ---- hidden-state blob: n_rows rows, each tagged (seq,pos), n_embd floats ----
+// n_embd is the model's INTER-BLOCK residual width (llama_model_n_embd_inp), not
+// necessarily llama_model_n_embd: a hyper-connection architecture carries hc parallel
+// residual streams per token, so one row of the handoff is the whole hc*n_embd bundle.
+// The wire header carries the width and every receiver refuses a width it cannot consume.
 struct hidden_blob {
     int32_t n_rows = 0;
     int32_t n_embd = 0;
@@ -242,6 +246,8 @@ static int stage_eval_cb(struct ggml_tensor * t, bool ask, void * ud) {
 struct model_bundle {
     llama_model * model = nullptr; llama_context * ctx = nullptr;
     const llama_vocab * vocab = nullptr; int n_embd = 0, n_vocab = 0;
+    int n_embd_io = 0;  // width of one hidden-handoff row = llama_model_n_embd_inp(model):
+                        // hc*n_embd on a hyper-connection arch, n_embd otherwise
     int n_ubatch = 0;   // physical ubatch cap (= cp.n_ubatch); run_hidden chunks the emit to this so embeddings extraction stays single-ubatch (multi-slot fix)
 };
 static int g_amb = 0;   // --amb: ik attn_max_batch (caps the attention compute scratch; mandatory at long ctx)
@@ -418,7 +424,13 @@ static bool load(model_bundle & b, const std::string & path, const std::vector<a
     if (!b.model) { fprintf(stderr, "stage: load failed\n"); return false; }
     b.vocab = llama_model_get_vocab(b.model);
     b.n_embd = llama_model_n_embd(b.model);
+    b.n_embd_io = llama_model_n_embd_inp(b.model);
     b.n_vocab = llama_vocab_n_tokens(b.vocab);
+    if (b.n_embd_io != b.n_embd) {
+        fprintf(stderr, "stage: hidden handoff width %d (= %d x n_embd %d) - this architecture "
+                "carries a wide inter-block residual bundle\n",
+                b.n_embd_io, b.n_embd_io / b.n_embd, b.n_embd);
+    }
     llama_context_params cp = llama_context_default_params();
     // n_ubatch override: A770 (Intel ARC) Vulkan MUL_MAT_ID (MoE expert matmul) for
     // i-quants HANGS the compute engine when the physical ubatch token count > 8.
@@ -485,9 +497,9 @@ static bool run_tokens(model_bundle & b, const std::vector<int32_t> & tok,
                        const std::vector<int32_t> & seq, const std::vector<int32_t> & pos,
                        hidden_blob & out) {
     int n = (int) tok.size();
-    if (n <= 0) { out.resize(0, b.n_embd); out.seq = seq; out.pos = pos; return true; }
+    if (n <= 0) { out.resize(0, b.n_embd_io); out.seq = seq; out.pos = pos; return true; }
     const int chunk = (b.n_ubatch > 0 && b.n_ubatch < n) ? b.n_ubatch : n;
-    out.resize(n, b.n_embd); out.seq = seq; out.pos = pos;
+    out.resize(n, b.n_embd_io); out.seq = seq; out.pos = pos;
     mtp_kv_trim(b, seq, pos);
     for (int off = 0; off < n; off += chunk) {
         const int m = (n - off < chunk) ? (n - off) : chunk;
@@ -504,7 +516,7 @@ static bool run_tokens(model_bundle & b, const std::vector<int32_t> & tok,
             for (int i = 0; i < m; ++i) {
                 const float * h = llama_get_embeddings_ith(b.ctx, i);   // i = row within THIS decode
                 if (!h) { ok = false; break; }
-                memcpy(out.data.data() + (size_t) (off + i) * b.n_embd, h, b.n_embd * sizeof(float));
+                memcpy(out.data.data() + (size_t) (off + i) * b.n_embd_io, h, b.n_embd_io * sizeof(float));
             }
         }
         llama_batch_free(batch);
@@ -517,7 +529,7 @@ static bool run_tokens(model_bundle & b, const std::vector<int32_t> & tok,
 // emit -> fill out with hidden; else leave logits in ctx for sampling.
 static bool run_hidden(model_bundle & b, const hidden_blob & in, bool emit, hidden_blob & out) {
     int n = in.n_rows;
-    if (n <= 0) { if (emit) out.resize(0, b.n_embd); return true; }
+    if (n <= 0) { if (emit) out.resize(0, b.n_embd_io); return true; }
     // Chunk the EMIT path to <= n_ubatch rows per llama_decode. A single llama_decode of
     // n > n_ubatch rows splits internally into ubatches, but the hidden-state extraction
     // (llama_get_embeddings_ith) is only valid for ONE ubatch (a fill path
@@ -528,13 +540,18 @@ static bool run_hidden(model_bundle & b, const hidden_blob & in, bool emit, hidd
     // Only chunk when emit: the tail decodes emit=false and samples via argmax_ith (logits
     // are valid for one decode only), and the tail (max, gfx1151) uses large n_ubatch anyway.
     const int chunk = (emit && b.n_ubatch > 0 && b.n_ubatch < n) ? b.n_ubatch : n;
-    if (emit) { out.resize(n, b.n_embd); out.seq = in.seq; out.pos = in.pos; }
+    if (in.n_embd != b.n_embd_io) {
+        fprintf(stderr, "stage: refusing hidden handoff of width %d; this window consumes %d "
+                "floats per row (llama_model_n_embd_inp)\n", in.n_embd, b.n_embd_io);
+        return false;
+    }
+    if (emit) { out.resize(n, b.n_embd_io); out.seq = in.seq; out.pos = in.pos; }
     for (int off = 0; off < n; off += chunk) {
         const int m = (n - off < chunk) ? (n - off) : chunk;
-        llama_batch batch = llama_batch_init(m, b.n_embd, 1);
+        llama_batch batch = llama_batch_init(m, b.n_embd_io, 1);
         batch.n_tokens = m;
         for (int i = 0; i < m; ++i) {
-            memcpy(batch.embd + (size_t) i * b.n_embd, in.data.data() + (size_t) (off + i) * b.n_embd, b.n_embd * sizeof(float));
+            memcpy(batch.embd + (size_t) i * b.n_embd_io, in.data.data() + (size_t) (off + i) * b.n_embd_io, b.n_embd_io * sizeof(float));
             batch.pos[i] = in.pos[off + i];
             batch.n_seq_id[i] = 1; batch.seq_id[i][0] = in.seq[off + i]; batch.logits[i] = 1;
         }
@@ -545,7 +562,7 @@ static bool run_hidden(model_bundle & b, const hidden_blob & in, bool emit, hidd
             for (int i = 0; i < m; ++i) {
                 const float * h = llama_get_embeddings_ith(b.ctx, i);
                 if (!h) { ok = false; break; }
-                memcpy(out.data.data() + (size_t) (off + i) * b.n_embd, h, b.n_embd * sizeof(float));
+                memcpy(out.data.data() + (size_t) (off + i) * b.n_embd_io, h, b.n_embd_io * sizeof(float));
             }
         }
         llama_batch_free(batch);
@@ -853,7 +870,11 @@ int main(int argc, char ** argv) {
             ok = run_tokens(b, tok, seq, pos, hout);
         } else {
             if (!read_file(in_path.c_str(), hin)) return 1;
-            if (hin.n_embd != b.n_embd) { fprintf(stderr,"stage: n_embd mismatch\n"); return 1; }
+            if (hin.n_embd != b.n_embd_io) {
+                fprintf(stderr, "stage: %s carries %d floats per row; this window consumes %d "
+                        "(llama_model_n_embd_inp) - refusing\n", in_path.c_str(), hin.n_embd, b.n_embd_io);
+                return 1;
+            }
             ok = run_hidden(b, hin, emit, hout);
         }
         if (!ok) { fprintf(stderr,"stage: decode failed\n"); return 1; }

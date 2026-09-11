@@ -14,6 +14,7 @@
 #include "llama-model-loader.h"
 #include "llama-model.h"
 #include "llama-build-context.h"
+#include "graphs/llm_stage.h"
 #include "llama-cparams.h"
 #include "llama-hparams.h"
 #include "llama-context.h"
@@ -5570,7 +5571,9 @@ static void llama_set_inputs(llama_context & lctx, const llama_batch & batch) {
 #if IK_PRINT_TIMING == 2
         auto tim1 = ggml_time_us();
 #endif
-        const int64_t n_embd   = hparams.n_embd;
+        // the graph decides the injected row width (hc * n_embd on a hyper-connection
+        // architecture, n_embd everywhere else) - copy exactly that many floats per token
+        const int64_t n_embd   = lctx.inp_embd->ne[0];
         const int64_t n_tokens = batch.n_tokens;
 
         ggml_backend_tensor_set(lctx.inp_embd, batch.embd, 0, n_tokens*n_embd*ggml_element_size(lctx.inp_embd));
@@ -6423,7 +6426,36 @@ static void llama_set_inputs(llama_context & lctx, const llama_batch & batch) {
 
 // Make sure enough space is available for outputs.
 // Returns max number of outputs for which space was reserved.
+// True when this process is configured as a pipeline stage that emits hidden state for a
+// hyper-connection architecture. Such a stage's "result_norm" is the wide residual bundle
+// (hc * n_embd per row), so lctx.embd must be sized and strided for that width. Mirrors the
+// stage_emit predicate the three hc graph builders use, so buffer and graph never disagree.
+static bool llama_stage_emits_hc_bundle(const llama_context & lctx) {
+    const auto & hparams = lctx.model.hparams;
+
+    if (hparams.dsv4_hc_mult <= 1 || lctx.cparams.mtp) {
+        return false;
+    }
+
+    switch (lctx.model.arch) {
+        case LLM_ARCH_DEEPSEEK4:
+        case LLM_ARCH_QWEN4EXP:
+        case LLM_ARCH_GLM5NEXT:
+            break;
+        default:
+            return false;
+    }
+
+    const int n_proc_layers  = (int) hparams.n_layer - (int) hparams.nextn_predict_layers;
+    const llama_stage_cfg sc = llama_stage_get_cfg(n_proc_layers);
+
+    return sc.active && sc.emit_hidden && llama_stage_consumes_last(sc, n_proc_layers);
+}
+
 static uint32_t llama_output_embd_width(const llama_context & lctx) {
+    if (llama_stage_emits_hc_bundle(lctx)) {
+        return lctx.model.hparams.n_embd_hc_bundle();
+    }
     return llama_mtp_state_n_embd(&lctx);
 }
 
@@ -6652,6 +6684,9 @@ static int llama_decode_internal(
     auto & kv_self = lctx.kv_self;
 
     const int64_t n_embd  = hparams.n_embd;
+    // stride of one injected batch.embd row: a hyper-connection architecture is handed the
+    // whole hc * n_embd residual bundle per token, every other architecture a single vector
+    const int64_t n_embd_inp = hparams.n_embd_hc_bundle();
     const int64_t n_vocab = hparams.n_vocab;
 
     uint32_t n_outputs = 0;
@@ -6794,7 +6829,7 @@ static int llama_decode_internal(
         llama_batch u_batch = {
             /* .n_tokens   = */ (int32_t) n_tokens,
             /* .token      = */ batch_all.token     ? batch_all.token    + cur_token        : nullptr,
-            /* .embd       = */ batch_all.embd      ? batch_all.embd     + cur_token*n_embd : nullptr,
+            /* .embd       = */ batch_all.embd      ? batch_all.embd     + cur_token*n_embd_inp : nullptr,
             /* .pos        = */ u_batch_pos,
             /* .n_seq_id   = */ batch_all.n_seq_id  ? batch_all.n_seq_id + cur_token        : nullptr,
             /* .seq_id     = */ batch_all.seq_id    ? batch_all.seq_id   + cur_token        : nullptr,
@@ -7203,6 +7238,9 @@ static int llama_decode_internal(
                         if (n_outputs_new_embd) {
                             GGML_ASSERT( n_outputs_prev_embd + n_outputs_new_embd <= n_outputs_embd);
                             GGML_ASSERT((n_outputs_prev_embd + n_outputs_new_embd)*n_embd_output <= (int64_t) lctx.embd_size);
+                            // the reserved row width must match the emitted tensor, or this read runs
+                            // off the end of it (a wide residual bundle vs a plain n_embd row)
+                            GGML_ASSERT(embd->ne[0] == (int64_t) n_embd_output && "embedding output width does not match the graph");
                             ggml_backend_tensor_get_async(backend_embd, embd, embd_out, 0, n_outputs_new_embd*n_embd_output*sizeof(float));
                         }
                     } break;
