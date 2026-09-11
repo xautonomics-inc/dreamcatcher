@@ -16340,7 +16340,11 @@ static bool ggml_backend_vk_device_supports_op_impl(size_t dev_num, const ggml_t
                 case GGML_UNARY_OP_GELU:
                 case GGML_UNARY_OP_RELU:
                 case GGML_UNARY_OP_SIGMOID: // ik-port: dedicated siglu pipeline
-                    return op->src[0]->type == GGML_TYPE_F32 && op->src[1]->type == GGML_TYPE_F32 && op->type == GGML_TYPE_F32;
+                    // ik-port: the GLU split mapping cannot broadcast. ik CPU kernels allow
+                    // src0 [1,H] gating src1 [D,H] (e.g. bailingmoe3 per-head attention gate);
+                    // decline mismatched shapes so the op falls back to CPU.
+                    return op->src[0]->type == GGML_TYPE_F32 && op->src[1]->type == GGML_TYPE_F32 && op->type == GGML_TYPE_F32 &&
+                           ggml_are_same_shape(op->src[0], op->src[1]);
                 default:
                     return false;
             }
