@@ -377,7 +377,9 @@ static bool load(model_bundle & b, const std::string & path, const std::vector<a
     mp.n_ubatch     = (n_ubatch > 0) ? n_ubatch : (n_ctx < 2048 ? n_ctx : 2048);
     if (g_amb > 0) mp.amb = g_amb;
     if (g_fit_margin > 0) mp.fit_margin = g_fit_margin;   // per-GPU VRAM reserve before fit offloads (MiB)
-    mp.fit = buft_ovr.empty();   // ik auto-fit: planner adds per-layer expert-CPU overrides until the
+    // An explicit -ngl 0 means CPU: the auto-fit planner would otherwise ignore it and
+    // offload onto every visible GPU (it only stands down for a tensor-buft override).
+    mp.fit = buft_ovr.empty() && ngl != 0;   // ik auto-fit: planner adds per-layer expert-CPU overrides until the
                      // model fits (fleet-preferred; no-op when everything fits). ik FORBIDS fit together
                      // with MANUAL tensor overrides ("cannot be used with --fit"), so disable auto-fit
                      // whenever -ot/-cmoe is given and honour the explicit overrides instead.
