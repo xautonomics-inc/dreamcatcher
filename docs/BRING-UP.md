@@ -97,8 +97,9 @@ The single-box loopback validates per-layer loading, tensor serialization, and t
 Use `layer_distribution.plan` to compute deterministic layer boundaries and screen VRAM feasibility:
 
 > [!IMPORTANT]
-> **Gemma-4 Quantization Variant (meta#80)**:
-> Build the layer library from the **Unsloth Q4_0 quant** (`unsloth/gemma-4-12b-it-GGUF`, where `token_embd` is quantized as `Q4_K`). Google's official `gemma-4-12b-it-qat-q4_0.gguf` carries a `Q6_K` `token_embd` tensor which currently triggers degenerate output (`011111111111`) on this fork across both CPU and CUDA (tracked in meta#80). The Unsloth Q4_0 quant executes correctly end-to-end.
+> **Gemma-4 Quantization Variant & CPU Execution (meta#80 / meta#81)**:
+> - **Quantization (meta#80)**: Build the layer library from the **Unsloth Q4_0 quant** (`unsloth/gemma-4-12b-it-GGUF`, where `token_embd` is quantized as `Q4_K`). Google's official `gemma-4-12b-it-qat-q4_0.gguf` carries a `Q6_K` `token_embd` tensor which currently triggers degenerate output (`011111111111`) across both CPU and CUDA (tracked in meta#80).
+> - **Execution Mode (meta#81)**: Run the Gemma-4 stage runner with `-ngl 0` (CPU build). The Gemma-4 loopback logs and completions documented in this guide are captured from CPU execution; the fork's Gemma-4 CUDA graph is currently being stabilized under meta#81.
 
 ```bash
 python3 -m layer_distribution.plan /models/gemma4-12b-q4_0-layers \
