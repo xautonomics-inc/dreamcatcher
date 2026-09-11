@@ -1787,7 +1787,10 @@ llm_expert_gating_func_type   gating_op,
 
     auto split_up_exps    = up_exps ? (ggml_split_tensor_t *)up_exps->extra : nullptr;
     auto split_gate_exps  = gate_exps ? (ggml_split_tensor_t *)gate_exps->extra : nullptr;
-    auto split_down_exps  = (ggml_split_tensor_t *)down_exps->extra;
+    // down_exps is null on a layer whose routed experts are served remotely
+    // (they were TENSOR_SKIPped at load), so this needs the same guard the
+    // up/gate lookups above already have
+    auto split_down_exps  = down_exps ? (ggml_split_tensor_t *)down_exps->extra : nullptr;
     auto split_up_shexp   = up_shexp   ? (ggml_split_tensor_t *)up_shexp->extra   : nullptr;
     auto split_gate_shexp = gate_shexp ? (ggml_split_tensor_t *)gate_shexp->extra : nullptr;
     auto split_down_shexp = down_shexp ? (ggml_split_tensor_t *)down_shexp->extra : nullptr;
