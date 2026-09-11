@@ -16779,6 +16779,10 @@ static bool ggml_backend_vk_device_supports_op_impl(size_t dev_num, const ggml_t
                 return op->type == GGML_TYPE_F32;
             }
         case GGML_OP_SSM_SCAN:
+            // ik-port: ik ssm_scan has DIFFERENT source semantics than the mainline
+            // kernel grafted here — running it silently miscomputes (bailingmoe3/KDA
+            // garbage, issue #2). Decline -> CPU fallback.
+            return false;
             {
                 for (int i = 0; i < 6; i++) {
                     if (op->src[i] && ggml_is_quantized(op->src[i]->type)) {
@@ -16817,7 +16821,10 @@ static bool ggml_backend_vk_device_supports_op_impl(size_t dev_num, const ggml_t
                 return true;
             }
         case GGML_OP_SSM_CONV:
-            return op->src[0]->type == GGML_TYPE_F32;
+            // ik-port: ik ssm_conv is a 5-tensor stateful op (s, x, c, sq, saved_steps);
+            // the mainline kernel here reads src0/src1 only -> silent garbage on KDA
+            // layers (issue #2). Decline -> CPU fallback.
+            return false;
         case GGML_OP_CONV_TRANSPOSE_1D:
             return op->src[0]->type == GGML_TYPE_F32 && op->src[1]->type == GGML_TYPE_F32;
         case GGML_OP_CONV_2D:
