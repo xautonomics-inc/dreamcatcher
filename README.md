@@ -10,8 +10,8 @@ This repository started as a fork of [llama.cpp](https://github.com/ggerganov/ll
 >If you are running hybrid CPU/GPU inference for MoE models with all or some experts left on the CPU, **do not use -rtr** unless you know what you are doing. The `-rtr` option causes all tensors left in RAM to be repacked to row-interleaved format while loading the model. As not all quantization types have a CUDA implementation, this will result in matrix multiplications with these tensors to be **always done on the CPU**, even when it would have been much better to offload the computation to the GPU, typically resulting in lower prompt processing speed. Most notably, k-quants (`K2_K, Q3_K, Q4_K, Q5_K, Q6_K`) do not have CUDA row-interleaved implementation.
 
 >[!NOTE]
->The only fully functional and performant compute backends are CPU (`AVX2` or better, `ARM_NEON` or better) and CUDA (Turing or newer). 
->Please do not enter issues related to ROCm, Vulkan, Metal, old Nvidia GPUs, `AVX` CPUs, etc. They will not get resolved unless you roll up your sleeves and help bring your favorite backend up to speed. With the current regular contributors this project simply does not have the bandwidth to work on all backends available in `llama.cpp`.
+>The supported compute backends are CPU (`AVX2` or better, `ARM_NEON` or better), CUDA (Turing or newer), and Vulkan (RDNA2 or newer, see [Vulkan backend docs](docs/VULKAN-BACKEND.md)).
+>Please do not enter issues related to ROCm, Metal, old Nvidia GPUs, `AVX` CPUs, etc. They will not get resolved unless you roll up your sleeves and help bring your favorite backend up to speed. With the current regular contributors this project simply does not have the bandwidth to work on all backends available in `llama.cpp`.
  
 >[!IMPORTANT]
 >Do not use quantized models from Unsloth that have `_XL` in their name. These are likely to not work with `ik_llama.cpp`.
@@ -60,6 +60,30 @@ cmake -B build -DGGML_NATIVE=ON -DGGML_CUDA=ON
 
 cmake --build build --config Release -j$(nproc)
 ```
+### Build for Vulkan
+
+```
+cmake -B build -DGGML_VULKAN=ON
+cmake --build build --config Release -j$(nproc)
+```
+
+Vulkan backend support covers RDNA2/RDNA4 (RADV and NVIDIA), and Intel ANV (self-consistent).
+See [Vulkan backend docs](docs/VULKAN-BACKEND.md) for device compatibility, build prerequisites
+(including the new `spirv-headers` dependency), and the `-ngl 0` semantics.
+
+### Backend reference
+
+| Backend | CMake flag | Status | Notes |
+|---------|-----------|--------|-------|
+| CPU | `-DGGML_NATIVE=ON` | Production | `AVX2` or better, `ARM_NEON` or better |
+| CUDA | `-DGGML_CUDA=ON` | Production | Turing or newer |
+| Vulkan | `-DGGML_VULKAN=ON` | Verified | RDNA2/RDNA4 (RADV + NVIDIA), Intel ANV (self-consistent) |
+| Expert-server | N/A | Verified | Distributed MoE; CPU byte-exact all-remote on x86_64/aarch64 |
+
+Distributed MoE inference is supported via the expert-server role (`llama-expert-server`),
+which allows routed-expert tensors to be served by a remote process. See
+[LANE 10 documentation](docs/LANES-9-11.md#lane-10-expert-server-port) for details.
+
 ### Step-by-step instructions for a case of a successful Windows build
 https://github.com/ikawrakow/ik_llama.cpp/blob/main/docs/build.md
 
