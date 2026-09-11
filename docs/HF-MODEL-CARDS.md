@@ -19,17 +19,15 @@ See [KNOWN-ISSUES.md](KNOWN-ISSUES.md) for the known-bad cases.
 
 | Architecture | head/tail split | Backends |
 |---|---|---|
-| `deepseek4` | verified (pending numeric check) | CUDA verified; Vulkan — AMD RDNA4 (RADV, CPU-exact), NVIDIA (coopmat1, CPU-exact), Intel ANV (self-consistent); AMD RDNA3 known-bad in this snapshot (Vulkan flash attention, see `meta#85`) |
-| `qwen4exp` | verified | CUDA verified; Vulkan — AMD RDNA4 (RADV, CPU-exact), NVIDIA (coopmat1, CPU-exact), Intel ANV (self-consistent); AMD RDNA3 known-bad in this snapshot (Vulkan flash attention, see `meta#85`) |
-| `glm5next` | verified | CUDA verified; Vulkan — AMD RDNA4 (RADV, CPU-exact), NVIDIA (coopmat1, CPU-exact), Intel ANV (self-consistent); AMD RDNA3 known-bad in this snapshot (Vulkan flash attention, see `meta#85`) |
-| `gemma4` | self-consistent (both stages agree) | CPU verified (Q4_K embedding); CUDA batched prefill known-bad (`meta#81`); Q6_K embedding known-bad (`meta#80`); Vulkan — AMD RDNA4 (RADV, CPU-exact), NVIDIA (coopmat1, CPU-exact), Intel ANV (self-consistent); AMD RDNA3 known-bad in this snapshot (Vulkan flash attention, see `meta#85`) |
+| `deepseek4` | verified (pending numeric check) | CUDA verified; Vulkan verified — AMD RDNA4 and RDNA3 (RADV): flash-attention sweep clean and token-exact on chat-formatted prompts, a bare greedy prompt can differ from CPU by rounding (see meta#85); NVIDIA (coopmat1): CPU-exact; Intel ANV: self-consistent, not CPU-exact; AMD RDNA3.5 (8060S APU): verified for the expert-server path |
+| `qwen4exp` | verified | CUDA verified; Vulkan verified — AMD RDNA4 and RDNA3 (RADV): flash-attention sweep clean and token-exact on chat-formatted prompts, a bare greedy prompt can differ from CPU by rounding (see meta#85); NVIDIA (coopmat1): CPU-exact; Intel ANV: self-consistent, not CPU-exact; AMD RDNA3.5 (8060S APU): verified for the expert-server path |
+| `glm5next` | verified | CUDA verified; Vulkan verified — AMD RDNA4 and RDNA3 (RADV): flash-attention sweep clean and token-exact on chat-formatted prompts, a bare greedy prompt can differ from CPU by rounding (see meta#85); NVIDIA (coopmat1): CPU-exact; Intel ANV: self-consistent, not CPU-exact; AMD RDNA3.5 (8060S APU): verified for the expert-server path |
+| `gemma4` | self-consistent (both stages agree) | CPU verified (Q4_K embedding); CUDA batched prefill known-bad (`meta#81`); Q6_K embedding known-bad (`meta#80`); Vulkan verified — AMD RDNA4 and RDNA3 (RADV): flash-attention sweep clean and token-exact on chat-formatted prompts, a bare greedy prompt can differ from CPU by rounding (see meta#85); NVIDIA (coopmat1): CPU-exact; Intel ANV: self-consistent, not CPU-exact; AMD RDNA3.5 (8060S APU): verified for the expert-server path |
 
 ### Card wording (drop-in)
 
 > **head/tail split verified:** deepseek4 (pending numeric check), qwen4exp,
-> glm5next; **backends:** CUDA verified, Vulkan verified — AMD RDNA4 (RADV, CPU-exact),
-> NVIDIA (coopmat1, CPU-exact), Intel ANV (self-consistent); AMD RDNA3 known-bad in this
-> snapshot (Vulkan flash attention, see `meta#85`).
+> glm5next; **backends:** CUDA verified, Vulkan verified — AMD RDNA4 and RDNA3 (RADV): flash-attention sweep clean and token-exact on chat-formatted prompts, a bare greedy prompt can differ from CPU by rounding (see meta#85); NVIDIA (coopmat1): CPU-exact; Intel ANV: self-consistent, not CPU-exact; AMD RDNA3.5 (8060S APU): verified for the expert-server path.
 
 Use the line above verbatim for the three archs it names. For `gemma4`, use the
 per-arch note below instead, because its support is conditional on the quant
@@ -41,21 +39,15 @@ variant and the backend.
 - **head/tail split:** verified. A final numeric (byte-identical token) check
   against the single-process reference is still pending; the split machinery
   itself is confirmed.
-- **backends:** CUDA verified. Vulkan verified — AMD RDNA4 (RADV, CPU-exact),
-  NVIDIA (coopmat1, CPU-exact), Intel ANV (self-consistent); AMD RDNA3 known-bad in this
-  snapshot (Vulkan flash attention, see `meta#85`).
+- **backends:** CUDA verified. Vulkan verified — AMD RDNA4 and RDNA3 (RADV): flash-attention sweep clean and token-exact on chat-formatted prompts, a bare greedy prompt can differ from CPU by rounding (see meta#85); NVIDIA (coopmat1): CPU-exact; Intel ANV: self-consistent, not CPU-exact; AMD RDNA3.5 (8060S APU): verified for the expert-server path.
 
 ### `qwen4exp`
 - **head/tail split:** verified.
-- **backends:** CUDA verified. Vulkan verified — AMD RDNA4 (RADV, CPU-exact),
-  NVIDIA (coopmat1, CPU-exact), Intel ANV (self-consistent); AMD RDNA3 known-bad in this
-  snapshot (Vulkan flash attention, see `meta#85`).
+- **backends:** CUDA verified. Vulkan verified — AMD RDNA4 and RDNA3 (RADV): flash-attention sweep clean and token-exact on chat-formatted prompts, a bare greedy prompt can differ from CPU by rounding (see meta#85); NVIDIA (coopmat1): CPU-exact; Intel ANV: self-consistent, not CPU-exact; AMD RDNA3.5 (8060S APU): verified for the expert-server path.
 
 ### `glm5next`
 - **head/tail split:** verified.
-- **backends:** CUDA verified. Vulkan verified — AMD RDNA4 (RADV, CPU-exact),
-  NVIDIA (coopmat1, CPU-exact), Intel ANV (self-consistent); AMD RDNA3 known-bad in this
-  snapshot (Vulkan flash attention, see `meta#85`).
+- **backends:** CUDA verified. Vulkan verified — AMD RDNA4 and RDNA3 (RADV): flash-attention sweep clean and token-exact on chat-formatted prompts, a bare greedy prompt can differ from CPU by rounding (see meta#85); NVIDIA (coopmat1): CPU-exact; Intel ANV: self-consistent, not CPU-exact; AMD RDNA3.5 (8060S APU): verified for the expert-server path.
 
 ### `gemma4`
 - **head/tail split:** the two-stage loopback is self-consistent (head and tail

@@ -73,7 +73,7 @@ discrete-GPU filter — document when selecting a device.
 **Status:** the Vulkan backend is **not** claimed as working on the NVIDIA Vulkan ICD in this snapshot;
 the fix is expected to come from upstream first.
 
-> **Update (meta#85):** the RDNA4 (RADV) wrong-token issue previously tracked
+> **Update (meta#85):** the RDNA4 (RADV) wrong-token issue previously tracked (note: on the current tip RDNA4's bare greedy prompt can still differ from the CPU by rounding, like RDNA3 — the flash-attention sweep is clean on both)
 > under this handle has been fixed by the lane 9 graft — see the measured device
 > matrix in `docs/VULKAN-BACKEND.md`. RDNA4 (RADV) now reproduces the CPU output
 > exactly. The NVIDIA ICD drift and the empty-`GGML_VK_VISIBLE_DEVICES` segfault
