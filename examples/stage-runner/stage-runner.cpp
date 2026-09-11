@@ -28,6 +28,7 @@
 
 #include "llama.h"
 #include "layer-manifest.h"
+#include "gslot_client.h"
 #include "ggml.h"
 #include "ggml-backend.h"
 // NOTE: the mainline driver included "../../src/llama-ext.h" for the custom
@@ -56,6 +57,7 @@
 #include <csignal>
 
 static const int32_t STAGE_MAGIC = 0x53544732; // "STG2" (v2: per-row tagged)
+static gslot::gate g_gslot; // SPEC-016: global slot compute arbiter (default OFF)
 
 // ---- hidden-state blob: n_rows rows, each tagged (seq,pos), n_embd floats ----
 // n_embd is the model's INTER-BLOCK residual width (llama_model_n_embd_inp), not
@@ -745,8 +747,10 @@ int main(int argc, char ** argv) {
         for (int p = 0; p < plen; ++p) { tok.push_back(ptoks[p]); seq.push_back(0); pos.push_back(p); }
         hidden_blob h;
         auto pt0 = std::chrono::steady_clock::now();
+        while (!g_gslot.open(gslot::now_ms_monotonic())) { usleep(2000); }
         if (!run_tokens(b, tok, seq, pos, h)) { fprintf(stderr,"stage[head/mtp]: prefill failed\n"); return 1; }
         if (!send_hidden(fd, h)) return 1;
+        g_gslot.handoff();
         mtp_msg m;
         if (!recv_mtp_msg(rfd, m)) { fprintf(stderr,"stage[head/mtp]: prefill return failed\n"); return 1; }
         double psec = std::chrono::duration<double>(std::chrono::steady_clock::now() - pt0).count();
@@ -761,11 +765,14 @@ int main(int argc, char ** argv) {
             for (size_t i = 0; i < m.issue.size(); ++i) dp[i] = m.p_base + (int) i;
             llama_kv_cache_seq_rm(b.ctx, 0, m.p_base, -1);   // rollback rejected-draft KV in OUR window
             hidden_blob hh;
+            while (!g_gslot.open(gslot::now_ms_monotonic())) { usleep(2000); }
             if (!run_tokens(b, dt, ds, dp, hh)) { fprintf(stderr,"stage[head/mtp]: verify decode failed\n"); break; }
             if (!send_hidden(fd, hh)) break;
+            g_gslot.handoff();
             if (!recv_mtp_msg(rfd, m)) break;
             n_waves++;
         }
+        g_gslot.yield();
         double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
         fprintf(stderr, "stage[head/mtp]: %ld tokens in %ld waves in %.2fs = %.2f tok/s (%.2f tok/wave)\n",
                 n_out, n_waves, sec, sec > 0 ? n_out/sec : 0.0, n_waves > 0 ? (double) n_out/n_waves : 0.0);
@@ -781,8 +788,10 @@ int main(int argc, char ** argv) {
         std::vector<int32_t> tok, seq, pos;
         for (int s = 0; s < slots; ++s) for (int p = 0; p < plen; ++p) { tok.push_back(ptoks[p]); seq.push_back(s); pos.push_back(p); }
         hidden_blob h;
+        while (!g_gslot.open(gslot::now_ms_monotonic())) { usleep(2000); }
         if (!run_tokens(b, tok, seq, pos, h)) { fprintf(stderr,"stage[head]: prefill failed\n"); return 1; }
         if (!send_hidden(fd, h)) return 1;
+        g_gslot.handoff();
         std::vector<int32_t> n_past(slots, plen);
         fprintf(stderr, "stage[head]: prefilled %d slots x %d tok\n", slots, plen);
         int hsteps = 0;
@@ -793,10 +802,13 @@ int main(int argc, char ** argv) {
             std::vector<int32_t> dt, ds, dp;
             for (int s = 0; s < slots; ++s) { dt.push_back(back[s]); ds.push_back(s); dp.push_back(n_past[s]++); }
             hidden_blob hd;
+            while (!g_gslot.open(gslot::now_ms_monotonic())) { usleep(2000); }
             if (!run_tokens(b, dt, ds, dp, hd)) break;
             if (!send_hidden(fd, hd)) break;
+            g_gslot.handoff();
             hsteps++;
         }
+        g_gslot.yield();
         double hsec = std::chrono::duration<double>(std::chrono::steady_clock::now() - ht0).count();
         double hagg = (double) hsteps * slots / hsec;
         fprintf(stderr, "stage[head]: DECODE %d steps x %d slots in %.2fs = %.2f tok/s agg, %.2f t/s/slot\n",
@@ -807,7 +819,9 @@ int main(int argc, char ** argv) {
         llama_kv_cache_clear(b.ctx); // fresh KV per client
         hidden_blob h, dummy;
         if (!recv_hidden(fd, h)) { close(fd); continue; }
+        while (!g_gslot.open(gslot::now_ms_monotonic())) { usleep(2000); }
         if (!run_hidden(b, h, false, dummy)) { fprintf(stderr,"stage[tail]: prefill failed\n"); close(fd); continue; }
+        g_gslot.handoff();
         // output rows == input rows; the last row of each seq carries its logits.
         int C = 0; for (int v : h.seq) C = (v+1 > C) ? v+1 : C;
         std::vector<int> lastrow(C, -1);
@@ -823,11 +837,14 @@ int main(int argc, char ** argv) {
             if (!send_tokens(fd, tok, 0)) break;
             hidden_blob hd;
             if (!recv_hidden(fd, hd)) break;
+            while (!g_gslot.open(gslot::now_ms_monotonic())) { usleep(2000); }
             if (!run_hidden(b, hd, false, dummy)) break;
+            g_gslot.handoff();
             for (int s = 0; s < C; ++s) tok[s] = argmax_ith(b, s);
             if (getenv("STAGE_PRINT")) for (int s = 0; s < C; ++s) print_piece(b, tok[s], s);
             gen++; dsteps++;
         }
+        g_gslot.yield();
         double sec = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
         send_tokens(fd, tok, 1);
         double agg = (double) dsteps * C / sec;
@@ -848,14 +865,17 @@ int main(int argc, char ** argv) {
             hidden_blob in, out; long steps = 0;
             for (;;) {
                 if (!recv_hidden(fd_up, in)) break;
+                while (!g_gslot.open(gslot::now_ms_monotonic())) { usleep(2000); }
                 if (!run_hidden(b, in, /*emit=*/true, out)) break;
                 if (!send_hidden(fd_down, out)) break;
+                g_gslot.handoff();
                 std::vector<int32_t> toks; int32_t eog;
                 if (!recv_tokens(fd_down, toks, eog)) break;
                 if (!send_tokens(fd_up, toks, eog)) break;
                 steps++;
                 if (eog) break;
             }
+            g_gslot.yield();
             close(fd_up); close(fd_down);
             fprintf(stderr, "stage[relay]: client done (%ld steps)\n", steps);
         }
