@@ -148,10 +148,11 @@ compared against the same build's CPU output.
 
 | Device / driver | Matrix path | Result with this backend |
 |---|---|---|
-| AMD RDNA4 (RX 9070 class, RADV) | none | **Fixed.** Reproduces the CPU output exactly. The pre-graft backend produced garbage on this device. |
+| AMD RDNA4 (RX 9070 class, RADV) | none | **Fixed.** Flash-attention sweep clean (828/828 with the corrected harness); the pre-graft backend produced garbage on this device. Token-exact against the CPU at the lane-9 checkpoint; on the current tip a bare greedy prompt can differ from the CPU by rounding on the integer-dot matmul path (same class as RDNA3, see meta#85); the head/tail split reproduces the single-process output exactly. |
 | NVIDIA Blackwell (RTX 50 class) | `KHR_coopmat` | **Exact.** Reproduces the CPU output token for token -- the only GPU configuration measured that does so on this hardware. |
 | NVIDIA Blackwell (RTX 50 class) | `NV_coopmat2` | Wrong. Declined by default; see above. |
 | Intel Arc B-series (BMG, ANV) | `KHR_coopmat` | Self-consistent and unchanged from the pre-graft backend, but does not reproduce the CPU output token for token. Not investigated further. |
+| AMD RDNA3.5 (Radeon 8060S APU, RADV) | `KHR_coopmat` | **Verified for the expert-server path.** 111 GiB of GLM-5.3-Flash routed experts served from the APU to a CUDA head: 12/12 tokens identical to the local-experts reference; `MUL_MAT_ID` 1647/1648 and `MUL_MAT` 1646/1648 (the iq4_xs / bf16 cases fail as on every other device). |
 | AMD RDNA3 (RX 7900 XT, RADV) | `KHR_coopmat` | **Op-exact; token-exact on a well-posed prompt.** Every flash-attention shape a Gemma-4 12B emits passes against the CPU (830 `FLASH_ATTN_EXT` cases in the corrected sweep below, 0 failures; 2144/2152 for the whole sweep, the 8 left being the pre-existing `CPY`, `iq4_xs` / `bf16` `MUL_MAT`, `MUL_MAT_ID` and `PAD` cases), a Qwen3 8B is token-exact with `-fa on` and `-fa off`, and the chat-formatted Gemma-4 prompt reproduces the CPU output token for token. The bare completion prompt used for the rows above does **not** reproduce the CPU tokens on this device; see `meta#85` in `docs/KNOWN-ISSUES.md` for why that is rounding-order sensitivity of that prompt, not a kernel fault. |
 
 A CPU-only run (`-ngl 0`, every tensor forced to the CPU with `-ot`) produces
