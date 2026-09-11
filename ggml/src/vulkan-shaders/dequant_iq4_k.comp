@@ -1,0 +1,40 @@
+#version 450
+
+#include "dequant_head.glsl"
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout (binding = 0) readonly buffer A {A_TYPE data_a[];};
+layout (binding = 1) writeonly buffer D {D_TYPE data_b[];};
+
+void main() {
+    // Each thread handles one 16-element sub-group of a 256-element block
+    const uint i = gl_WorkGroupID.x * 256 + gl_LocalInvocationID.x;
+    const uint ib = i / 16;
+
+#ifdef NEEDS_INIT_IQ_SHMEM
+    init_iq_shmem(gl_WorkGroupSize);
+#endif
+
+    if (ib >= p.nel / 256) {
+        return;
+    }
+
+    const uint g = i % 16; // 16-element group within the block
+
+    const uint ib32 = g / 2;
+    const uint h    = g & 1;
+
+    const float d = float(data_a[ib].d);
+    const uint sh = data_a[ib].scales_h[ib32/2] >> (4 * (ib32 & 1));
+    const uint sl = data_a[ib].scales_l[ib32];
+    const float dl = d * float(h == 0 ? int((sl & 0xF) | ((sh << 4) & 0x30)) - 32
+                                      : int((sl >>  4) | ((sh << 2) & 0x30)) - 32);
+    const uint tab = 16 * ((uint(data_a[ib].extra) >> (2*ib32 + h)) & 1);
+
+    const uint b_idx = 256 * ib + 32 * ib32 + 16 * h;
+    const uint q_idx = 16 * ib32;
+    [[unroll]] for (uint l = 0; l < 16; ++l) {
+        data_b[b_idx + l] = D_TYPE(dl * kvalues_iq4k[tab + ((data_a[ib].qs[q_idx + l] >> (4*h)) & 0xF)]);
+    }
+}

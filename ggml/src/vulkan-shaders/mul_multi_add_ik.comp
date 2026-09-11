@@ -1,0 +1,53 @@
+#version 450
+
+// ik-port: ik_llama.cpp GGML_OP_MUL_MULTI_ADD — weighted MoE expert combine.
+// dst[k, ir] = sum_j src0[k, j, ir] * w(j, ir)
+//   w(j, ir) = src1[0, j, ir]                                  (has_ids == 0)
+//   w(j, ir) = src1[0, j, ir] * scales[ids[j, ir]]             (has_ids == 1)
+// Reference: iqk_mul_multi_add in ggml/src/iqk/iqk_cpu_ops.cpp
+
+#extension GL_EXT_control_flow_attributes : enable
+
+layout (push_constant) uniform parameter
+{
+    uint ne;     // total dst elements
+    uint ne0;    // dst row length
+    uint nexp;   // src0->ne[1] (experts per token)
+    uint nb1;    // dst row stride           (float units)
+    uint nb01;   // src0 expert stride       (float units)
+    uint nb02;   // src0 token stride        (float units)
+    uint nb11;   // src1 expert stride       (float units)
+    uint nb12;   // src1 token stride        (float units)
+    uint nb31;   // src3 ids token stride    (int units)
+    uint has_ids;
+} p;
+
+layout(local_size_x = 512, local_size_y = 1, local_size_z = 1) in;
+
+layout (binding = 0) readonly  buffer A {float data_a[];};
+layout (binding = 1) readonly  buffer B {float data_b[];};
+layout (binding = 2) readonly  buffer S {float data_s[];};
+layout (binding = 3) readonly  buffer I {int   data_i[];};
+layout (binding = 4) writeonly buffer D {float data_d[];};
+
+void main() {
+    const uint i = gl_GlobalInvocationID.z * 262144 + gl_GlobalInvocationID.y * 512 + gl_GlobalInvocationID.x;
+
+    if (i >= p.ne) {
+        return;
+    }
+
+    const uint ir = i / p.ne0;
+    const uint k  = i % p.ne0;
+
+    float sum = 0.0f;
+    for (uint j = 0; j < p.nexp; ++j) {
+        float w = data_b[ir*p.nb12 + j*p.nb11];
+        if (p.has_ids != 0) {
+            w *= data_s[data_i[ir*p.nb31 + j]];
+        }
+        sum += data_a[ir*p.nb02 + j*p.nb01 + k] * w;
+    }
+
+    data_d[ir*p.nb1 + k] = sum;
+}
