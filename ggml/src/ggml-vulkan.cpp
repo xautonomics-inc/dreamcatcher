@@ -2,7 +2,7 @@
 #include <vulkan/vulkan_core.h>
 #if defined(GGML_VULKAN_RUN_TESTS) || defined(GGML_VULKAN_CHECK_RESULTS)
 #include <chrono>
-#include "ggml-cpu.h"
+// ik-port: ik is pre-module-split — ggml-cpu.h symbols live in ggml.h (already included)
 #endif
 
 // See https://github.com/KhronosGroup/Vulkan-Hpp?tab=readme-ov-file#extensions--per-device-function-pointers-
@@ -2140,6 +2140,10 @@ static size_t vk_skip_checks;
 static size_t vk_output_tensor;
 
 static void ggml_vk_print_tensor(const ggml_tensor * tensor, const char * name);
+// ik-port shims: mainline param helpers absent from ik
+static inline void ggml_set_op_params_i32(struct ggml_tensor * t, uint32_t i, int32_t v) { ((int32_t *)t->op_params)[i] = v; }
+static inline void ggml_set_op_params_f32(struct ggml_tensor * t, uint32_t i, float v)   { ((float *)t->op_params)[i] = v; }
+
 static void ggml_vk_check_results_0(ggml_backend_vk_context * ctx, ggml_cgraph * cgraph, int tensor_idx);
 static void ggml_vk_check_results_1(ggml_backend_vk_context * ctx, ggml_cgraph * cgraph, int tensor_idx);
 #endif
@@ -17470,9 +17474,9 @@ static void ggml_vk_check_results_0(ggml_backend_vk_context * ctx, ggml_cgraph *
         } else if (tensor->op == GGML_OP_SQRT) {
             tensor_clone = ggml_sqrt(ggml_ctx, src_clone[0]);
         } else if (tensor->op == GGML_OP_SIN) {
-            tensor_clone = ggml_sin(ggml_ctx, src_clone[0]);
+            GGML_ABORT("ik-port: clone for ggml_sin not available (op never emitted by ik graphs)");
         } else if (tensor->op == GGML_OP_COS) {
-            tensor_clone = ggml_cos(ggml_ctx, src_clone[0]);
+            GGML_ABORT("ik-port: clone for ggml_cos not available (op never emitted by ik graphs)");
         } else if (tensor->op == GGML_OP_LOG) {
             tensor_clone = ggml_log(ggml_ctx, src_clone[0]);
         } else if (tensor->op == GGML_OP_TRI) {
@@ -17483,8 +17487,8 @@ static void ggml_vk_check_results_0(ggml_backend_vk_context * ctx, ggml_cgraph *
             const float * params = (const float *)tensor->op_params;
             tensor_clone = ggml_clamp(ggml_ctx, src_clone[0], params[0], params[1]);
         } else if (tensor->op == GGML_OP_PAD) {
-            tensor_clone = ggml_pad_ext(ggml_ctx, src_clone[0], tensor->op_params[0], tensor->op_params[1], tensor->op_params[2], tensor->op_params[3],
-                                                                tensor->op_params[4], tensor->op_params[5], tensor->op_params[6], tensor->op_params[7]);
+            // ik-port: ik PAD is trailing-only, 4 params
+            tensor_clone = ggml_pad(ggml_ctx, src_clone[0], tensor->op_params[0], tensor->op_params[1], tensor->op_params[2], tensor->op_params[3]);
         } else if (tensor->op == GGML_OP_REPEAT) {
             tensor_clone = ggml_repeat(ggml_ctx, src_clone[0], tensor);
         } else if (tensor->op == GGML_OP_REPEAT_BACK) {
@@ -17518,7 +17522,7 @@ static void ggml_vk_check_results_0(ggml_backend_vk_context * ctx, ggml_cgraph *
                 tensor_clone = ggml_soft_max(ggml_ctx, src_clone[0]);
             }
         } else if (tensor->op == GGML_OP_SOFT_MAX_BACK) {
-            tensor_clone = ggml_soft_max_ext_back(ggml_ctx, src_clone[0], src_clone[1], ((float *)tensor->op_params)[0], ((float *)tensor->op_params)[1]);
+            GGML_ABORT("ik-port: clone for ggml_soft_max_ext_back not available (op never emitted by ik graphs)");
         } else if (tensor->op == GGML_OP_DIAG_MASK_INF) {
             tensor_clone = ggml_diag_mask_inf(ggml_ctx, src_clone[0], tensor->op_params[0]);
         } else if (tensor->op == GGML_OP_ROPE || tensor->op == GGML_OP_ROPE_BACK) {
@@ -17537,13 +17541,13 @@ static void ggml_vk_check_results_0(ggml_backend_vk_context * ctx, ggml_cgraph *
                 if (tensor->op == GGML_OP_ROPE) {
                     tensor_clone = ggml_rope_multi(ggml_ctx, src_clone[0], src_clone[1], src_clone[2], n_dims, sections, mode, n_ctx_orig_ggml, freq_base, freq_scale, ext_factor, attn_factor, beta_fast, beta_slow);
                 } else {
-                    tensor_clone = ggml_rope_multi_back(ggml_ctx, src_clone[0], src_clone[1], src_clone[2], n_dims, sections, mode, n_ctx_orig_ggml, freq_base, freq_scale, ext_factor, attn_factor, beta_fast, beta_slow);
+                    GGML_ABORT("ik-port: clone for ggml_rope_multi_back not available (op never emitted by ik graphs)");
                 }
             } else {
                 if (tensor->op == GGML_OP_ROPE) {
                     tensor_clone = ggml_rope_ext(ggml_ctx, src_clone[0], src_clone[1], src_clone[2], n_dims, mode, n_ctx_orig_ggml, freq_base, freq_scale, ext_factor, attn_factor, beta_fast, beta_slow);
                 } else {
-                    tensor_clone = ggml_rope_ext_back(ggml_ctx, src_clone[0], src_clone[1], src_clone[2], n_dims, mode, n_ctx_orig_ggml, freq_base, freq_scale, ext_factor, attn_factor, beta_fast, beta_slow);
+                    GGML_ABORT("ik-port: clone for ggml_rope_ext_back not available (op never emitted by ik graphs)");
                 }
             }
         } else if (tensor->op == GGML_OP_UNARY) {
@@ -17570,7 +17574,7 @@ static void ggml_vk_check_results_0(ggml_backend_vk_context * ctx, ggml_cgraph *
                 tensor_clone = ggml_relu(ggml_ctx, src_clone[0]);
                 break;
             case GGML_UNARY_OP_XIELU:
-                tensor_clone = ggml_xielu(ggml_ctx, src_clone[0], 0, 0, 0, 0);
+                GGML_ABORT("ik-port: clone for ggml_xielu not available (op never emitted by ik graphs)");
                 ggml_set_op_params_f32(tensor_clone, 1, ggml_get_op_params_f32(tensor, 1));
                 ggml_set_op_params_f32(tensor_clone, 2, ggml_get_op_params_f32(tensor, 2));
                 ggml_set_op_params_f32(tensor_clone, 3, ggml_get_op_params_f32(tensor, 3));
@@ -17601,16 +17605,16 @@ static void ggml_vk_check_results_0(ggml_backend_vk_context * ctx, ggml_cgraph *
                 tensor_clone = ggml_step(ggml_ctx, src_clone[0]);
                 break;
             case GGML_UNARY_OP_ROUND:
-                tensor_clone = ggml_round(ggml_ctx, src_clone[0]);
+                GGML_ABORT("ik-port: clone for ggml_round not available (op never emitted by ik graphs)");
                 break;
             case GGML_UNARY_OP_CEIL:
-                tensor_clone = ggml_ceil(ggml_ctx, src_clone[0]);
+                GGML_ABORT("ik-port: clone for ggml_ceil not available (op never emitted by ik graphs)");
                 break;
             case GGML_UNARY_OP_FLOOR:
-                tensor_clone = ggml_floor(ggml_ctx, src_clone[0]);
+                GGML_ABORT("ik-port: clone for ggml_floor not available (op never emitted by ik graphs)");
                 break;
             case GGML_UNARY_OP_TRUNC:
-                tensor_clone = ggml_trunc(ggml_ctx, src_clone[0]);
+                GGML_ABORT("ik-port: clone for ggml_trunc not available (op never emitted by ik graphs)");
                 break;
             case GGML_UNARY_OP_SGN:
                 tensor_clone = ggml_sgn(ggml_ctx, src_clone[0]);
@@ -17662,7 +17666,7 @@ static void ggml_vk_check_results_0(ggml_backend_vk_context * ctx, ggml_cgraph *
         } else if (tensor->op == GGML_OP_ARGMAX) {
             tensor_clone = ggml_argmax(ggml_ctx, src_clone[0]);
         } else if (tensor->op == GGML_OP_COUNT_EQUAL) {
-            tensor_clone = ggml_count_equal(ggml_ctx, src_clone[0], src_clone[1]);
+            GGML_ABORT("ik-port: clone for ggml_count_equal not available (op never emitted by ik graphs)");
         } else if (tensor->op == GGML_OP_SOLVE_TRI) {
             tensor_clone = ggml_solve_tri(ggml_ctx, src_clone[0], src_clone[1], true, true, false);
         } else if (tensor->op == GGML_OP_IM2COL) {
@@ -17687,7 +17691,7 @@ static void ggml_vk_check_results_0(ggml_backend_vk_context * ctx, ggml_cgraph *
             const int32_t d2 = tensor->op_params[8];
             const int32_t IC = tensor->op_params[9];
 
-            tensor_clone = ggml_im2col_3d(ggml_ctx, src_clone[0], src_clone[1], IC, s0, s1, s2, p0, p1, p2, d0, d1, d2, tensor->type);
+            GGML_ABORT("ik-port: clone for ggml_im2col_3d not available (op never emitted by ik graphs)");
         } else if (tensor->op == GGML_OP_TIMESTEP_EMBEDDING) {
             const int32_t dim = tensor->op_params[0];
             const int32_t max_period = tensor->op_params[1];
@@ -17730,35 +17734,42 @@ static void ggml_vk_check_results_0(ggml_backend_vk_context * ctx, ggml_cgraph *
             const float * op_params = (const float *)tensor->op_params;
             tensor_clone = ggml_leaky_relu(ggml_ctx, src_clone[0], op_params[0], false);
         } else if (tensor->op == GGML_OP_RWKV_WKV6) {
-            tensor_clone = ggml_rwkv_wkv6(ggml_ctx, src_clone[0], src_clone[1],
-            src_clone[2], src_clone[3], src_clone[4], src_clone[5]);
+            GGML_ABORT("ik-port: clone for ggml_rwkv_wkv6 not available (op never emitted by ik graphs)");
         } else if (tensor->op == GGML_OP_RWKV_WKV7) {
-            tensor_clone = ggml_rwkv_wkv7(ggml_ctx, src_clone[0], src_clone[1], src_clone[2], src_clone[3],
-            src_clone[4], src_clone[5], src_clone[6]);
+            GGML_ABORT("ik-port: clone for ggml_rwkv_wkv7 not available (op never emitted by ik graphs)");
         } else if (tensor->op == GGML_OP_GATED_DELTA_NET) {
-            tensor_clone = ggml_gated_delta_net(ggml_ctx, src_clone[0], src_clone[1],
-            src_clone[2], src_clone[3], src_clone[4], src_clone[5]);
+            GGML_ABORT("ik-port: clone for ggml_gated_delta_net not available (op never emitted by ik graphs)");
         } else if (tensor->op == GGML_OP_OPT_STEP_ADAMW) {
             src_clone[0]->flags = tensor->src[0]->flags;
-            tensor_clone = ggml_opt_step_adamw(ggml_ctx, src_clone[0], src_clone[1],
-            src_clone[2], src_clone[3], src_clone[4]);
+            GGML_ABORT("ik-port: clone for ggml_opt_step_adamw not available (op never emitted by ik graphs)");
         } else if (tensor->op == GGML_OP_OPT_STEP_SGD) {
             src_clone[0]->flags = tensor->src[0]->flags;
-            tensor_clone = ggml_opt_step_sgd(ggml_ctx, src_clone[0], src_clone[1],
-            src_clone[2]);
+            GGML_ABORT("ik-port: clone for ggml_opt_step_sgd not available (op never emitted by ik graphs)");
         } else if (tensor->op == GGML_OP_ADD_ID) {
             tensor_clone = ggml_add_id(ggml_ctx, src_clone[0], src_clone[1], src_clone[2]);
         } else if (tensor->op == GGML_OP_SSM_SCAN) {
-            tensor_clone = ggml_ssm_scan(ggml_ctx, src_clone[0], src_clone[1], src_clone[2],
-                                         src_clone[3], src_clone[4], src_clone[5], src_clone[6]);
+            GGML_ABORT("ik-port: clone for ggml_ssm_scan signature differs (op not under debug)");
         } else if (tensor->op == GGML_OP_SSM_CONV) {
-            tensor_clone = ggml_ssm_conv(ggml_ctx, src_clone[0], src_clone[1]);
+            GGML_ABORT("ik-port: clone for ggml_ssm_conv signature differs (op not under debug)");
         } else if (tensor->op == GGML_OP_ROLL) {
             const int32_t s0 = tensor->op_params[0];
             const int32_t s1 = tensor->op_params[1];
             const int32_t s2 = tensor->op_params[2];
             const int32_t s3 = tensor->op_params[3];
-            tensor_clone = ggml_roll(ggml_ctx, src_clone[0], s0, s1, s2, s3);
+            GGML_ABORT("ik-port: clone for ggml_roll not available (op never emitted by ik graphs)");
+        }
+        else if (tensor->op == GGML_OP_FUSED_RMS_NORM) {
+            const float * op_params_f = (const float *)tensor->op_params;
+            tensor_clone = ggml_fused_rms_norm(ggml_ctx, src_clone[0], src_clone[1], op_params_f[0]);
+        }
+        else if (tensor->op == GGML_OP_FUSED_MUL_UNARY) {
+            tensor_clone = ggml_fused_mul_unary(ggml_ctx, src_clone[0], src_clone[1], (enum ggml_unary_op) tensor->op_params[0]);
+        }
+        else if (tensor->op == GGML_OP_MUL_MULTI_ADD) {
+            tensor_clone = ggml_mul_multi_add(ggml_ctx, src_clone[0], src_clone[1]);
+        }
+        else if (tensor->op == GGML_OP_MULTI_ADD) {
+            tensor_clone = ggml_multi_add(ggml_ctx, src_clone[0], tensor->op_params[0]);
         }
         else {
             std::cerr << "Missing vk_check_results OP: " << ggml_op_name(tensor->op) << std::endl;
