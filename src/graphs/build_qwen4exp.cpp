@@ -2,6 +2,7 @@
 #include "../llama-model.h"
 #include "../llama-context.h"
 #include "../llama-delta-net.h"
+#include "llm_stage.h"
 
 #include <optional>
 
@@ -521,8 +522,17 @@ ggml_cgraph * llm_build_context::build_qwen4exp() {
     const int n_layer_begin = is_mtp ? n_layer - hparams.nextn_predict_layers : 0;
     const int n_layer_end   = is_mtp ? n_layer : n_layer - hparams.nextn_predict_layers;
 
+    // --- multi-stage pipeline: a head stage emits the post-window residual, not logits.
+    // Only the normal (non-MTP) path is staged; an MTP companion always finishes to logits.
+    const int n_proc_layers  = n_layer - hparams.nextn_predict_layers;
+    const llama_stage_cfg sc = llama_stage_get_cfg(n_proc_layers);
+    const bool stage_emit    = !is_mtp && sc.active && sc.emit_hidden &&
+                               llama_stage_consumes_last(sc, n_proc_layers);
+
     ggml_tensor * inp_pos = build_inp_pos();
-    ggml_tensor * inp_out_ids = (is_mtp || n_tokens > 1) ? build_inp_out_ids() : nullptr;
+    // only a stage that finishes to logits reduces to the output rows; an emitting
+    // stage must hand every row to the next stage.
+    ggml_tensor * inp_out_ids = (is_mtp || (n_tokens > 1 && !stage_emit)) ? build_inp_out_ids() : nullptr;
     ggml_tensor * KQ_mask = build_inp_KQ_mask();
 
     float KQ_scale = hparams.f_attention_scale == 0.0f ? 1.0f / sqrtf(float(n_embd_head)) : hparams.f_attention_scale;
@@ -680,6 +690,18 @@ ggml_cgraph * llm_build_context::build_qwen4exp() {
     ggml_tensor * cur = qwen4exp_hc_mix(*this, ctx0, lctx, hparams, res_hc,
             model.hc_head_norm, model.hc_head_down, model.hc_head_up,
             nullptr, nullptr, n_embd, -1, cb);
+
+    if (stage_emit) {
+        // STAGE EMIT: export the post-window residual hidden state (all rows) for the
+        // next stage; skip the lm head. Named "result_norm" so the existing embeddings
+        // extraction (POOLING_NONE -> lctx.embd) picks it up. NOTE: in emit mode
+        // llama_get_embeddings_ith therefore returns the PRE-head residual, by design.
+        // The hyper-connection multiplicity is collapsed by the hc head mixer above
+        // because the stage hidden-state transport carries n_embd floats per row.
+        cb(cur, "result_norm", -1);
+        ggml_build_forward_expand(gf, cur);
+        return gf;
+    }
 
     if (inp_out_ids) {
         cur = ggml_get_rows(ctx0, cur, inp_out_ids);
