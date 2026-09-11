@@ -697,6 +697,9 @@ int main(int argc, char ** argv) {
         } else {
             run_server(b, connect_to, ret_p, http_port, dmax, mid.empty() ? "glm-5.2" : mid);
         }
+        // flush before teardown: stdout is block-buffered when redirected, so anything
+        // that aborts in llama_free*/llama_backend_free would eat the generated output. [meta#77]
+        fflush(stdout); fflush(stderr);
         llama_free(b.ctx); llama_free_model(b.model);
         llama_backend_free();
         return 0;
@@ -863,6 +866,8 @@ int main(int argc, char ** argv) {
             printf("ARGMAX token=%d logit=%.4f piece=%s\n", best, lg[best], std::string(buf, np>0?np:0).c_str());
         }
     }
+    // flush before teardown (see the server-role teardown above) [meta#77]
+    fflush(stdout); fflush(stderr);
     llama_free(b.ctx); llama_free_model(b.model);
     return 0;
 }

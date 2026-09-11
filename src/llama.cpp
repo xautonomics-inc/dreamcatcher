@@ -4698,10 +4698,25 @@ static bool llm_load_tensors(
                         }
                     }
                 }
-                for (int il = 0; il < i_gpu_start; ++il) {
+                // il walks [0, n_layer]: index n_layer is the OUTPUT pseudo-layer. layer_sizes
+                // and model.default_layer_device carry it (both sized n_layer+1); model.buft_layer
+                // does NOT (sized n_layer by the resize above). When not even the output
+                // pseudo-layer fits -- which is every CPU-only run, where device_mem is 0 -- the
+                // walk breaks on its first iteration with i_gpu_start = n_layer+1, and the
+                // CPU-assignment loop below then wrote model.buft_layer[n_layer]: a 16-byte
+                // layer_buft one element past the end of the vector's heap block. That smashed the
+                // size field of the neighbouring malloc chunk (one of model.gguf_kv's strings), and
+                // glibc only noticed when llama_model::~llama_model freed it -> "double free or
+                // corruption (out)" at teardown, long after all work was done. Index buft_layer
+                // within its own range and keep i_gpu_start a valid layer index. [meta#77]
+                const int n_cpu_entries = std::min(i_gpu_start, n_layer + 1);
+                for (int il = 0; il < n_cpu_entries; ++il) {
                     model.default_layer_device[il] = -1;
-                    model.buft_layer[il] = llama_default_buffer_type_cpu(true);
+                    if (il < n_layer) {
+                        model.buft_layer[il] = llama_default_buffer_type_cpu(true);
+                    }
                 }
+                i_gpu_start = std::min(i_gpu_start, n_layer);
             }
         }
     }
@@ -4724,8 +4739,10 @@ static bool llm_load_tensors(
         for (int i = i_gpu_start; i < n_layer; ++i) {
             model.buft_layer[i] = llama_default_buffer_type_offload(model, model.devices[model.default_layer_device[i]]);
         }
-        // assign the output layer
-        if (n_gpu_layers > n_layer) {
+        // assign the output layer. default_layer_device[n_layer] is -1 when the planner left
+        // the output pseudo-layer on the CPU (auto-fit found no device that could hold it);
+        // indexing model.devices with -1 reads before the vector's data block. [meta#77]
+        if (n_gpu_layers > n_layer && model.default_layer_device[n_layer] >= 0) {
             model.buft_output = llama_default_buffer_type_offload(model, model.devices[model.default_layer_device[n_layer]]);
         } else {
             model.buft_output = llama_default_buffer_type_cpu(true);
@@ -4751,8 +4768,8 @@ static bool llm_load_tensors(
                 model.buft_layer[i] = { split_buft, buft_layer };
             }
         }
-        // assign the output layer
-        if (n_gpu_layers > n_layer) {
+        // assign the output layer (same -1 guard as the LAYER-split branch above) [meta#77]
+        if (n_gpu_layers > n_layer && model.default_layer_device[n_layer] >= 0) {
             model.buft_output = {
                 split_buft,
                 llama_default_buffer_type_offload(model, model.devices[model.default_layer_device[n_layer]])
