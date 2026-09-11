@@ -108,6 +108,89 @@ void llama_model_loader_slice_block_arrays(
             gguf_set_arr_data(meta, slice.key.c_str(), slice.type, slice.data.data(), assembled_blk_count);
         }
     }
+
+    // Not every per-layer key is a block_count-long array. A few are SPARSE LISTS OF BLOCK
+    // INDICES - "which layers carry this feature" - so their length is the number of selected
+    // layers and the value-per-block pass above never matches them. Left alone they keep the
+    // SOURCE model's absolute indices, and then every window that does not start at block 0
+    // looks for the feature on the wrong local layer: a window [24,48) of a model whose only
+    // such layer is 1 asks for it on its own blk.1, which does not carry those tensors, and
+    // the load fails. Rebase each index onto the window and drop the ones outside it; a
+    // window left with no entries drops the key, which is how "this window has none" is said.
+    for (const char * suffix : { ".ple.layers" }) {
+        const size_t suffix_len = strlen(suffix);
+        std::string key;
+        enum gguf_type elem_type = GGUF_TYPE_COUNT;
+        std::vector<int64_t> indices;
+
+        for (int kid = 0; kid < gguf_get_n_kv(meta); ++kid) {
+            const std::string k = gguf_get_key(meta, kid);
+            if (k.size() < suffix_len || k.compare(k.size() - suffix_len, suffix_len, suffix) != 0) {
+                continue;
+            }
+            if (gguf_get_kv_type(meta, kid) != GGUF_TYPE_ARRAY) {
+                continue;
+            }
+            elem_type = gguf_get_arr_type(meta, kid);
+            if (elem_type == GGUF_TYPE_STRING || elem_type == GGUF_TYPE_ARRAY) {
+                continue;
+            }
+
+            const size_t elem_size = gguf_scalar_size(elem_type);
+            const auto * src = static_cast<const uint8_t *>(gguf_get_arr_data(meta, kid));
+            const int    n   = gguf_get_arr_n(meta, kid);
+
+            key = k;
+            indices.clear();
+            for (int i = 0; i < n; ++i) {
+                int64_t v = 0;
+                switch (elem_type) {
+                    case GGUF_TYPE_UINT8:  v = *(const uint8_t  *) (src + i*elem_size); break;
+                    case GGUF_TYPE_INT8:   v = *(const int8_t   *) (src + i*elem_size); break;
+                    case GGUF_TYPE_UINT16: v = *(const uint16_t *) (src + i*elem_size); break;
+                    case GGUF_TYPE_INT16:  v = *(const int16_t  *) (src + i*elem_size); break;
+                    case GGUF_TYPE_UINT32: v = *(const uint32_t *) (src + i*elem_size); break;
+                    case GGUF_TYPE_INT32:  v = *(const int32_t  *) (src + i*elem_size); break;
+                    case GGUF_TYPE_UINT64: v = (int64_t) *(const uint64_t *) (src + i*elem_size); break;
+                    case GGUF_TYPE_INT64:  v = *(const int64_t  *) (src + i*elem_size); break;
+                    default:               throw std::runtime_error(format(
+                                               "part assembly: %s is not a list of block indices", k.c_str()));
+                }
+                if (v >= source_blk_start && v < source_blk_start + assembled_blk_count) {
+                    indices.push_back(v - source_blk_start);
+                }
+            }
+            break;
+        }
+
+        if (key.empty()) {
+            continue;
+        }
+
+        gguf_remove_key(meta, key.c_str());
+        if (indices.empty()) {
+            LLAMA_LOG_INFO("%s: window [%d,%d) carries no %s layer; key dropped\n",
+                    __func__, source_blk_start, source_blk_start + assembled_blk_count, suffix);
+            continue;
+        }
+
+        const size_t elem_size = gguf_scalar_size(elem_type);
+        std::vector<uint8_t> data(indices.size() * elem_size);
+        for (size_t i = 0; i < indices.size(); ++i) {
+            switch (elem_type) {
+                case GGUF_TYPE_UINT8:  *(uint8_t  *) (data.data() + i*elem_size) = (uint8_t)  indices[i]; break;
+                case GGUF_TYPE_INT8:   *(int8_t   *) (data.data() + i*elem_size) = (int8_t)   indices[i]; break;
+                case GGUF_TYPE_UINT16: *(uint16_t *) (data.data() + i*elem_size) = (uint16_t) indices[i]; break;
+                case GGUF_TYPE_INT16:  *(int16_t  *) (data.data() + i*elem_size) = (int16_t)  indices[i]; break;
+                case GGUF_TYPE_UINT32: *(uint32_t *) (data.data() + i*elem_size) = (uint32_t) indices[i]; break;
+                case GGUF_TYPE_INT32:  *(int32_t  *) (data.data() + i*elem_size) = (int32_t)  indices[i]; break;
+                case GGUF_TYPE_UINT64: *(uint64_t *) (data.data() + i*elem_size) = (uint64_t) indices[i]; break;
+                case GGUF_TYPE_INT64:  *(int64_t  *) (data.data() + i*elem_size) = (int64_t)  indices[i]; break;
+                default: break;
+            }
+        }
+        gguf_set_arr_data(meta, key.c_str(), elem_type, data.data(), (int) indices.size());
+    }
 }
 
 #if defined(_WIN32)
