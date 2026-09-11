@@ -111,7 +111,7 @@ proceeding; when it is not running, the gate fails open and stages proceed uncon
   of GPU slots and grants leases to requesting stages via an NDJSON protocol.
 - **`tools/gslot-run`** (new): Tenant launcher that registers a lease with the arbiter
   and execs a command pinned to the granted resources.
-- **`c/gslot_client.h`** (new): C tenant client (speaks the NDJSON protocol).
+- **`examples/stage-runner/gslot_client.h`** (new): the C++ tenant client integrated into the stage runner (speaks the arbiter's NDJSON protocol over a Unix socket); the standalone C client lives in `tools/gslot/c/`.
 - **Gate integration**: `gslot_client.h` is included in the stage-runner; the gate is
   controlled by `STAGE_GSLOT_*` environment variables and defaults **OFF** (fail-open).
 
