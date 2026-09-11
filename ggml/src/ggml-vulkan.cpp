@@ -5133,6 +5133,35 @@ static void ggml_vk_load_shaders(vk_device& device) {
 static bool ggml_vk_khr_cooperative_matrix_support(const vk::PhysicalDeviceProperties& props, const vk::PhysicalDeviceDriverProperties& driver_props, vk_device_architecture arch);
 static uint32_t ggml_vk_intel_shader_core_count(const vk::PhysicalDevice& vkdev);
 
+// ik-port: NV_coopmat2 is opt-in in this backend.
+//
+// The refreshed backend brings the mainline coopmat2 matmul and flash-attention
+// paths with it, and on the NVIDIA hardware this graft was validated on they do
+// not compute the right thing: a 12B model at temperature 0 answers a prompt with
+// unrelated text, while the same build on the same device with coopmat2 declined
+// reproduces the CPU reference token for token. The KHR_coopmat path on that
+// device is exact, so declining coopmat2 costs a faster matmul, not acceleration.
+//
+// This is the same choice as the SSM and broadcasting-GLU declines in this series:
+// a path that returns wrong numbers is worse than a path that is not taken. Set
+// GGML_VK_ENABLE_COOPMAT2=1 to opt back in (GGML_VK_DISABLE_COOPMAT2 still forces
+// it off, so scripts that set it keep working).
+static bool ggml_vk_coopmat2_opt_in() {
+    static const bool enabled = getenv("GGML_VK_ENABLE_COOPMAT2") != nullptr &&
+                                getenv("GGML_VK_DISABLE_COOPMAT2") == nullptr;
+    return enabled;
+}
+
+static void ggml_vk_warn_coopmat2_declined() {
+    static const bool warned = []() {
+        GGML_LOG_WARN("ggml_vulkan: VK_NV_cooperative_matrix2 is available but not used: this "
+                      "backend's coopmat2 path computes wrong results on the devices it has "
+                      "been checked on. Set GGML_VK_ENABLE_COOPMAT2=1 to use it anyway.\n");
+        return true;
+    }();
+    (void) warned;
+}
+
 static vk_device ggml_vk_get_device(size_t idx) {
     VK_LOG_DEBUG("ggml_vk_get_device(" << idx << ")");
 
@@ -5209,9 +5238,13 @@ static vk_device ggml_vk_get_device(size_t idx) {
                 device->coopmat_k = 0;
 #endif
 #if defined(GGML_VULKAN_COOPMAT2_GLSLC_SUPPORT)
-            } else if (strcmp("VK_NV_cooperative_matrix2", properties.extensionName) == 0 &&
-                       !getenv("GGML_VK_DISABLE_COOPMAT2")) {
-                coopmat2_support = true;
+            } else if (strcmp("VK_NV_cooperative_matrix2", properties.extensionName) == 0) {
+                // ik-port: opt-in only, see ggml_vk_coopmat2_opt_in()
+                if (ggml_vk_coopmat2_opt_in()) {
+                    coopmat2_support = true;
+                } else {
+                    ggml_vk_warn_coopmat2_declined();
+                }
 #endif
 #if defined(GGML_VULKAN_INTEGER_DOT_GLSLC_SUPPORT)
             } else if (strcmp("VK_KHR_shader_integer_dot_product", properties.extensionName) == 0 &&
@@ -5945,9 +5978,13 @@ static void ggml_vk_print_gpu_info(size_t idx) {
             coopmat_support = true;
 #endif
 #if defined(GGML_VULKAN_COOPMAT2_GLSLC_SUPPORT)
-        } else if (strcmp("VK_NV_cooperative_matrix2", properties.extensionName) == 0 &&
-                   !getenv("GGML_VK_DISABLE_COOPMAT2")) {
-            coopmat2_support = true;
+        } else if (strcmp("VK_NV_cooperative_matrix2", properties.extensionName) == 0) {
+            // ik-port: opt-in only, see ggml_vk_coopmat2_opt_in()
+            if (ggml_vk_coopmat2_opt_in()) {
+                coopmat2_support = true;
+            } else {
+                ggml_vk_warn_coopmat2_declined();
+            }
 #endif
 #if defined(GGML_VULKAN_INTEGER_DOT_GLSLC_SUPPORT)
         } else if (strcmp("VK_KHR_shader_integer_dot_product", properties.extensionName) == 0 &&
