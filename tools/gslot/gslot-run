@@ -1,0 +1,228 @@
+#!/usr/bin/env python3
+"""gslot-run -- make any process a partition tenant, with no code changes.
+
+    gslot-run --tenant dsv4-experts --weight 2 -- llama-server -m M -t 8 ...
+
+Registers with the arbiter, receives a disjoint core set, applies it to the
+child, and keeps it applied as the partition is recomputed when other tenants
+come and go.  The child never knows.
+
+This is the on-ramp: every co-resident CPU tenant on this fleet is somebody's
+launcher script, and rewriting them all to speak a protocol was never going to
+happen.  A shim that wraps the exec line gets llama-server, stage-runner and
+expert-server co-scheduled today. Tier 2 (per-wave turn leases) needs the
+in-process client instead, because the useful granularity there is the wave --
+measured: leasing a turn per *request* on a 30-second request is serialisation,
+not co-scheduling.
+
+FAIL-OPEN: no arbiter, no socket, a refused pin -- the child still runs, exactly
+as it would have without the shim.  A scheduler that can stop inference by
+dying is worse than no scheduler.
+"""
+
+from __future__ import annotations
+
+import argparse
+import contextlib
+import os
+import signal
+import subprocess
+import sys
+import threading
+import time
+import urllib.error
+import urllib.request
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+
+from gslot.client import Client, GslotError, apply_affinity
+
+
+def log(msg: str) -> None:
+    print(f"[gslot-run] {msg}", file=sys.stderr, flush=True)
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(prog="gslot-run")
+    ap.add_argument("--socket", default=os.environ.get("GSLOT_SOCKET", "/run/gslotd.sock"))
+    ap.add_argument("--tenant", required=True)
+    ap.add_argument("--resource", default="cpu:host")
+    ap.add_argument("--weight", type=float, default=1.0)
+    ap.add_argument("--min-cores", type=int, default=1)
+    ap.add_argument("--max-cores", type=int, default=None)
+    ap.add_argument(
+        "--mode",
+        default="partition",
+        choices=["partition", "turn", "share"],
+        help="partition = a disjoint core set; turn = exclusive use of an indivisible device",
+    )
+    ap.add_argument(
+        "--needs",
+        action="append",
+        default=[],
+        metavar="DIM=VALUE",
+        help="declared resource need, e.g. vram_bytes=11000000000. Screened against what "
+        "the arbiter has already committed BEFORE the child is launched.",
+    )
+    ap.add_argument(
+        "--require-admission",
+        action="store_true",
+        help="treat an explicit refusal as fatal: do not launch the child, exit 75. "
+        "Transport failure still fails open -- we fail open on OUR unavailability, "
+        "and fail closed on a definite answer.",
+    )
+    ap.add_argument(
+        "--admit-until-healthy",
+        default=None,
+        metavar="URL",
+        help="hold an exclusive lease across the child's ALLOCATION phase and release it "
+        "when URL returns 200. llama.cpp reserves its compute buffer once, at context "
+        "creation -- so startup, not dispatch, is where two processes collide on a device.",
+    )
+    ap.add_argument("--admit-timeout", type=float, default=900.0)
+    ap.add_argument(
+        "--prefer-class",
+        default=None,
+        choices=[None, "P", "E"],
+        help="on a hybrid host, fill this tenant's share from P- or E-cores first",
+    )
+    ap.add_argument("--hb-interval", type=float, default=0.5)
+    ap.add_argument(
+        "--uncoordinated",
+        action="store_true",
+        help="run the child WITHOUT registering (the A/B control arm: identical "
+        "command line, identical everything, no arbiter)",
+    )
+    ap.add_argument("cmd", nargs=argparse.REMAINDER)
+    args = ap.parse_args()
+
+    cmd = args.cmd[1:] if args.cmd and args.cmd[0] == "--" else args.cmd
+    if not cmd:
+        ap.error("no command given (use -- before the command)")
+
+    needs: dict[str, float] = {}
+    for spec in args.needs:
+        k, _, v = spec.partition("=")
+        needs[k.strip()] = float(v)
+
+    client: Client | None = None
+    cpus: list[int] = []
+    lease: int | None = None
+    if not args.uncoordinated:
+        try:
+            client = Client(args.socket, timeout=30.0)
+            client.connect()
+        except OSError as exc:
+            log(f"arbiter unreachable ({exc}); running UNCOORDINATED")
+            client = None
+        if client is not None:
+            try:
+                reply = client.register(
+                    args.tenant,
+                    args.resource,
+                    args.mode,
+                    weight=args.weight,
+                    pid=os.getpid(),
+                    min_units=args.min_cores,
+                    max_units=args.max_cores,
+                    prefer_class=args.prefer_class,
+                    needs=needs or None,
+                )
+            except GslotError as exc:
+                # A DEFINITE answer. The arbiter looked at what is already
+                # committed and said this does not fit. Launching anyway is how
+                # a starting process OOMs the one that is already serving.
+                if args.require_admission:
+                    log(f"REFUSED by the arbiter: {exc}")
+                    log("not launching the child (--require-admission)")
+                    return 75  # EX_TEMPFAIL
+                log(f"registration refused ({exc}); running UNCOORDINATED")
+                client = None
+            except (OSError, ValueError) as exc:
+                log(f"arbiter unusable ({exc}); running UNCOORDINATED")
+                client = None
+            else:
+                cpus = [int(c) for c in reply.get("cpus", [])]
+                log(
+                    f"registered tenant={args.tenant} mode={args.mode} "
+                    f"epoch={reply.get('epoch')} cpus={cpus or 'n/a'}"
+                )
+        if client is not None and args.admit_until_healthy:
+            lease = client.lease(est_ms=args.admit_timeout * 1000.0, timeout=args.admit_timeout)
+            log(f"admission lease={lease} held across the allocation phase")
+    else:
+        log("--uncoordinated: no registration, no pin (control arm)")
+
+    def preexec() -> None:
+        if cpus:
+            with contextlib.suppress(OSError):
+                os.sched_setaffinity(0, set(cpus))
+
+    proc = subprocess.Popen(cmd, preexec_fn=preexec)
+    log(f"child pid={proc.pid} cpus={cpus or 'unpinned'}")
+
+    if client is not None and args.admit_until_healthy:
+        deadline = time.monotonic() + args.admit_timeout
+        healthy = False
+        while time.monotonic() < deadline and proc.poll() is None:
+            try:
+                with urllib.request.urlopen(args.admit_until_healthy, timeout=3) as r:
+                    if r.status == 200:
+                        healthy = True
+                        break
+            except (urllib.error.URLError, OSError, TimeoutError):
+                pass
+            time.sleep(2.0)
+        log(f"allocation phase {'complete' if healthy else 'TIMED OUT/child exited'}; releasing")
+        client.release(lease)
+        lease = None
+
+    stop = threading.Event()
+
+    def keeper() -> None:
+        """Heartbeat, and re-pin the child whenever the partition moves.
+
+        Re-pinning is not free (ggml thread pools and page locality both cool
+        off), which is why the solver keeps a tenant on its previous cores where
+        it can.  We apply anyway: a stale pin overlapping a new tenant is the
+        collision, and that costs far more than a re-warm.
+        """
+        assert client is not None
+        last_epoch = client.epoch
+        repin = args.mode == "partition"
+        while not stop.is_set():
+            try:
+                client.heartbeat(progress=int(time.monotonic() * 1000))
+            except (OSError, GslotError, ValueError) as exc:
+                log(f"heartbeat lost ({exc}); child continues uncoordinated")
+                return
+            if repin and client.epoch != last_epoch and client.cpus:
+                last_epoch = client.epoch
+                if apply_affinity(client.cpus, proc.pid):
+                    log(f"repin epoch={client.epoch} cpus={client.cpus}")
+            stop.wait(args.hb_interval)
+
+    thread: threading.Thread | None = None
+    if client is not None:
+        thread = threading.Thread(target=keeper, name="gslot-keeper", daemon=True)
+        thread.start()
+
+    def forward(signum: int, _frame: object) -> None:
+        with contextlib.suppress(OSError):
+            proc.send_signal(signum)
+
+    for sig in (signal.SIGINT, signal.SIGTERM, signal.SIGHUP):
+        signal.signal(sig, forward)
+
+    rc = proc.wait()
+    stop.set()
+    if thread is not None:
+        thread.join(timeout=2.0)
+    if client is not None:
+        client.close()
+    log(f"child exit rc={rc}")
+    return rc
+
+
+if __name__ == "__main__":
+    sys.exit(main())

@@ -1,7 +1,9 @@
-ARG UBUNTU_VERSION=24.04
 ARG CUDA_VERSION=12.6.2
-ARG BASE_CUDA_DEV_CONTAINER=docker.io/nvidia/cuda:${CUDA_VERSION}-devel-ubuntu${UBUNTU_VERSION}
-ARG BASE_CUDA_RUN_CONTAINER=docker.io/nvidia/cuda:${CUDA_VERSION}-runtime-ubuntu${UBUNTU_VERSION}
+# Base images pinned per CUDA variant (docker.io/nvidia/cuda, multi-arch
+# index digests resolved 2026-09). Bake pins both the tag and the digest from
+# docker-bake.hcl; defaults here keep a standalone `docker build` working.
+ARG BASE_CUDA_DEV_CONTAINER=docker.io/nvidia/cuda:12.6.2-devel-ubuntu24.04@sha256:738fba0fbdb225b7a2931c58a5c8f03a84d3cd2f6a84975826a157339ef750b8
+ARG BASE_CUDA_RUN_CONTAINER=docker.io/nvidia/cuda:12.6.2-runtime-ubuntu24.04@sha256:16411bb06f363425265b410810a86fc43da705847ee9721be45b478bc4d0ea26
 
 # Stage 1: Build
 FROM ${BASE_CUDA_DEV_CONTAINER} AS build
@@ -20,7 +22,7 @@ ENV CCACHE_BASEDIR=/app
 
 RUN apt-get update && \
     apt-get install -yq --no-install-recommends \
-    ca-certificates build-essential libcurl4-openssl-dev curl libgomp1 cmake ccache git && \
+    ca-certificates build-essential libcurl4-openssl-dev curl libgomp1 cmake ccache git libibverbs-dev && \
     rm -rf /var/lib/apt/lists/*
 
 # Copy non-hidden files first
@@ -38,6 +40,7 @@ RUN --mount=type=cache,target=/ccache \
     cmake -B build \
         -DGGML_NATIVE=${GGML_NATIVE} \
         -DGGML_CUDA=ON \
+        -DGGML_RPC=ON -DGGML_RPC_RDMA=ON \
         -DCMAKE_CUDA_ARCHITECTURES="${CUDA_DOCKER_ARCH}" \
         -DLLAMA_CURL=ON \
         -DCMAKE_EXE_LINKER_FLAGS=-Wl,--allow-shlib-undefined && \
@@ -57,10 +60,21 @@ RUN mkdir -p /app/dist/lib /app/dist/full /app/dist/bin && \
     cp requirements.txt /app/dist/full/ && \
     cp .devops/tools.sh /app/dist/full/
 
+# Server-stage payload. llama-expert-server is not a build target yet (tracked
+# gap), so it is collected only when present; the rest always ships.
+RUN mkdir -p /app/dist/server && \
+    cp /app/dist/bin/llama-server /app/dist/bin/llama-stage-runner /app/dist/server/ && \
+    if [ -f /app/dist/bin/llama-expert-server ]; then \
+        cp /app/dist/bin/llama-expert-server /app/dist/server/; \
+    fi
+
 # Stage 2: Base (Shared Runtime)
 FROM ${BASE_CUDA_RUN_CONTAINER} AS base
+# rdma-core: libibverbs runtime for the RoCE transport tier. The transport
+# probes for a device at startup and falls back to plain TCP when
+# /dev/infiniband is absent, so this costs nothing on non-RDMA hosts.
 RUN apt-get update && \
-    apt-get install -yq --no-install-recommends libgomp1 curl ca-certificates && \
+    apt-get install -yq --no-install-recommends libgomp1 curl ca-certificates rdma-core libibverbs1 && \
     rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 ENV LD_LIBRARY_PATH=/app/lib
@@ -75,10 +89,14 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 ENTRYPOINT ["/app/tools.sh"]
 
-# Stage 4: Server
+# Stage 4: Server (llama-server + multi-stage drivers)
 FROM base AS server
 ENV LLAMA_ARG_HOST=0.0.0.0
-COPY --from=build /app/dist/bin/llama-server /app/llama-server
+# Multi-stage split serving: the runner drives stage-server roles over the
+# hidden-state transport (TCP, auto-negotiating RDMA when both ends see RoCE).
+# llama-expert-server lands here automatically when that target exists (see
+# the collect step -- it is not a build target yet, tracked gap).
+COPY --from=build /app/dist/server/ /app/
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD [ "curl", "-f", "http://localhost:8080/health" ]
 ENTRYPOINT [ "/app/llama-server" ]
