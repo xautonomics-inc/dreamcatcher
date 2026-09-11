@@ -78,7 +78,7 @@ See [Vulkan backend docs](docs/VULKAN-BACKEND.md) for device compatibility, buil
 | CPU | `-DGGML_NATIVE=ON` | Production | `AVX2` or better, `ARM_NEON` or better |
 | CUDA | `-DGGML_CUDA=ON` | Production | Turing or newer |
 | Vulkan | `-DGGML_VULKAN=ON` | Verified | AMD RDNA4 (RADV, CPU-exact), NVIDIA (coopmat1, CPU-exact), Intel ANV (self-consistent); AMD RDNA3 known-bad in this snapshot (Vulkan flash attention, see meta#85) |
-| Expert-server | N/A | Verified | Distributed MoE; CPU byte-exact all-remote on x86_64/aarch64 |
+| Expert-server | N/A | Verified | Distributed MoE; CPU byte-exact with all expert layers remote (Mellum2, Qwen3.8-Flash-Next); GPU expert server proof pending |
 
 Distributed MoE inference is supported via the expert-server role (`llama-expert-server`),
 which allows routed-expert tensors to be served by a remote process. See
