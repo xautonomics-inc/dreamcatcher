@@ -152,7 +152,7 @@ compared against the same build's CPU output.
 | NVIDIA Blackwell (RTX 50 class) | `KHR_coopmat` | **Exact.** Reproduces the CPU output token for token -- the only GPU configuration measured that does so on this hardware. |
 | NVIDIA Blackwell (RTX 50 class) | `NV_coopmat2` | Wrong. Declined by default; see above. |
 | Intel Arc B-series (BMG, ANV) | `KHR_coopmat` | Self-consistent and unchanged from the pre-graft backend, but does not reproduce the CPU output token for token. Not investigated further. |
-| AMD RDNA3 | -- | Not measured. |
+| AMD RDNA3 | -- | **Known-bad in this snapshot.** Wrong output (` 寿司<|channel>…` vs the CPU reference); `test-backend-ops` pins it on `FLASH_ATTN_EXT` (208 of 216 failures, NMSE ~0.18 across all KV types incl. Gemma's head size 256). `MUL_MAT` is clean for the model's types. The head/tail loopback reproduces single-process Vulkan output byte-for-byte, so the stage transport is fine — it is the flash-attention kernel on RDNA3. See `meta#85`. |
 
 A CPU-only run (`-ngl 0`, every tensor forced to the CPU with `-ot`) produces
 byte-identical output to the pre-graft build -- with the Vulkan backend compiled in and
