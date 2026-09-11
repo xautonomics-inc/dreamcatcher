@@ -5,7 +5,6 @@ in the public replay sequence.
 
 ## Lane 9: Vulkan backend refresh
 
-**Source branch:** `the Vulkan backend refresh branch`
 **Status:** Merged into `fork-base` (commit `ea5bd7e7`)
 **Date:** 2026-09-11
 
@@ -64,7 +63,6 @@ See [`docs/VULKAN-BACKEND.md`](VULKAN-BACKEND.md) for the full reference.
 
 ## Lane 10: Expert-server port
 
-**Source branch:** `the expert-server port branch`
 **Status:** Merged into `fork-base` (commit `ea5bd7e7`)
 **Date:** 2026-09-11 (review PASS)
 
@@ -89,14 +87,14 @@ materialized locally.
 ### Status
 
 - CPU byte-exactness: verified all-remote on two architectures (x86_64, aarch64).
-- GPU proof: pending Toshi's GPU window verification.
-- Acceptance plan: see `~/workspace/lane10/ACCEPTANCE-PLAN.md` (P1 digest / P2 expert-check /
+- GPU proof: pending GPU window verification.
+- Acceptance plan: see acceptance plan (P1 digest / P2 expert-check /
   P3 restore).
 
 ## Lane 11: gslot runtime
 
 **Status:** Merged into `fork-base` (commit `1c26dd49`)
-**Date:** 2026-09-11 (emma's review PASS)
+**Date:** 2026-09-11 (review PASS)
 
 ### Summary
 
