@@ -1734,6 +1734,18 @@ bool create_tensors_helper::create_qwen4exp_tensors(const LLM_TN & tn) {
         }
         model.tok_embd_per_layer = create_tensor(ctx_input, tn(LLM_TENSOR_PER_LAYER_TOKEN_EMBD, "weight"),
                 {hparams.ple_head_dim, ple_rows});
+    } else {
+        // A layer-library window carries the whole model's non-block parts, so the PLE n-gram
+        // table can be PRESENT in the files while no layer in THIS window uses it. Count it as
+        // created and skip the load - the same treatment an unused NextN/MTP head gets -
+        // otherwise done_getting_tensors trips over the leftover tensor and the window, which
+        // is a perfectly good slice of the model, refuses to load. Skipping also keeps the
+        // table (tens of GiB on a large vocabulary) out of the window's memory.
+        const std::string ple_name = tn(LLM_TENSOR_PER_LAYER_TOKEN_EMBD, "weight");
+        if (const auto * ple_w = ml.get_weight(ple_name.c_str())) {
+            create_tensor(ctx_input, ple_name, { ple_w->tensor->ne[0], ple_w->tensor->ne[1] },
+                    llama_model_loader::TENSOR_SKIP);
+        }
     }
 
     const bool has_moe_hparams = n_expert > 0 && n_expert_used > 0;
