@@ -130,7 +130,7 @@ The slot router is controlled by environment variables (no command-line flags):
 
 ### Proof
 
-emma's acceptance proof: two-stage Gemma-4 loopback under a live arbiter, 28 grants /
+Acceptance proof: two-stage Gemma-4 loopback under a live arbiter, 28 grants /
 0 overruns, byte-identical to the reference. The arbiter was started with 4 GPU slots;
 each stage requested and held its lease for the duration of the forward pass, then
 released it. No stage was starved or overrun.
