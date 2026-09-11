@@ -96,11 +96,15 @@ The single-box loopback validates per-layer loading, tensor serialization, and t
 
 Use `layer_distribution.plan` to compute deterministic layer boundaries and screen VRAM feasibility:
 
+> [!IMPORTANT]
+> **Gemma-4 Quantization Variant (meta#80)**:
+> Build the layer library from the **Unsloth Q4_0 quant** (`unsloth/gemma-4-12b-it-GGUF`, where `token_embd` is quantized as `Q4_K`). Google's official `gemma-4-12b-it-qat-q4_0.gguf` carries a `Q6_K` `token_embd` tensor which currently triggers degenerate output (`011111111111`) on this fork across both CPU and CUDA (tracked in meta#80). The Unsloth Q4_0 quant executes correctly end-to-end.
+
 ```bash
-python3 -m layer_distribution.plan /models/gemma4-12b-qat-q4_0-layers \
+python3 -m layer_distribution.plan /models/gemma4-12b-q4_0-layers \
   --node stage0:16GiB:100GiB:8080 \
   --node stage1:16GiB:100GiB:8081 \
-  --model-dir /models/gemma4-12b-qat-q4_0-layers
+  --model-dir /models/gemma4-12b-q4_0-layers
 ```
 
 #### What to Measure to Know It Worked
@@ -111,15 +115,15 @@ python3 -m layer_distribution.plan /models/gemma4-12b-qat-q4_0-layers \
 *Example Output*:
 ```
 === Layer Distribution Stage Plan ===
-Model: gemma4-12b-qat-q4_0 (48 layers total)
+Model: gemma4-12b-q4_0 (48 layers total)
 Status: FEASIBLE
 Summary: All 48 layers assigned and feasible across 2 active nodes
 VRAM Basis: weights only (layers + parts); KV cache and compute buffers not modelled
 
 Node         Window     Layers  Disk Req / Free        VRAM Req / Cap         Status           Launch Command
 -------------------------------------------------------------------------------------------------------------------
-stage0       [0, 24)    24      3.22 GiB / 100.00 GiB  2.85 GiB / 16.00 GiB   PASS (weights)   llama-stage-runner --role head --connect stage1:8081 --model-dir /models/gemma4-12b-qat-q4_0-layers --layers 0,24
-stage1       [24, 48)   24      3.22 GiB / 100.00 GiB  2.85 GiB / 16.00 GiB   PASS (weights)   llama-stage-runner --role tail --listen 8081 --model-dir /models/gemma4-12b-qat-q4_0-layers --layers 24,48
+stage0       [0, 24)    24      3.22 GiB / 100.00 GiB  2.85 GiB / 16.00 GiB   PASS (weights)   llama-stage-runner --role head --connect stage1:8081 --model-dir /models/gemma4-12b-q4_0-layers --layers 0,24
+stage1       [24, 48)   24      3.22 GiB / 100.00 GiB  2.85 GiB / 16.00 GiB   PASS (weights)   llama-stage-runner --role tail --listen 8081 --model-dir /models/gemma4-12b-q4_0-layers --layers 24,48
 ```
 
 ---
@@ -371,4 +375,5 @@ ci/smoke-serve.sh http://127.0.0.1:8080 --min-tps 1.0
 - **MoE on CPU**: When running Mixture-of-Experts architectures on CPU or GPU-less hosts, pass `-cmoe` to prevent device auto-fit allocation aborts.
 - **Unbuffered Stdout on Teardown**: Wrap stage runner invocations with `stdbuf -o0` to prevent loss of buffered stdout during process teardown or signal termination (meta#77).
 - **Slice-Relative Stage Layer Indexing**: Internal layer ranges (`STAGE_IL_START`, `STAGE_IL_END`) are indexed relative to the loaded stage slice (`0` to `N`), not global model layer indices.
+- **Gemma-4 Quantization Variant (meta#80)**: Until meta#80 is resolved, use the Unsloth Q4_0 quant (`token_embd` quantized as `Q4_K`) rather than Google's official `gemma-4-12b-it-qat-q4_0.gguf` (which quantizes `token_embd` as `Q6_K`). On the current fork base, Q6_K embedding tensors on Gemma-4 trigger degenerate `011111111111` token output on both CPU and CUDA, whereas Q4_K embeddings run reliably.
 - **CPU Thread Contention**: When running on CPU or shared cores, bound threads using `STAGE_THREADS=<N>` and bind each stage runner to disjoint CPU core masks using `taskset -c <cores>` to prevent threadpool starvation.
