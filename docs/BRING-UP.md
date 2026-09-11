@@ -99,7 +99,7 @@ Use `layer_distribution.plan` to compute deterministic layer boundaries and scre
 > [!IMPORTANT]
 > **Gemma-4 Quantization Variant & CPU Execution (meta#80 / meta#81)**:
 > - **Quantization (meta#80)**: Build the layer library from the **Unsloth Q4_0 quant** (`unsloth/gemma-4-12b-it-GGUF`, where `token_embd` is quantized as `Q4_K`). Google's official `gemma-4-12b-it-qat-q4_0.gguf` carries a `Q6_K` `token_embd` tensor which currently triggers degenerate output (`011111111111`) across both CPU and CUDA (tracked in meta#80).
-> - **Execution Mode (meta#81)**: Run the Gemma-4 stage runner with `-ngl 0` (CPU build). The Gemma-4 loopback logs and completions documented in this guide are captured from CPU execution; the fork's Gemma-4 CUDA graph is currently being stabilized under meta#81.
+> - **Execution Mode (meta#81)**: Run the Gemma-4 stage runner with `-ngl 0` (CPU build). On a CUDA/Vulkan build `-ngl 0` disables the auto-fit planner so the run really stays on the CPU; older builds needed `-ot ".=CPU"` in addition. The Gemma-4 loopback logs and completions documented in this guide are captured from CPU execution; the fork's Gemma-4 CUDA graph is currently being stabilized under meta#81.
 
 ```bash
 python3 -m layer_distribution.plan /models/gemma4-12b-q4_0-layers \
