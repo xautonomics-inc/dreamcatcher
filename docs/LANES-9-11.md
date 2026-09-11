@@ -119,12 +119,16 @@ proceeding; when it is not running, the gate fails open and stages proceed uncon
 
 The slot router is controlled by environment variables (no command-line flags):
 
-| Variable | Default | Description |
-|----------|---------|-------------|
-| `STAGE_GSLOT_ENABLE` | `0` | Master switch. When `0` (or unset), the gate is bypassed and stages run unconditionally (fail-open). |
-| `STAGE_GSLOT_HOST` | `127.0.0.1` | Arbiter host. |
-| `STAGE_GSLOT_PORT` | `9876` | Arbiter port. |
-| `STAGE_GSLOT_TIMEOUT` | `5.0` | Timeout (seconds) for lease acquisition. |
+| Variable | Default | Meaning |
+|---|---|---|
+| `STAGE_GSLOT_SOCKET` | unset | Path of the arbiter's Unix socket. **Unset = gate OFF**: `open()` returns true immediately and the stage runs unconditionally (fail-open, byte-identical behaviour). |
+| `STAGE_GSLOT_TENANT` | derived from the process (role/pid) | Tenant name presented to the arbiter. |
+| `STAGE_GSLOT_RESOURCE` | `cpu:host` | Resource the lease is taken on (e.g. a device id). |
+| `STAGE_GSLOT_MODE` | `quantum` | Lease shape: `quantum` = one lease per quantum, answered locally until it expires; `burst` = acquire before the stage computes, release at hand-off (pipeline stages). |
+| `STAGE_GSLOT_QUANTUM_MS` | `250` | Quantum length in `quantum` mode. |
+| `STAGE_GSLOT_RETRY_MS` | `5` | Poll interval while the lease is held by another tenant. |
+| `STAGE_GSLOT_WEIGHT` | `1.0` | Tenant weight for the arbiter's share computation (values ≤ 0 fall back to 1.0). |
+
 
 ### Proof
 
