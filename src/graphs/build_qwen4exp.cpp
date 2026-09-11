@@ -573,11 +573,18 @@ ggml_cgraph * llm_build_context::build_qwen4exp() {
         cb(lctx.inp_s_seq_qnext, "inp_s_seq_qnext", -1);
         ggml_set_input(lctx.inp_s_seq_qnext);
 
-        // the wide residual starts as hc identical copies of the embedding
-        res_hc = ggml_repeat_4d(ctx0,
-                ggml_reshape_3d(ctx0, inpL, n_embd, 1, n_tokens),
-                n_embd, hc, n_tokens, 1);
-        cb(res_hc, "hc_residual", -1);
+        if (inpL->ne[0] == (int64_t) hc * n_embd) {
+            // a downstream pipeline stage is handed the upstream window's wide residual
+            // bundle, which already IS the hc stream set: no token embedding, no expansion
+            res_hc = ggml_reshape_3d(ctx0, inpL, n_embd, hc, n_tokens);
+            cb(res_hc, "hc_residual_in", -1);
+        } else {
+            // the wide residual starts as hc identical copies of the embedding
+            res_hc = ggml_repeat_4d(ctx0,
+                    ggml_reshape_3d(ctx0, inpL, n_embd, 1, n_tokens),
+                    n_embd, hc, n_tokens, 1);
+            cb(res_hc, "hc_residual", -1);
+        }
 
         if (hparams.ple_n_heads > 0) {
             lctx.inp_ple_rows = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, hparams.ple_n_heads * n_tokens);
@@ -687,21 +694,25 @@ ggml_cgraph * llm_build_context::build_qwen4exp() {
         ggml_build_forward_expand(gf, h_nextn);
     }
 
+    if (stage_emit) {
+        // STAGE EMIT: export the post-window residual hidden state (all rows) for the next
+        // stage; skip the head mixer and the lm head. The residual stream between blocks is
+        // the hc bundle, so the WHOLE bundle crosses the wire, flattened to
+        // [hc*n_embd, n_tokens]; collapsing it here (head mix, or a mean) would throw away
+        // hc-1 of the hc streams and the downstream window would not be the monolithic model.
+        // Named "result_norm" so the existing embeddings extraction (POOLING_NONE ->
+        // lctx.embd) picks it up; llama_get_embeddings_ith then returns hc*n_embd floats
+        // per row, which is what llama_model_n_embd_inp() reports for this architecture.
+        ggml_tensor * bundle = ggml_reshape_2d(ctx0, res_hc, hc * n_embd, n_tokens);
+        cb(bundle, "result_norm", -1);
+        ggml_set_output(bundle);
+        ggml_build_forward_expand(gf, bundle);
+        return gf;
+    }
+
     ggml_tensor * cur = qwen4exp_hc_mix(*this, ctx0, lctx, hparams, res_hc,
             model.hc_head_norm, model.hc_head_down, model.hc_head_up,
             nullptr, nullptr, n_embd, -1, cb);
-
-    if (stage_emit) {
-        // STAGE EMIT: export the post-window residual hidden state (all rows) for the
-        // next stage; skip the lm head. Named "result_norm" so the existing embeddings
-        // extraction (POOLING_NONE -> lctx.embd) picks it up. NOTE: in emit mode
-        // llama_get_embeddings_ith therefore returns the PRE-head residual, by design.
-        // The hyper-connection multiplicity is collapsed by the hc head mixer above
-        // because the stage hidden-state transport carries n_embd floats per row.
-        cb(cur, "result_norm", -1);
-        ggml_build_forward_expand(gf, cur);
-        return gf;
-    }
 
     if (inp_out_ids) {
         cur = ggml_get_rows(ctx0, cur, inp_out_ids);

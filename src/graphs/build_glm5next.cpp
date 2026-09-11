@@ -447,10 +447,17 @@ ggml_cgraph * llm_build_context::build_glm5next() {
         }
     }
 
-    // expand embedding to hc streams: [n_embd, n_tokens] → [n_embd, hc, n_tokens]
-    inpL = ggml_reshape_3d(ctx0, inpL, n_embd, 1, n_tokens);
-    inpL = ggml_repeat_4d(ctx0, inpL, n_embd, hc, n_tokens, 1);
-    cb(inpL, "hc_init", -1);
+    if (inpL->ne[0] == hc * n_embd) {
+        // a downstream pipeline stage is handed the upstream window's wide residual bundle,
+        // which already IS the hc stream set: no token embedding, no expansion
+        inpL = ggml_reshape_3d(ctx0, inpL, n_embd, hc, n_tokens);
+        cb(inpL, "hc_init_in", -1);
+    } else {
+        // expand embedding to hc streams: [n_embd, n_tokens] → [n_embd, hc, n_tokens]
+        inpL = ggml_reshape_3d(ctx0, inpL, n_embd, 1, n_tokens);
+        inpL = ggml_repeat_4d(ctx0, inpL, n_embd, hc, n_tokens, 1);
+        cb(inpL, "hc_init", -1);
+    }
 
     const int n_trunk_layers = hparams.n_layer_kv_from_start;
 
@@ -537,6 +544,22 @@ ggml_cgraph * llm_build_context::build_glm5next() {
         cb(inpL, "l_out", il);
     }
 
+    if (stage_emit) {
+        // STAGE EMIT: export the post-window residual hidden state (all rows) for the next
+        // stage; skip the hc collapse, output_norm and the lm head. The residual stream
+        // between blocks is the hc bundle, so the WHOLE bundle crosses the wire, flattened
+        // to [hc*n_embd, n_tokens]; the mean below would throw away everything but the
+        // average of the hc streams and the downstream window would not be the monolithic
+        // model. Named "result_norm" so the existing embeddings extraction (POOLING_NONE ->
+        // lctx.embd) picks it up; llama_get_embeddings_ith then returns hc*n_embd floats per
+        // row, which is what llama_model_n_embd_inp() reports for this architecture.
+        ggml_tensor * bundle = ggml_reshape_2d(ctx0, inpL, hc * n_embd, n_tokens);
+        cb(bundle, "result_norm", -1);
+        ggml_set_output(bundle);
+        ggml_build_forward_expand(gf, bundle);
+        return gf;
+    }
+
     // collapse the hc streams for the head (unweighted mean; GLM-5.3-Flash has no head mHC), then
     // inp_out_ids to skip unused output tokens
     {
@@ -554,18 +577,6 @@ ggml_cgraph * llm_build_context::build_glm5next() {
         }
         inpL = ggml_scale(ctx0, summed, 1.0f / hc);
         cb(inpL, "hc_collapse", -1);
-    }
-
-    if (stage_emit) {
-        // STAGE EMIT: export the post-window residual hidden state (all rows) for the
-        // next stage; skip output_norm + lm_head. Named "result_norm" so the existing
-        // embeddings extraction (POOLING_NONE -> lctx.embd) picks it up. NOTE: in emit
-        // mode llama_get_embeddings_ith therefore returns the PRE-norm residual, by design.
-        // The hyper-connection multiplicity is collapsed by the hc mean above because the
-        // stage hidden-state transport carries n_embd floats per row, not hc*n_embd.
-        cb(inpL, "result_norm", -1);
-        ggml_build_forward_expand(gf, inpL);
-        return gf;
     }
 
     auto cur = build_output(lctx, ctx0, inpL, model.output, model.output_norm, cb);

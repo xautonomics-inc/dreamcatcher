@@ -301,7 +301,20 @@ struct llama_hparams {
         GGML_ABORT("fatal error");
     }
 
+    // Width of one row of the inter-block residual stream.
+    // Hyper-connection architectures do not carry a single vector per token between
+    // blocks: they carry `hyper_connection.count` parallel streams, so the residual
+    // bundle is hc * n_embd wide. Every other architecture keeps one stream.
+    uint32_t n_embd_hc_bundle() const {
+        return dsv4_hc_mult > 1 ? n_embd * dsv4_hc_mult : n_embd;
+    }
+
     uint32_t n_embd_inp() const {
+        // a hyper-connection residual bundle is the model's real inter-block width
+        if (dsv4_hc_mult > 1) {
+            return n_embd_hc_bundle();
+        }
+
         uint32_t n_embd_inp = n_embd;
 
         if (n_deepstack_layers > 0) {

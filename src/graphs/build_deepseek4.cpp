@@ -1354,9 +1354,16 @@ ggml_cgraph * llm_build_context::build_deepseek4() {
         cb(inpL, "mtp_eh_proj", il_mtp);
     } else {
         ggml_tensor * inp = llm_build_inp_embd(ctx0, lctx, hparams, batch, model.tok_embd, cb);
-        inpL = ggml_reshape_3d(ctx0, inp, n_embd, 1, n_tokens);
-        inpL = ggml_repeat_4d(ctx0, inpL, n_embd, hc, n_tokens, 1);
-        cb(inpL, "hc_init", -1);
+        if (inp->ne[0] == hc * n_embd) {
+            // a downstream pipeline stage is handed the upstream window's wide residual
+            // bundle, which already IS the hc stream set: no token embedding, no expansion
+            inpL = ggml_reshape_3d(ctx0, inp, n_embd, hc, n_tokens);
+            cb(inpL, "hc_init_in", -1);
+        } else {
+            inpL = ggml_reshape_3d(ctx0, inp, n_embd, 1, n_tokens);
+            inpL = ggml_repeat_4d(ctx0, inpL, n_embd, hc, n_tokens, 1);
+            cb(inpL, "hc_init", -1);
+        }
     }
 
     for (int il = n_layer_begin; il < n_layer_end; ++il) {
@@ -1487,6 +1494,22 @@ ggml_cgraph * llm_build_context::build_deepseek4() {
         ggml_build_forward_expand(gf, h_nextn);
     }
 
+    if (stage_emit) {
+        // STAGE EMIT: export the post-window residual hidden state (all rows) for the next
+        // stage; skip the hc head mixer, output_norm and the lm head. The residual stream
+        // between blocks is the hc bundle, so the WHOLE bundle crosses the wire, flattened
+        // to [hc*n_embd, n_tokens]; build_hc_head below would collapse it to one stream and
+        // the downstream window would not be the monolithic model. Named "result_norm" so
+        // the existing embeddings extraction (POOLING_NONE -> lctx.embd) picks it up;
+        // llama_get_embeddings_ith then returns hc*n_embd floats per row, which is what
+        // llama_model_n_embd_inp() reports for this architecture.
+        ggml_tensor * bundle = ggml_reshape_2d(ctx0, inpL, n_embd*hc, n_tokens);
+        cb(bundle, "result_norm", -1);
+        ggml_set_output(bundle);
+        ggml_build_forward_expand(gf, bundle);
+        return gf;
+    }
+
     // an emitting stage hands every row to the next stage, so it never reduces to out_ids
     if (n_outputs != n_tokens && !stage_emit) {
         ggml_tensor * inp_out_ids = build_inp_out_ids();
@@ -1501,18 +1524,6 @@ ggml_cgraph * llm_build_context::build_deepseek4() {
             model.hc_head_scale,
             model.hc_head_base);
     cb(out, "hc_head", -1);
-
-    if (stage_emit) {
-        // STAGE EMIT: export the post-window residual hidden state (all rows) for the
-        // next stage; skip output_norm + lm_head. Named "result_norm" so the existing
-        // embeddings extraction (POOLING_NONE -> lctx.embd) picks it up. NOTE: in emit
-        // mode llama_get_embeddings_ith therefore returns the PRE-norm residual, by design.
-        // The hyper-connection multiplicity is collapsed by build_hc_head above because the
-        // stage hidden-state transport carries n_embd floats per row.
-        cb(out, "result_norm", -1);
-        ggml_build_forward_expand(gf, out);
-        return gf;
-    }
 
     if (model.output_norm != nullptr) {
         out = llm_build_norm(ctx0, out, hparams, model.output_norm, nullptr, LLM_NORM_RMS, cb, -1);
