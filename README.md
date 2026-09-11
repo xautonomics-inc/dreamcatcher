@@ -81,11 +81,11 @@ See [Vulkan backend docs](docs/VULKAN-BACKEND.md) for device compatibility, buil
 | Expert-server | N/A | Verified | Distributed MoE; CPU byte-exact all-remote on x86_64/aarch64 |
 
 Distributed MoE inference is supported via the expert-server role (`llama-expert-server`),
-and the global slot router (lane 11) gates the head/relay/tail/server stages behind a
-configuration-driven arbiter for multi-GPU slot allocation (default OFF, fail-open).
-See [LANE 10 documentation](docs/LANES-9-11.md#lane-10-expert-server-port) for details.
 which allows routed-expert tensors to be served by a remote process. See
-[LANE 10 documentation](docs/LANES-9-11.md#lane-10-expert-server-port) for details.
+[the lane 10 documentation](docs/LANES-9-11.md#lane-10-expert-server-port) for details.
+The global slot router (lane 11) gates the head/relay/tail/server stages behind a
+configuration-driven arbiter for multi-GPU slot allocation (default OFF, fail-open).
+See [the lane 11 documentation](docs/LANES-9-11.md#lane-11-gslot-runtime) for details.
 
 ### Step-by-step instructions for a case of a successful Windows build
 https://github.com/ikawrakow/ik_llama.cpp/blob/main/docs/build.md
