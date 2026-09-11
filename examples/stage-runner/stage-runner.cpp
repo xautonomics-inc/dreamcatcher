@@ -37,10 +37,12 @@
 #include <sys/stat.h>
 
 #include <algorithm>
+#include <climits>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <fstream>
 #include <map>
 #include <string>
 #include <vector>
@@ -271,6 +273,54 @@ struct asm_spec {
     int32_t source_blk_start;
     int32_t source_blk_count;
 };
+
+// The highest file name in a library is not necessarily its source model size:
+// a valid library may contain only a subset of windows.  Prefer the slicer's
+// manifest, then fall back to the architecture block_count KV in a part file.
+static bool read_source_block_count(const std::string & dir,
+                                    const std::string & fallback_file,
+                                    int32_t & count) {
+    std::ifstream manifest(dir + "/manifest.json");
+    if (manifest) {
+        std::string line;
+        while (std::getline(manifest, line)) {
+            const size_t key = line.find("\"block_count\"");
+            if (key == std::string::npos) continue;
+            const size_t colon = line.find(':', key + 13);
+            if (colon == std::string::npos) break;
+            char * end = nullptr;
+            const long value = std::strtol(line.c_str() + colon + 1, &end, 10);
+            if (end != line.c_str() + colon + 1 && value > 0 && value <= INT32_MAX) {
+                count = (int32_t) value;
+                return true;
+            }
+            break;
+        }
+        fprintf(stderr, "stage: manifest %s has no valid block_count; trying GGUF KV\n",
+                (dir + "/manifest.json").c_str());
+    }
+
+    ggml_context * ctx = nullptr;
+    gguf_init_params params = { true, &ctx };
+    gguf_context * meta = gguf_init_from_file(fallback_file.c_str(), params);
+    if (!meta) return false;
+    const int arch_id = gguf_find_key(meta, "general.architecture");
+    bool ok = false;
+    if (arch_id >= 0 && gguf_get_kv_type(meta, arch_id) == GGUF_TYPE_STRING) {
+        const std::string key = std::string(gguf_get_val_str(meta, arch_id)) + ".block_count";
+        const int block_id = gguf_find_key(meta, key.c_str());
+        if (block_id >= 0) {
+            switch (gguf_get_kv_type(meta, block_id)) {
+                case GGUF_TYPE_UINT32: count = (int32_t) gguf_get_val_u32(meta, block_id); ok = count > 0; break;
+                case GGUF_TYPE_INT32:  count = gguf_get_val_i32(meta, block_id); ok = count > 0; break;
+                default: break;
+            }
+        }
+    }
+    gguf_free(meta);
+    return ok;
+}
+
 static bool assemble_layer_dir(const std::string & dir, int win_a, int win_b, const std::string & parts_spec,
                                std::vector<asm_spec> & out) {
     std::map<int, std::string> layers, nextn;   // abs index -> filename
@@ -287,10 +337,22 @@ static bool assemble_layer_dir(const std::string & dir, int win_a, int win_b, co
     }
     closedir(d);
     if (layers.empty() && nextn.empty()) { fprintf(stderr, "stage: no blk-*.gguf in %s\n", dir.c_str()); return false; }
-    int n_total = -1;
-    if (!layers.empty()) n_total = layers.rbegin()->first;
-    if (!nextn.empty())  n_total = std::max(n_total, nextn.rbegin()->first);
-    n_total += 1;
+    const std::string fallback_file = dir + "/" +
+        (!layers.empty() ? layers.begin()->second : nextn.begin()->second);
+    int32_t source_blk_count = 0;
+    if (!read_source_block_count(dir, fallback_file, source_blk_count)) {
+        fprintf(stderr, "stage: library %s has no manifest block_count or GGUF block_count KV; refusing assembly\n", dir.c_str());
+        return false;
+    }
+    const int highest_present = std::max(
+        layers.empty() ? -1 : layers.rbegin()->first,
+        nextn.empty() ? -1 : nextn.rbegin()->first);
+    if (highest_present >= source_blk_count) {
+        fprintf(stderr, "stage: library %s has blk.%d beyond source block_count=%d\n",
+                dir.c_str(), highest_present, source_blk_count);
+        return false;
+    }
+    const int n_total = source_blk_count;
     if (win_a < 0) win_a = 0;
     if (win_b < 0) win_b = n_total;   // default: full model
     if (win_a >= win_b || win_b > n_total) {
