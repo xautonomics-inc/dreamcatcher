@@ -16875,24 +16875,29 @@ static bool ggml_backend_vk_supports_buft(ggml_backend_t backend, ggml_backend_b
     return buft_ctx->device->idx == ctx->device->idx;
 }
 
-static int64_t ggml_vk_get_op_batch_size(const ggml_tensor * op) {
-    switch (op->op) {
-        case GGML_OP_GET_ROWS:
-            return 0;
-        case GGML_OP_MUL_MAT:
-            return op->ne[1];
-        case GGML_OP_MUL_MAT_ID:
-        case GGML_OP_ROPE:
-        case GGML_OP_ROPE_BACK:
-            return op->ne[2];
-        default:
-            return ggml_nrows(op);
-    }
-}
-
+// ik-port: this predicate decides which ops the scheduler may hand to this backend
+// even when every weight the op reads lives in a CPU buffer, so it also decides how
+// much of a run with no offloaded layers (-ngl 0, or -ot forcing tensors to the CPU)
+// still executes on the GPU.
+//
+// The 2026 mainline backend this file was refreshed from measures the batch as
+// ggml_nrows(op) for everything outside a short op list. ggml_nrows() is
+// ne[1]*ne[2]*ne[3], so a three-dimensional activation such as
+// [head_dim, n_head, n_tokens] passes a threshold of 32 on head count alone and ops
+// that ik has always computed on the CPU start being offloaded. That is a graph
+// placement change rather than a Vulkan fix, and it is observable from the CPU side:
+// with -ngl 0 -ot ".*=CPU" on a 48-layer 12B model it took the graph from 621 to 733
+// splits and changed the generated tokens.
+//
+// So keep ik's predicate, which measures ne[1] (and ne[2] for MUL_MAT_ID only).
+// GGML_OP_OFFLOAD_MIN_BATCH overrides the threshold; setting it very high pins the
+// whole graph to the CPU, which is how the placement change above was isolated.
 static bool ggml_backend_vk_offload_op(ggml_backend_t backend, const ggml_tensor * op) {
     static const int min_batch_size = getenv("GGML_OP_OFFLOAD_MIN_BATCH") ? atoi(getenv("GGML_OP_OFFLOAD_MIN_BATCH")) : 32;
-    return ggml_vk_get_op_batch_size(op) >= min_batch_size;
+
+    return (op->ne[1] >= min_batch_size && op->op != GGML_OP_GET_ROWS) ||
+           (op->ne[2] >= min_batch_size && op->op == GGML_OP_MUL_MAT_ID);
+
     UNUSED(backend);
 }
 
