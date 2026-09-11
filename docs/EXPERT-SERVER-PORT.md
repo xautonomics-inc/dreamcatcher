@@ -142,3 +142,68 @@ With no expert server configured the feature is inert:
 * Fused up/gate expert tensors, expert biases, per-expert scales, grouped
   routing and non-SILU experts remain unsupported on the remote path in both
   lineages; they assert rather than silently mis-compute.
+
+## What the port actually needed, beyond the map
+
+Two things the map above did not predict.
+
+**Fusion is not bit-neutral in this tree.** The source lineage has one
+routed-expert tail, so its server mirrors one op sequence. This tree has
+three forms of it and turns two of them on by default. Measured on a small
+MoE with a 12-step greedy decode:
+
+| client | server | logits |
+|---|---|---|
+| fused (default) | fused (default) | byte-identical |
+| unfused (`-no-fmoe -no-mmad`) | unfused (`--fmoe 0 --mmad 0`) | byte-identical |
+| fused | unfused | **differ** |
+| unfused | fused | **differ** |
+
+and the two *local* forms differ from each other as well, with no expert
+server anywhere - a fused local run and an unfused local run do not produce
+the same logits on this tree. So the server's `--fmoe` / `--mmad` switches
+are load-bearing, not belt and braces: an expert server must be told which
+form its client built, and the defaults are chosen so that the common case
+(client defaults on both sides) needs no flags at all.
+
+**One pre-existing null dereference.** `llm_build_std_moe_ffn` guarded its
+`up_exps->extra` and `gate_exps->extra` lookups but not `down_exps->extra`.
+Nothing could reach that before, because the three tensors were always
+present together; a layer served remotely makes all three null, and the
+unguarded one segfaulted during graph build. Fixed with the same guard the
+other two already had.
+
+## Proofs
+
+All on CPU, all with the feature built in.
+
+**Regression, feature off.** A greedy completion from a small MoE, pre-port
+binary and post-port binary, no expert server configured: byte-identical
+stdout. Repeated with `-no-fmoe -no-mmad`: byte-identical. The local path
+does not move.
+
+**Dense path.** The head/tail layer-library loopback over a 48-layer dense
+model, split 24/48, still emits its recorded completion piece for piece
+(` Europe`, `.`, `\n`, `<|channel>`, `thought`, `\n`, `<channel|>`, `It`,
+` appears`, ` there`, ` is`, ` a`), and the pre-port and post-port binaries
+agree on an unrelated prompt as well.
+
+**Token exactness, single server.** Small MoE, 28 layers all served
+remotely over loopback. The attention side skipped 84 tensors (6.89 GiB of
+routed experts) at load. Twelve decode steps: per-step token ids and logits
+hashes identical to the single-process baseline, and the raw logits dumps
+compare equal byte for byte (4.5 MiB).
+
+**Token exactness, large model.** A 48-layer, 512-expert MoE of about 94 GB
+across three shards, all 48 layers served remotely. The attention side
+skipped 144 tensors (55.4 GiB) and loaded in 4.7 s instead of 67.7 s.
+Twelve decode steps, 11.4 MiB of raw logits: byte-identical.
+
+**Multi-endpoint (P2).** The same small MoE split across two expert servers,
+layers 0-13 and 14-27: byte-identical logits again. A deliberately
+overlapping coverage spec aborts at config-parse time naming the layer and
+both endpoints, as designed.
+
+**Build and tests.** The four required targets build clean with zero
+warnings in any touched file, and the existing model-loader-metadata and
+stage-manifest tests pass.
