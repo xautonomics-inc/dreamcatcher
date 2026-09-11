@@ -126,3 +126,45 @@ Acceptance gate:
      <|channel>thought
      <channel|>It appears there is a
      ```
+
+---
+
+## Acceptance Run Results (2026-09-11 21:51 UTC)
+
+### Platform & Topology
+- **Host**: GCP VM (`34.60.38.105`, AMD EPYC 7B12, 8 vCPUs, 32 GiB RAM)
+- **Model**: Gemma-4 12B Q4_0 (`/home/ben/build/models/gemma4-12b-q4_0-layers`, 48 layers)
+- **Branch**: `agent/emma/gslot-runtime` (commit `18b5d366`, based on `fork-base` `ea5bd7e7` with lanes 9 and 10)
+- **Pipeline Shape**:
+  - Head stage: layers `[0, 24)`, `STAGE_THREADS=4`, `STAGE_EMIT=hidden`, `STAGE_GSLOT_MODE=burst`
+  - Tail stage: layers `[24, 48)`, `STAGE_THREADS=4`, `STAGE_PRINT=1`, `STAGE_GSLOT_MODE=burst`
+  - Arbiter: `tools/gslot` (`python3 -m gslot --socket /tmp/gslot.sock`)
+
+### Measurements
+- **Arbiter Telemetry** (`/occupancy` / `/tenants`):
+  - Head tenant registered: `head-stage` (mode=turn, weight=1.00)
+  - Tail tenant registered: `tail-stage` (mode=turn, weight=1.00)
+  - Total grants: 28 (14 head-stage, 14 tail-stage)
+  - Switches: 28, Overruns: 0, Faults: 0
+- **Throughput**:
+  - Head: prefilled 1 slots x 6 tok, decode 13 steps in 3.63s = 3.58 tok/s
+- **Output Token Stream** (`STAGE_PRINT=1` on Tail):
+  ```
+  [s0] Europe
+  [s0].
+  [s0]
+
+  [s0]<|channel>
+  [s0]thought
+  [s0]
+
+  [s0]<channel|>
+  [s0]It
+  [s0] appears
+  [s0] there
+  [s0] is
+  [s0] a
+  ```
+- **Byte-Exactness**:
+  Matches reference comparison against single-process `llama-cli` byte-for-byte:
+  `The capital of France is Europe.\n<|channel>thought\n<channel|>It appears there is a`.
