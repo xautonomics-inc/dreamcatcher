@@ -5132,6 +5132,9 @@ static uint32_t ggml_vk_intel_shader_core_count(const vk::PhysicalDevice& vkdev)
 static vk_device ggml_vk_get_device(size_t idx) {
     VK_LOG_DEBUG("ggml_vk_get_device(" << idx << ")");
 
+    // ik-port fix: fail loudly instead of reading past the end of device_indices.
+    GGML_ASSERT(idx < vk_instance.device_indices.size() && "ggml_vk_get_device: no such Vulkan device");
+
     if (vk_instance.devices[idx] == nullptr) {
         VK_LOG_DEBUG("Initializing new vk_device");
         vk_device device = std::make_shared<vk_device_struct>();
@@ -14481,6 +14484,14 @@ ggml_backend_buffer_type_t ggml_backend_vk_host_buffer_type() {
 
     // Make sure device 0 is initialized
     ggml_vk_instance_init();
+
+    // ik-port fix: with no usable Vulkan device (e.g. GGML_VK_VISIBLE_DEVICES selects
+    // nothing, or the machine has no Vulkan driver) there is no device 0 to pin host
+    // memory against. Returning nullptr makes llama_default_buffer_type_cpu() fall back
+    // to the plain CPU buffer type instead of indexing an empty device_indices vector.
+    if (vk_instance.device_indices.empty()) {
+        return nullptr;
+    }
     ggml_vk_get_device(0);
 
     return &ggml_backend_vk_buffer_type_host;
