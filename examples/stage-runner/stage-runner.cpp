@@ -27,6 +27,7 @@
 //  env: STAGE_ACTIVE=1, STAGE_IL_START, STAGE_IL_END, STAGE_EMIT(hidden|logits)
 
 #include "llama.h"
+#include "layer-manifest.h"
 #include "ggml.h"
 #include "ggml-backend.h"
 // NOTE: the mainline driver included "../../src/llama-ext.h" for the custom
@@ -37,12 +38,10 @@
 #include <sys/stat.h>
 
 #include <algorithm>
-#include <climits>
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <fstream>
 #include <map>
 #include <string>
 #include <vector>
@@ -264,7 +263,7 @@ static int g_fit_margin = 0;  // --fit-margin MiB: VRAM auto-fit reserves per GP
 //   parts-output.gguf       output_norm.weight (+ output.weight if untied)
 //   parts-nextn-NNNNN.gguf  one NextN/MTP block (abs index NNNNN), tensors blk.0.*
 //   parts-other.gguf        any other non-blk tensors (rare; e.g. rope_freqs)
-//   manifest.json           provenance + per-tensor hashes (not needed at load time)
+//   manifest.json           source.block_count + provenance + per-tensor hashes
 // assemble_layer_dir() composes the file list for window [A,B) and the blk_base
 // remap each file gets, mirroring what a monolithic slice_gguf.py A B slice holds.
 struct asm_spec {
@@ -273,53 +272,6 @@ struct asm_spec {
     int32_t source_blk_start;
     int32_t source_blk_count;
 };
-
-// The highest file name in a library is not necessarily its source model size:
-// a valid library may contain only a subset of windows.  Prefer the slicer's
-// manifest, then fall back to the architecture block_count KV in a part file.
-static bool read_source_block_count(const std::string & dir,
-                                    const std::string & fallback_file,
-                                    int32_t & count) {
-    std::ifstream manifest(dir + "/manifest.json");
-    if (manifest) {
-        std::string line;
-        while (std::getline(manifest, line)) {
-            const size_t key = line.find("\"block_count\"");
-            if (key == std::string::npos) continue;
-            const size_t colon = line.find(':', key + 13);
-            if (colon == std::string::npos) break;
-            char * end = nullptr;
-            const long value = std::strtol(line.c_str() + colon + 1, &end, 10);
-            if (end != line.c_str() + colon + 1 && value > 0 && value <= INT32_MAX) {
-                count = (int32_t) value;
-                return true;
-            }
-            break;
-        }
-        fprintf(stderr, "stage: manifest %s has no valid block_count; trying GGUF KV\n",
-                (dir + "/manifest.json").c_str());
-    }
-
-    ggml_context * ctx = nullptr;
-    gguf_init_params params = { true, &ctx };
-    gguf_context * meta = gguf_init_from_file(fallback_file.c_str(), params);
-    if (!meta) return false;
-    const int arch_id = gguf_find_key(meta, "general.architecture");
-    bool ok = false;
-    if (arch_id >= 0 && gguf_get_kv_type(meta, arch_id) == GGUF_TYPE_STRING) {
-        const std::string key = std::string(gguf_get_val_str(meta, arch_id)) + ".block_count";
-        const int block_id = gguf_find_key(meta, key.c_str());
-        if (block_id >= 0) {
-            switch (gguf_get_kv_type(meta, block_id)) {
-                case GGUF_TYPE_UINT32: count = (int32_t) gguf_get_val_u32(meta, block_id); ok = count > 0; break;
-                case GGUF_TYPE_INT32:  count = gguf_get_val_i32(meta, block_id); ok = count > 0; break;
-                default: break;
-            }
-        }
-    }
-    gguf_free(meta);
-    return ok;
-}
 
 static bool assemble_layer_dir(const std::string & dir, int win_a, int win_b, const std::string & parts_spec,
                                std::vector<asm_spec> & out) {
@@ -337,11 +289,11 @@ static bool assemble_layer_dir(const std::string & dir, int win_a, int win_b, co
     }
     closedir(d);
     if (layers.empty() && nextn.empty()) { fprintf(stderr, "stage: no blk-*.gguf in %s\n", dir.c_str()); return false; }
-    const std::string fallback_file = dir + "/" +
-        (!layers.empty() ? layers.begin()->second : nextn.begin()->second);
     int32_t source_blk_count = 0;
-    if (!read_source_block_count(dir, fallback_file, source_blk_count)) {
-        fprintf(stderr, "stage: library %s has no manifest block_count or GGUF block_count KV; refusing assembly\n", dir.c_str());
+    try {
+        source_blk_count = stage_read_source_block_count(dir);
+    } catch (const std::exception & e) {
+        fprintf(stderr, "stage: library %s: %s; refusing assembly\n", dir.c_str(), e.what());
         return false;
     }
     const int highest_present = std::max(
