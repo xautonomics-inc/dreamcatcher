@@ -606,17 +606,24 @@ extern "C" {
     // One input file of a layer-library assembly (see llama_model_load_from_parts).
     // blk_base is the block index this file's blk.0 tensors get in the assembled
     // model (files without blk.* tensors, e.g. embd/output parts, use 0).
+    // source_blk_start/source_blk_count describe the source-model window represented
+    // by the complete parts list. They must be identical in every list entry and let
+    // the loader slice source-length, per-block metadata arrays to that window.
     struct llama_model_part {
         const char * path;
         int32_t      blk_base;
+        int32_t      source_blk_start;
+        int32_t      source_blk_count;
     };
 
     // Assemble one logical model from multiple GGUF part files at load time
     // (per-layer "layer library" slices produced by slice_gguf_layers.py).
     // Every file's blk.J tensors are remapped to blk.(blk_base+J); the window-shape
     // metadata keys ({arch}.block_count, {arch}.leading_dense_block_count,
-    // {arch}.nextn_predict_layers) are re-derived as the SUM of the per-file values,
-    // making the result equivalent to a monolithic slice of the same window.
+    // {arch}.nextn_predict_layers) are re-derived as the SUM of the per-file values.
+    // Metadata arrays whose length equals source_blk_count are sliced from
+    // source_blk_start to the assembled block count, making the result equivalent
+    // to a monolithic slice of the same window.
     // Non-shape metadata (arch, hparams, tokenizer) is taken from parts[0].
     LLAMA_API struct llama_model * llama_model_load_from_parts(
             const struct llama_model_part * parts,
