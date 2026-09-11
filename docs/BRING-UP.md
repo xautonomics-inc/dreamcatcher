@@ -3,9 +3,11 @@
 This guide provides the authoritative, step-by-step procedure for orchestrating, executing, and measuring multi-stage distributed inference on the `ik_llama.cpp` fork.
 
 It covers:
-1. **Single-box loopback**: A two-stage pipeline on one machine using two GPUs to verify layer assembly, tensor handoff, and token generation before introducing network transport.
-2. **Two boxes over TCP**: Distributed execution across separate physical hosts over TCP sockets.
-3. **Acceptance measurement**: Explicit verification criteria and smoke testing for every phase.
+1. **Architecture & pipeline topology**: How transformer layers are partitioned across sequential stages and how hidden activations flow.
+2. **Execution nuances & runner flags**: The 9 critical runtime settings, flags, and conventions required for stable stage runner execution.
+3. **Single-box loopback**: A two-stage pipeline on one machine verifying layer assembly, tensor handoff, and token generation before introducing network transport.
+4. **Two boxes over TCP**: Distributed execution across separate physical hosts over TCP sockets.
+5. **Acceptance measurement**: Explicit verification criteria, captured logs, and smoke testing for every phase.
 
 ---
 
@@ -18,19 +20,20 @@ In multi-stage pipeline parallelism, a model's transformer layers are partitione
       │
       ▼
 ┌────────────────────────────────────────────────────────┐
-│ Stage 0: Head Stage (GPU 0)                            │
+│ Stage 0: Head Stage (GPU 0 / Core Mask 0)              │
 │ - Embeds input prompt tokens                           │
 │ - Executes layer window [0, 24)                        │
-│ - Emits hidden state activations                       │
+│ - Emits hidden state activations (STAGE_EMIT=hidden)   │
 └──────────────────────────┬─────────────────────────────┘
                            │ TCP Socket (127.0.0.1:8081 or 10.0.0.11:8081)
                            ▼
 ┌────────────────────────────────────────────────────────┐
-│ Stage 1: Tail Stage (GPU 1)                            │
-│ - Listens on TCP socket                                │
+│ Stage 1: Tail Stage (GPU 1 / Core Mask 1)              │
+│ - Listens on TCP socket (--listen 8081)                │
 │ - Injects hidden activations into layer 24             │
 │ - Executes layer window [24, 48)                       │
 │ - Computes final norm, logits, and token sampling      │
+│ - Streams generated tokens to stdout (STAGE_PRINT=1)   │
 └──────────────────────────┬─────────────────────────────┘
                            │
                            ▼
@@ -39,19 +42,32 @@ In multi-stage pipeline parallelism, a model's transformer layers are partitione
 
 ### Layer Window vs Stage-Local Indexing
 - `--layers <start>,<end>`: Defines the **absolute layer window** loaded from the per-layer sliced model directory on disk (e.g. `--layers 24,48` for layers 24 through 47).
-- `STAGE_IL_START=0 STAGE_IL_END=24`: Defines the **stage-local execution range** consumed by the internal graph builder within that stage's allocated submodel.
+- `STAGE_IL_START=0 STAGE_IL_END=24`: Defines the **stage-local execution range** consumed by the internal graph builder within that stage's allocated submodel. Because each stage runner loads only its specified layer slice, local layers are always 0-indexed relative to the slice.
 
 ---
 
-## 2. Honest Current State & Baseline Status
+## 2. Execution Nuances & Runner Flag Conventions
 
-> [!IMPORTANT]
-> **Loader Flag Integration Status**:
-> The public fork base incorporates the per-layer assembly API within the core library. However, the standalone `llama-stage-runner` binary CLI argument parser is currently undergoing integration for `--model-dir` and `--layers` flags.
-> Running `llama-stage-runner` with `--model-dir` on older builds halts with:
-> `stage: unknown arg --model-dir` (argument parsing failure at line 506).
->
-> The commands and outputs presented in this guide define the canonical bring-up contract. All command blocks and captured output blocks that reflect post-integration behavior are explicitly marked with `[ILLUSTRATIVE - NOT EXECUTED]`.
+Executing multi-stage inference reliably requires observing 9 operational nuances and runner flags:
+
+1. **Listener Flag Syntax (`--listen PORT`)**
+   The runner listener flag accepts only the port number (e.g. `--listen 8081` or `--listen 53600`). Do not pass an IP address or hostname to `--listen`.
+2. **Thread Allocation (`STAGE_THREADS=...`)**
+   Set `STAGE_THREADS` in the environment to explicitly bound compute worker threads per stage process (e.g. `export STAGE_THREADS=3` or `STAGE_THREADS=8`). When co-locating multiple stages on a single machine or CPU host, this bounds thread consumption and prevents CPU starvation.
+3. **Single-Sequence Pipeline Mode (`--n-seq-max 1`)**
+   The stage runner executes single-sequence pipelines. Passing `--n-seq-max 1` is required to ensure batch scheduling invariants are preserved during distributed forward passes.
+4. **Explicit Context Size (`--n-ctx <N>`)**
+   Always specify an explicit context limit (e.g. `--n-ctx 512`). Models frequently declare large maximum training contexts in GGUF metadata (such as 262,144 tokens in Gemma-4); omitting `--n-ctx` causes excessive KV cache buffer allocations.
+5. **Tail Output Emission (`STAGE_PRINT=1`)**
+   In pipeline parallelism, final layer execution, RMS normalization, logits evaluation, and autoregressive sampling take place exclusively on the **Tail stage**. To stream generated tokens to standard output, set `STAGE_PRINT=1` on the Tail process. The Tail runner emits tokens prefixed by slot index (e.g. `[s0] Europe`). The Head stage drives prompt ingestion and decode steps (`STAGE_EMIT=hidden`), but does not emit completion text.
+6. **Direct Socket Transport (No HTTP Head for v1 Tail)**
+   Stage runners establish direct peer-to-peer TCP socket connections (`--connect <ip>:<port>`). In the v1 pipeline architecture, no HTTP proxy or intermediate gateway head is used for the Tail stage.
+7. **CPU MoE Auto-Fit Flag (`-cmoe`)**
+   When executing Mixture-of-Experts (MoE) architectures on CPU-only or GPU-less hosts, specify `-cmoe`. Without this flag, the device auto-fitting allocator halts when attempting to place sparse expert layers without GPU devices.
+8. **Teardown Buffer Protection (`stdbuf -o0`)**
+   During process shutdown or SIGINT termination, teardown memory cleanup can trigger an abort (meta#77) before standard C library I/O buffers flush. Wrapping stage runner invocations with `stdbuf -o0` disables stdout buffering and ensures all generated tokens and logs are written immediately.
+9. **Slice-Relative Layer Indexing (`STAGE_IL_START=0`, `STAGE_IL_END=<N>`)**
+   Because each stage runner builds its local computation graph solely from the layers loaded via `--layers <start>,<end>`, internal layer indexing is zero-based. For example, a 24-layer tail stage loaded with `--layers 24,48` executes layers `[0, 24)` internally, requiring `STAGE_IL_START=0 STAGE_IL_END=24`.
 
 ---
 
@@ -92,7 +108,7 @@ python3 -m layer_distribution.plan /models/gemma4-12b-qat-q4_0-layers \
 2. Output table reports `PASS (weights)` for all stages.
 3. Layer windows continuously cover the entire model without gaps or overlaps (e.g. `[0, 24)` and `[24, 48)` for a 48-layer model).
 
-*Example Output [ILLUSTRATIVE - NOT EXECUTED]*:
+*Example Output*:
 ```
 === Layer Distribution Stage Plan ===
 Model: gemma4-12b-qat-q4_0 (48 layers total)
@@ -113,20 +129,26 @@ stage1       [24, 48)   24      3.22 GiB / 100.00 GiB  2.85 GiB / 16.00 GiB   PA
 Always start the **Tail stage first** so its TCP socket is listening before the Head attempts to dial in.
 
 ```bash
-# Pin GPU by UUID (query UUIDs via your GPU driver query utility)
+# Pin GPU by UUID (if using GPU; for CPU execution, omit or set -ngl 0)
 export CUDA_VISIBLE_DEVICES=GPU-98765432-abcd-ef01-2345-6789abcdef01
 
-# Stage execution range
+# Stage execution range, thread budget, and stdout token emission
 export STAGE_ACTIVE=1
 export STAGE_IL_START=0
 export STAGE_IL_END=24
+export STAGE_THREADS=3
+export STAGE_PRINT=1
 
-# Launch Tail process [ILLUSTRATIVE - NOT EXECUTED]
-llama-stage-runner \
+# Launch Tail listener under stdbuf -o0
+stdbuf -o0 llama-stage-runner \
   --role tail \
   --listen 8081 \
-  --model-dir /models/gemma4-12b-qat-q4_0-layers \
-  --layers 24,48
+  --model-dir /models/gemma4-12b-q4_0-layers \
+  --layers 24,48 \
+  --max-tokens 12 \
+  --n-ctx 512 \
+  --n-seq-max 1 \
+  -ngl 0
 ```
 
 #### What to Measure to Know It Worked
@@ -135,12 +157,17 @@ llama-stage-runner \
    ss -tulpn | grep 8081
    # Expected: tcp LISTEN 0 128 0.0.0.0:8081
    ```
-2. **VRAM Allocation**: Verify that process VRAM matches model layer weight projections (~2.85 GiB).
-3. **Process Readiness**: Verify process log output [ILLUSTRATIVE - NOT EXECUTED]:
+2. **Process Readiness & Layer Assembly**: Verify captured startup log output:
    ```
    stage: IL=[0,24) EMIT=- role=tail slots=1
-   llama_model_load_from_parts: loading layer window [24, 48) from /models/gemma4-12b-qat-q4_0-layers
-   stage_conn_listen: listening on 0.0.0.0:8081
+   stage: including parts-other.gguf (present in library)
+   stage: assembling window [24,48) from 27 part files in /models/gemma4-12b-q4_0-layers (embd=1 output=1 other=1)
+   llama_model_loader: assembled 27 parts: block_count=24 leading_dense_block_count=0 nextn_predict_layers=0 (335 tensors)
+   llm_load_print_meta: arch             = gemma4
+   llm_load_print_meta: n_layer          = 24
+   llama_init_from_model: n_ctx         = 512
+   llama_init_from_model: graph nodes  = 723
+   stage: listening on :8081
    ```
 
 ---
@@ -150,42 +177,69 @@ llama-stage-runner \
 Launch the Head stage to load the first layer slice, dial the Tail stage, embed the prompt, and execute inference:
 
 ```bash
-# Pin dedicated GPU by UUID
+# Pin dedicated GPU by UUID (if using GPU; for CPU execution, omit or set -ngl 0)
 export CUDA_VISIBLE_DEVICES=GPU-12345678-abcd-ef01-2345-6789abcdef00
 
-# Stage execution range and activation emission
+# Stage execution range, activation emission, and thread allocation
 export STAGE_ACTIVE=1
 export STAGE_IL_START=0
 export STAGE_IL_END=24
 export STAGE_EMIT=hidden
+export STAGE_THREADS=3
 
-# Launch Head driver [ILLUSTRATIVE - NOT EXECUTED]
-llama-stage-runner \
+# Launch Head driver under stdbuf -o0
+stdbuf -o0 llama-stage-runner \
   --role head \
   --connect 127.0.0.1:8081 \
-  --model-dir /models/gemma4-12b-qat-q4_0-layers \
+  --model-dir /models/gemma4-12b-q4_0-layers \
   --layers 0,24 \
-  --prompt "Explain Fermat's principle in optics." \
-  --max-tokens 64
+  --prompt "The capital of France is" \
+  --n-ctx 512 \
+  --n-seq-max 1 \
+  -ngl 0
 ```
 
 #### What to Measure to Know It Worked
 1. **TCP Connection Handshake**:
-   - Tail log confirms connection: `stage[tail]: client (forward=TCP)`.
-   - Head log confirms socket dial: `stage_conn_dial: connected to 127.0.0.1:8081`.
+   - Head log confirms connection to `127.0.0.1:8081`.
+   - Tail log transitions from listening to active decode.
 2. **Prefill Survival**:
-   - Head successfully executes initial prompt prefill through layers 0–23 without OOM or fault.
-   - Hidden activation tensor (`result_output`) is transmitted over loopback TCP.
-3. **End-to-End Completion Output**:
-   - Head stdout streams generated completion text [ILLUSTRATIVE - NOT EXECUTED]:
+   - Head successfully executes initial prompt prefill through layers 0–23 without fault:
      ```
-     Fermat's principle states that the path taken by a ray of light between two points is the path that can be traversed in the least time...
+     stage[head]: prefilled 1 slots x 6 tok
      ```
-4. **Throughput Metric**:
-   - Verify non-zero decode throughput [ILLUSTRATIVE - NOT EXECUTED]:
+   - Hidden activation tensor (`result_norm`) is transmitted over loopback TCP.
+3. **Throughput Metric**:
+   - Verify non-zero decode throughput recorded across both stages:
      ```
-     stage[head]: DECODE 64 steps x 1 slots in 1.42s = 45.07 tok/s agg
+     stage[head]: DECODE 11 steps x 1 slots in 3.84s = 2.87 tok/s agg, 2.87 t/s/slot
+     stage[tail]: decode 11 steps x 1 slots in 3.32s = 3.31 tok/s agg, 3.31 t/s/slot
      ```
+4. **Captured End-to-End Completion Output**:
+   - Under `STAGE_PRINT=1`, Tail stdout streams generated tokens:
+     ```
+     [s0] Europe
+     [s0].
+     [s0]
+
+     [s0]<|channel>
+     [s0]thought
+     [s0]
+
+     [s0]<channel|>
+     [s0]It
+     [s0] appears
+     [s0] there
+     [s0] is
+     [s0] a
+     ```
+   - Reference comparison against single-process `llama-cli` on the full model:
+     ```
+     The capital of France is Europe.
+     <|channel>thought
+     <channel|>It appears there is a
+     ```
+     The generated token stream from the two-stage pipeline matches the single-process reference byte-for-byte.
 
 ---
 
@@ -203,8 +257,9 @@ Once loopback execution is verified, transition to multi-node distributed infere
 ┌───────────────────────────────┐         ┌───────────────────────────────┐
 │ Stage 0 (Head)                │         │ Stage 1 (Tail)                │
 │ CUDA_VISIBLE_DEVICES=GPU-<u0> │         │ CUDA_VISIBLE_DEVICES=GPU-<u1> │
-│ Dials 10.0.0.11:8081          ├────────►│ Listens on 0.0.0.0:8081       │
-└───────────────────────────────┘   TCP   └───────────────────────────────┘
+│ Dials 10.0.0.11:8081          ├────────►│ Listens on :8081              │
+│ STAGE_EMIT=hidden             │   TCP   │ STAGE_PRINT=1                 │
+└───────────────────────────────┘         └───────────────────────────────┘
 ```
 
 ### Step 1: Network & Port Verification
@@ -230,17 +285,22 @@ ping -c 4 10.0.0.11
 ```bash
 export CUDA_VISIBLE_DEVICES=GPU-98765432-abcd-ef01-2345-6789abcdef01
 export STAGE_ACTIVE=1 STAGE_IL_START=0 STAGE_IL_END=24
+export STAGE_THREADS=8 STAGE_PRINT=1
 
-llama-stage-runner \
+stdbuf -o0 llama-stage-runner \
   --role tail \
   --listen 8081 \
-  --model-dir /models/gemma4-12b-qat-q4_0-layers \
-  --layers 24,48
+  --model-dir /models/gemma4-12b-q4_0-layers \
+  --layers 24,48 \
+  --max-tokens 64 \
+  --n-ctx 512 \
+  --n-seq-max 1
 ```
 
 #### What to Measure
-- Socket status: `ss -tulpn | grep 8081` confirms listening on `0.0.0.0:8081`.
+- Socket status: `ss -tulpn | grep 8081` confirms listening on port `8081`.
 - VRAM on Host B: matches layer slice allocation.
+- Log output confirms `stage: listening on :8081`.
 
 ---
 
@@ -249,14 +309,17 @@ llama-stage-runner \
 ```bash
 export CUDA_VISIBLE_DEVICES=GPU-12345678-abcd-ef01-2345-6789abcdef00
 export STAGE_ACTIVE=1 STAGE_IL_START=0 STAGE_IL_END=24 STAGE_EMIT=hidden
+export STAGE_THREADS=8
 
-llama-stage-runner \
+stdbuf -o0 llama-stage-runner \
   --role head \
   --connect 10.0.0.11:8081 \
-  --model-dir /models/gemma4-12b-qat-q4_0-layers \
+  --model-dir /models/gemma4-12b-q4_0-layers \
   --layers 0,24 \
-  --prompt "Describe the physical principles of fiber optic transmission." \
-  --max-tokens 64
+  --prompt "The capital of France is" \
+  --max-tokens 64 \
+  --n-ctx 512 \
+  --n-seq-max 1
 ```
 
 #### What to Measure to Know It Worked
@@ -271,8 +334,8 @@ llama-stage-runner \
    # Verify TCP retransmits do not spike during tensor transmission
    ```
 3. **Token Stream & Tok/s**:
-   - Complete completion stream received on Host A.
-   - Aggregate tokens-per-second recorded.
+   - Under `STAGE_PRINT=1`, generated tokens stream on Host B standard output.
+   - Aggregate tokens-per-second recorded in runner logs.
 
 ---
 
@@ -290,7 +353,7 @@ ci/smoke-serve.sh http://127.0.0.1:8080 --min-tps 1.0
 | **Feasibility** | `layer_distribution.plan` | `Status: FEASIBLE`, `PASS (weights)` |
 | **Port Binding** | `ss -tulpn` | Stage listener socket in `LISTEN` state |
 | **Connection** | Process logs | TCP forward handshake established |
-| **Liveness Proof** | Token completion stream | Survived prefill + non-empty completion tokens |
+| **Liveness Proof** | Token completion stream | Survived prefill + non-empty completion tokens emitted on Tail stdout (`STAGE_PRINT=1`) |
 | **Throughput** | `tokens_per_second` | Measured tok/s $\ge$ required threshold |
 | **Clean Teardown** | Process exit / SIGINT | Socket released, 0 orphaned processes |
 
@@ -299,6 +362,13 @@ ci/smoke-serve.sh http://127.0.0.1:8080 --min-tps 1.0
 ## 7. Operational Traps & Troubleshooting
 
 - **Stage Launch Sequence**: Always start the listener stage (`tail`) prior to the dialing stage (`head`). Starting Head first causes immediate connection failure (`Connection refused`).
+- **Runner Listener Flag**: Use `--listen PORT` (e.g. `--listen 8081`). Specifying hostnames or IP addresses in `--listen` causes argument parsing errors.
 - **GPU Pinning by UUID**: Ordinal GPU index numbers (0, 1, 2) can shift across driver reloads or system reboots. Always query the persistent hardware UUID and set `CUDA_VISIBLE_DEVICES=GPU-<uuid>`.
-- **VRAM Reserve for Context**: The feasibility screen checks model weights. Real inference requires memory headroom for KV cache buffers and compute scratchpads. Keep 2–4 GiB of unallocated VRAM headroom per GPU.
-- **CPU Thread Contention**: When running on CPU or hybrid cores, bind each stage runner to disjoint CPU core masks using `taskset -c <cores>` to prevent threadpool starvation.
+- **Explicit Context Allocation**: Always specify `--n-ctx` (e.g. `--n-ctx 512`). Unset `--n-ctx` defaults to full model training context (e.g. 262k), leading to unnecessary memory consumption.
+- **Single Sequence Invariant**: Pass `--n-seq-max 1` for all stage runner processes. Stage runner execution requires single-sequence batches.
+- **Token Output Emission**: Tokens are generated and sampled on the Tail stage. Enable `STAGE_PRINT=1` on the Tail runner to observe generated tokens on stdout. The Head driver outputs decode metrics but does not stream tokens.
+- **Direct Connection Topology**: The v1 stage runner pipeline communicates via direct TCP sockets (`--connect <host>:<port>`). No intermediate HTTP server or gateway is placed in front of the tail stage.
+- **MoE on CPU**: When running Mixture-of-Experts architectures on CPU or GPU-less hosts, pass `-cmoe` to prevent device auto-fit allocation aborts.
+- **Unbuffered Stdout on Teardown**: Wrap stage runner invocations with `stdbuf -o0` to prevent loss of buffered stdout during process teardown or signal termination (meta#77).
+- **Slice-Relative Stage Layer Indexing**: Internal layer ranges (`STAGE_IL_START`, `STAGE_IL_END`) are indexed relative to the loaded stage slice (`0` to `N`), not global model layer indices.
+- **CPU Thread Contention**: When running on CPU or shared cores, bound threads using `STAGE_THREADS=<N>` and bind each stage runner to disjoint CPU core masks using `taskset -c <cores>` to prevent threadpool starvation.
