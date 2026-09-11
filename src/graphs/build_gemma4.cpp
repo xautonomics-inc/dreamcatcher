@@ -1,6 +1,7 @@
 #include "../llama-build-context.h"
 #include "../llama-model.h"
 #include "../llama-context.h"
+#include "llm_stage.h"
 
 static int gemma4_mtp_target_kv_layer(const llama_hparams & mtp_hparams, const llama_hparams & target_hparams, int mtp_il) {
     GGML_ASSERT(mtp_il >= 0 && mtp_il < (int) mtp_hparams.n_layer);
@@ -927,7 +928,13 @@ ggml_cgraph * llm_build_context::build_gemma4() {
         ? build_swa_mask_for_graph(hparams.n_swa, true)
         : build_inp_KQ_mask_swa(true);
 
-    auto inp_out_ids = n_tokens > 1 ? build_inp_out_ids() : nullptr;
+    // --- multi-stage pipeline: a head stage emits the post-window residual, not logits ---
+    const llama_stage_cfg sc = llama_stage_get_cfg(n_layer);
+    const bool stage_emit    = sc.active && sc.emit_hidden && llama_stage_consumes_last(sc, n_layer);
+
+    // only a stage that finishes to logits reduces to the output rows; an emitting
+    // stage must hand every row to the next stage.
+    auto inp_out_ids = (n_tokens > 1 && !stage_emit) ? build_inp_out_ids() : nullptr;
 
     if (model.split_mode == LLAMA_SPLIT_MODE_GRAPH) {
         return build_gemma4_graph_parallel(*this, lctx, ctx0, inpL, inp_pos, inp_out_ids,
@@ -1138,6 +1145,16 @@ ggml_cgraph * llm_build_context::build_gemma4() {
     }
 
     cur = inpL;
+
+    if (stage_emit) {
+        // STAGE EMIT: export the post-window residual hidden state (all rows) for the
+        // next stage; skip output_norm + lm_head. Named "result_norm" so the existing
+        // embeddings extraction (POOLING_NONE -> lctx.embd) picks it up. NOTE: in emit
+        // mode llama_get_embeddings_ith therefore returns the PRE-norm residual, by design.
+        cb(cur, "result_norm", -1);
+        ggml_build_forward_expand(gf, cur);
+        return gf;
+    }
 
     cur = llm_build_norm(ctx0, cur, hparams, model.output_norm, NULL, LLM_NORM_RMS, cb, -1);
     cb(cur, "result_norm", -1);

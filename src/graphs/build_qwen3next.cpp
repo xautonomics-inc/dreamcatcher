@@ -2,6 +2,7 @@
 #include "../llama-model.h"
 #include "../llama-context.h"
 #include "../llama-delta-net.h"
+#include "llm_stage.h"
 
 ggml_cgraph * llm_build_context::build_qwen3next() {
 
@@ -14,7 +15,13 @@ ggml_cgraph * llm_build_context::build_qwen3next() {
 
     ggml_tensor * inpL = llm_build_inp_embd(ctx0, lctx, hparams, batch, model.tok_embd, cb);
     ggml_tensor * inp_pos = build_inp_pos();
-    ggml_tensor * inp_out_ids = n_tokens > 1 ? build_inp_out_ids() : nullptr;
+    // --- multi-stage pipeline: a head stage emits the post-window residual, not logits ---
+    const llama_stage_cfg sc = llama_stage_get_cfg(n_layer);
+    const bool stage_emit    = sc.active && sc.emit_hidden && llama_stage_consumes_last(sc, n_layer);
+
+    // only a stage that finishes to logits reduces to the output rows; an emitting
+    // stage must hand every row to the next stage.
+    ggml_tensor * inp_out_ids = (n_tokens > 1 && !stage_emit) ? build_inp_out_ids() : nullptr;
     ggml_tensor * KQ_mask = build_inp_KQ_mask();
 
     lctx.inp_s_seq_qnext = ggml_new_tensor_2d(ctx0, GGML_TYPE_I32, 1, n_tokens);
@@ -78,6 +85,16 @@ ggml_cgraph * llm_build_context::build_qwen3next() {
         cb(cur, "l_out", il);
 
         inpL = cur;
+    }
+
+    if (stage_emit) {
+        // STAGE EMIT: export the post-window residual hidden state (all rows) for the
+        // next stage; skip output_norm + lm_head. Named "result_norm" so the existing
+        // embeddings extraction (POOLING_NONE -> lctx.embd) picks it up. NOTE: in emit
+        // mode llama_get_embeddings_ith therefore returns the PRE-norm residual, by design.
+        cb(inpL, "result_norm", -1);
+        ggml_build_forward_expand(gf, inpL);
+        return gf;
     }
 
     cur = build_output(lctx, ctx0, inpL, model.output, model.output_norm, cb);
