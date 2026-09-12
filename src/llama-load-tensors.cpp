@@ -4,6 +4,7 @@
 #include "llama-model.h"
 #include "llama-experts-remote.h"
 #include "ggml.h"
+#include "ggml-backend.h"
 
 
 #include <set>
@@ -474,8 +475,28 @@ ggml_context * create_tensors_helper::get_context_for_tensor(ggml_context * ctx,
             if (o.second == default_cpu_buft) has_buft_overrides = true;
             const struct ggml_tensor * cur = ml.get_tensor_meta(name.c_str());
             const size_t nbytes = cur ? ggml_nbytes(cur) : 0;
-            LLAMA_LOG_INFO("Tensor %s (size = %.2f MiB) buffer type overridden to %s\n", name.c_str(), nbytes/1024./1024., ggml_backend_buft_name(o.second));
-            ctx = ctx_for_buft(o.second);
+            auto buft = o.second;
+            // A `-ot ...=CPU` / `-cmoe` override lands in a PINNED host buffer, whose
+            // single-allocation cap is backend-defined (1 GiB on several backends). One
+            // tensor bigger than that cap used to abort the whole load with "tensor ... is
+            // too large to fit in a <backend>_Host buffer" unless LLAMA_NO_HOST_OVERRIDES=1
+            // was set by hand - e.g. a 27 GiB per_layer_token_embd.weight. Place just that
+            // tensor in the plain (unpinned) CPU buffer instead and say so; the env var
+            // stays as the explicit all-tensors override.
+            if (nbytes > 0 && ggml_backend_buft_is_host(buft)) {
+                const size_t max_size  = ggml_backend_buft_get_max_size(buft);
+                auto         plain_cpu = ggml_backend_cpu_buffer_type();
+                if (nbytes > max_size && buft != plain_cpu && ggml_backend_buft_get_max_size(plain_cpu) >= nbytes) {
+                    LLAMA_LOG_WARN("%s: tensor %s (%.2f MiB) exceeds the %s max allocation (%.2f MiB): "
+                                   "falling back to %s (set LLAMA_NO_HOST_OVERRIDES=1 to do this for every override)\n",
+                                   __func__, name.c_str(), nbytes/1024./1024.,
+                                   ggml_backend_buft_name(buft), max_size/1024./1024.,
+                                   ggml_backend_buft_name(plain_cpu));
+                    buft = plain_cpu;
+                }
+            }
+            LLAMA_LOG_INFO("Tensor %s (size = %.2f MiB) buffer type overridden to %s\n", name.c_str(), nbytes/1024./1024., ggml_backend_buft_name(buft));
+            ctx = ctx_for_buft(buft);
             break;
         }
     }
