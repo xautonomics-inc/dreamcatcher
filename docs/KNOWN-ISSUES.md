@@ -192,16 +192,6 @@ output pointed at a backend graph/binding fault, which is exactly what it was.
 verified, RDNA3 re-measure pending. Related: `meta#85` (different path, same
 device class).
 
-## `meta#94` — CPU `iq4_xs`/`iq4_kss`/`iq5_ks` mat-vec at n<32 disagrees with its own dequantizer
-
-**What was found.** Side finding while fixing `meta#88`: at vector counts below 32
-the CPU mat-vec kernels for `iq4_xs`, `iq4_kss` and `iq5_ks` return results off
-from a dequantize-then-reference-multiply comparison by ~7x the quantization noise
-— coherent output but measurably degraded. This hits IQ4_XS experts evaluated on
-CPU at decode (`-cmoe` / `-ot exps=CPU`), the exact layout many mixed CPU/GPU
-deployments use. Regression test added; kernel fix pending. **Status.** Open
-(kernel fix in progress).
-
 ## `meta#93` — NextN models abort under hidden-emit: two disagreeing "do we have logits?" predicates — fixed
 
 **Symptom (fixed).** Any GLM-family (NextN) load with `STAGE_EMIT=hidden` and
@@ -215,16 +205,36 @@ the buffer was never allocated. Unified into a single policy with a
 truth-table test. Landed on `fork-base` (project 29 MR !40). **Payoff.**
 GLM-5.3 library-vs-monolith hidden state is byte-identical (md5-equal) and
 generation is unchanged. **Status.** Fixed. Related:
-`meta#90` (no single-process server for a library — still open).
+`meta#90` (single-process server for a library — fixed, `llama-server
+--model-dir`).
 
-## `meta#95` — deepseek4 on Vulkan NVIDIA (coopmat1): degenerate output on the published tree
+## `meta#94` — CPU `iq4_xs`/`iq4_kss`/`iq5_ks` mat-vec at n<32 disagrees with its own dequantizer
+
+**What was found.** Side finding while fixing `meta#88`: at vector counts below 32
+the CPU mat-vec kernels for `iq4_xs`, `iq4_kss` and `iq5_ks` return results off
+from a dequantize-then-reference-multiply comparison by ~7x the quantization noise
+— coherent output but measurably degraded. This hits IQ4_XS experts evaluated on
+CPU at decode (`-cmoe` / `-ot exps=CPU`), the exact layout many mixed CPU/GPU
+deployments use. Regression test added; kernel fix pending. **Status.** Open
+(kernel fix in progress).
+
+## `meta#95` — GLM-DSA/GLM5NEXT indexer caches in library windows: absolute-vs-relative layer rule
+
+Same class as the fixed `meta#92` (deepseek4 `compress_ratios` /
+`hash_layer_count` never sliced/rebased for a window): the GLM indexer caches
+carry the same absolute-vs-relative layer-index rule in library windows. The
+failure is **silent** — no assert, no named error. Needs a token-exact GLM
+ring check to confirm scope and fix. **Status.** Open (filed; check queued).
+
+## `meta#96` — deepseek4 on Vulkan NVIDIA (coopmat1): degenerate output — third fault, open
 
 **What was measured.** On `20c308ca`, DSv4-Flash-Vision-Exp UD-Q4_K_XL via
 Vulkan (4x RTX 5060 Ti, coopmat1) emits degenerate output
 (`importimportimport…`) while the CUDA path on the same tree and build is
-coherent. Not the quant: MXFP4 is accepted natively on Vulkan (no fallback,
-same buffer sizes as CUDA). **Leading hypothesis.** deepseek4 shares the
-hyper-connection mixer with qwen4exp; this is most likely the same `MULTI_ADD`
-descriptor-range bug `meta#88` fixed (MR !39) — re-measurement on the fixed
-build is running; if it comes back coherent this entry closes as a duplicate.
-**Status.** Open (re-measure pending).
+coherent. **Ruled out.** Not the quant — MXFP4 is accepted natively on Vulkan
+(no fallback, same buffer sizes as CUDA). Not the `meta#88` `MULTI_ADD`
+descriptor-range bug either: with experts on CPU, DSv4 never emits that op.
+A second Vulkan defect found during the hunt — ik's dim-0 `GET_ROWS` silently
+computed as a plain gather — was fixed (MR !43, the form is now declined), and
+DSv4 **still** degenerates, so a third fault remains. **Status.** Open;
+check-results pass queued.
