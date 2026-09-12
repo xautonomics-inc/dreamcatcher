@@ -693,7 +693,7 @@ if (GGML_VULKAN)
         if (NOT GGML_VULKAN_NO_COOPMAT)
             test_shader_extension_support(
                 "GL_KHR_cooperative_matrix"
-                "${CMAKE_CURRENT_SOURCE_DIR}/vulkan-shaders/test_coopmat_support.comp"
+                "${CMAKE_CURRENT_SOURCE_DIR}/vulkan-shaders/feature-tests/coopmat.comp"
                 "GGML_VULKAN_COOPMAT_GLSLC_SUPPORT"
             )
         endif()
@@ -701,7 +701,7 @@ if (GGML_VULKAN)
         if (NOT GGML_VULKAN_NO_COOPMAT2)
             test_shader_extension_support(
                 "GL_NV_cooperative_matrix2"
-                "${CMAKE_CURRENT_SOURCE_DIR}/vulkan-shaders/test_coopmat2_support.comp"
+                "${CMAKE_CURRENT_SOURCE_DIR}/vulkan-shaders/feature-tests/coopmat2.comp"
                 "GGML_VULKAN_COOPMAT2_GLSLC_SUPPORT"
             )
         endif()
@@ -709,7 +709,7 @@ if (GGML_VULKAN)
         if (NOT GGML_VULKAN_NO_INT_DOT)
             test_shader_extension_support(
                 "GL_EXT_integer_dot_product"
-                "${CMAKE_CURRENT_SOURCE_DIR}/vulkan-shaders/test_integer_dot_support.comp"
+                "${CMAKE_CURRENT_SOURCE_DIR}/vulkan-shaders/feature-tests/integer_dot.comp"
                 "GGML_VULKAN_INTEGER_DOT_GLSLC_SUPPORT"
             )
         endif()
@@ -717,7 +717,7 @@ if (GGML_VULKAN)
         if (NOT GGML_VULKAN_NO_BF16)
             test_shader_extension_support(
                 "GL_EXT_bfloat16"
-                "${CMAKE_CURRENT_SOURCE_DIR}/vulkan-shaders/test_bfloat16_support.comp"
+                "${CMAKE_CURRENT_SOURCE_DIR}/vulkan-shaders/feature-tests/bfloat16.comp"
                 "GGML_VULKAN_BFLOAT16_GLSLC_SUPPORT"
             )
         endif()
@@ -794,6 +794,7 @@ if (GGML_VULKAN)
                        ${VULKAN_SHADER_GEN_CMAKE_ARGS}
 
             BUILD_COMMAND   ${CMAKE_COMMAND} --build   . --config $<CONFIG>
+            BUILD_ALWAYS    TRUE
 
             # NOTE: When DESTDIR is set using Makefile generators and
             # "make install" triggers the build step, vulkan-shaders-gen
@@ -804,37 +805,60 @@ if (GGML_VULKAN)
                             ${CMAKE_COMMAND} --install . --config $<CONFIG>
         )
 
+        if (POLICY CMP0116)
+            cmake_policy(SET CMP0116 NEW)
+        endif()
+
         set (_ggml_vk_host_suffix $<IF:$<STREQUAL:${CMAKE_HOST_SYSTEM_NAME},Windows>,.exe,>)
         set (_ggml_vk_genshaders_dir "${CMAKE_BINARY_DIR}/$<CONFIG>")
         set (_ggml_vk_genshaders_cmd "${_ggml_vk_genshaders_dir}/vulkan-shaders-gen${_ggml_vk_host_suffix}")
         set (_ggml_vk_header     "${CMAKE_CURRENT_BINARY_DIR}/ggml-vulkan-shaders.hpp")
-        set (_ggml_vk_source     "${CMAKE_CURRENT_BINARY_DIR}/ggml-vulkan-shaders.cpp")
         set (_ggml_vk_input_dir  "${CMAKE_CURRENT_SOURCE_DIR}/vulkan-shaders")
         set (_ggml_vk_output_dir "${CMAKE_CURRENT_BINARY_DIR}/vulkan-shaders.spv")
 
         file(GLOB _ggml_vk_shader_files CONFIGURE_DEPENDS "${_ggml_vk_input_dir}/*.comp")
 
+        # Because external projects do not provide source-level tracking,
+        # the vulkan-shaders-gen sources need to be explicitly added to
+        # ensure that changes will cascade into shader re-generation.
+        file(GLOB _ggml_vk_shaders_gen_sources
+                  CONFIGURE_DEPENDS "${_ggml_vk_input_dir}/*.cpp"
+                                    "${_ggml_vk_input_dir}/*.h")
+
         add_custom_command(
             OUTPUT ${_ggml_vk_header}
-                   ${_ggml_vk_source}
-
             COMMAND ${_ggml_vk_genshaders_cmd}
-                --glslc      ${Vulkan_GLSLC_EXECUTABLE}
-                --input-dir  ${_ggml_vk_input_dir}
                 --output-dir ${_ggml_vk_output_dir}
                 --target-hpp ${_ggml_vk_header}
-                --target-cpp ${_ggml_vk_source}
-                --no-clean
-
-            DEPENDS ${_ggml_vk_shader_files}
-                    ${_ggml_vk_shader_gens_sources}
+            DEPENDS ${_ggml_vk_shaders_gen_sources}
                     vulkan-shaders-gen
-
-            COMMENT "Generate vulkan shaders"
+            COMMENT "Generate vulkan shaders header"
         )
 
+        set(GGML_SOURCES_VULKAN ggml-vulkan.cpp)
+
+        foreach (file_full ${_ggml_vk_shader_files})
+            get_filename_component(file ${file_full} NAME)
+            set (_ggml_vk_target_cpp "${CMAKE_CURRENT_BINARY_DIR}/${file}.cpp")
+
+            add_custom_command(
+                OUTPUT  ${_ggml_vk_target_cpp}
+                DEPFILE ${_ggml_vk_target_cpp}.d
+                COMMAND ${_ggml_vk_genshaders_cmd}
+                    --glslc      ${Vulkan_GLSLC_EXECUTABLE}
+                    --source     ${file_full}
+                    --output-dir ${_ggml_vk_output_dir}
+                    --target-hpp ${_ggml_vk_header}
+                    --target-cpp ${_ggml_vk_target_cpp}
+                DEPENDS ${file_full}
+                        ${_ggml_vk_shaders_gen_sources}
+                        vulkan-shaders-gen
+                COMMENT "Generate vulkan shaders for ${file}"
+            )
+            list(APPEND GGML_SOURCES_VULKAN ${_ggml_vk_target_cpp})
+        endforeach()
+
         set(GGML_HEADERS_VULKAN ${CMAKE_CURRENT_SOURCE_DIR}/../include/ggml-vulkan.h ${_ggml_vk_header})
-        set(GGML_SOURCES_VULKAN ggml-vulkan.cpp ${_ggml_vk_source})
 
         set(GGML_EXTRA_LIBS     ${GGML_EXTRA_LIBS} Vulkan::Vulkan)
         set(GGML_EXTRA_INCLUDES ${GGML_EXTRA_INCLUDES} ${CMAKE_CURRENT_BINARY_DIR})

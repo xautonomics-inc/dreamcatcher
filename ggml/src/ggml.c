@@ -1303,6 +1303,15 @@ static const ggml_type_traits_t type_traits[GGML_TYPE_COUNT] = {
         .nrows                    = 1,
         .row_meta_size            = 0,
     },
+    [GGML_TYPE_NVFP4] = {
+        // ik-vulkan-refresh: enum/size only (Vulkan backend); no CPU kernels in ik yet
+        .type_name                = "nvfp4",
+        .blck_size                = QK_NVFP4,
+        .type_size                = sizeof(block_nvfp4),
+        .is_quantized             = true,
+        .nrows                    = 1,
+        .row_meta_size            = 0,
+    },
     [GGML_TYPE_MXFP4] = {
         .type_name                = "mxfp4",
         .blck_size                = QK_MXFP4,
@@ -4442,9 +4451,21 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "MASK_TO_IDX",
     "LATENT_ATTN",
     "DS4_COMP",
+
+    "SIN",
+    "COS",
+    "ROLL",
+    "TOP_K",
+    "COUNT_EQUAL",
+    "IM2COL_3D",
+    "OPT_STEP_ADAMW",
+    "OPT_STEP_SGD",
+    "RWKV_WKV6",
+    "RWKV_WKV7",
+    "GATED_DELTA_NET",
 };
 
-static_assert(GGML_OP_COUNT == 111, "GGML_OP_COUNT != 111");
+static_assert(GGML_OP_COUNT == 122, "GGML_OP_COUNT != 122");
 
 static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "none",
@@ -4572,9 +4593,21 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "latent_attn_prefix(q,c,pk,pv,mask)",
     "ds4_comp(state, score, idx)",
 
+    "sin(x)",
+    "cos(x)",
+    "roll(x)",
+    "top_k(x)",
+    "count_equal(x,y)",
+    "im2col_3d(x)",
+    "adamw(x)",
+    "sgd(x)",
+    "rwkv_wkv6(k, v, r, tf, td, s)",
+    "rwkv_wkv7(r, w, k, v, a, b, s)",
+    "gated_delta_net(q, k, v, g, beta, s)",
+
 };
 
-static_assert(GGML_OP_COUNT == 111, "GGML_OP_COUNT != 111");
+static_assert(GGML_OP_COUNT == 122, "GGML_OP_COUNT != 122");
 
 static_assert(GGML_OP_POOL_COUNT == 2, "GGML_OP_POOL_COUNT != 2");
 
@@ -4599,9 +4632,14 @@ static const char * GGML_UNARY_OP_NAME[GGML_UNARY_OP_COUNT] = {
     "EXP",
     "SOFTPLUS",
     "SQRT_SOFTPLUS",
+    "CEIL",
+    "FLOOR",
+    "ROUND",
+    "TRUNC",
+    "XIELU",
 };
 
-static_assert(GGML_UNARY_OP_COUNT == 19, "GGML_UNARY_OP_COUNT != 19");
+static_assert(GGML_UNARY_OP_COUNT == 24, "GGML_UNARY_OP_COUNT != 24");
 
 
 static_assert(sizeof(struct ggml_object)%GGML_MEM_ALIGN == 0, "ggml_object size must be a multiple of GGML_MEM_ALIGN");

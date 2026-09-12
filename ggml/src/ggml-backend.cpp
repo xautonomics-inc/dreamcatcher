@@ -917,6 +917,35 @@ GGML_CALL static bool ggml_backend_cpu_supports_op(ggml_backend_t backend, const
             // Whether to ADOPT the op on a CPU-resident layer is performance policy, and
             // that lives in the openPangu builder gate, which requires a non-CPU backend.
             return true;
+        // The op and unary-op ids below were declared so the refreshed Vulkan backend
+        // could name them; no graph builder here emits them and there is no CPU kernel
+        // for any of them, so ggml_compute_forward would abort the process if one ever
+        // reached this backend. Answer honestly instead: a caller that asks first gets a
+        // usable "no", and the op-level test harness -- which enumerates the whole unary
+        // range -- skips them rather than dying part-way through a sweep.
+        case GGML_OP_SIN:
+        case GGML_OP_COS:
+        case GGML_OP_ROLL:
+        case GGML_OP_TOP_K:
+        case GGML_OP_COUNT_EQUAL:
+        case GGML_OP_IM2COL_3D:
+        case GGML_OP_OPT_STEP_ADAMW:
+        case GGML_OP_OPT_STEP_SGD:
+        case GGML_OP_RWKV_WKV6:
+        case GGML_OP_RWKV_WKV7:
+        case GGML_OP_GATED_DELTA_NET:
+            return false;
+        case GGML_OP_UNARY:
+            switch (ggml_get_unary_op(op)) {
+                case GGML_UNARY_OP_CEIL:
+                case GGML_UNARY_OP_FLOOR:
+                case GGML_UNARY_OP_ROUND:
+                case GGML_UNARY_OP_TRUNC:
+                case GGML_UNARY_OP_XIELU:
+                    return false;
+                default:
+                    return true;
+            }
         default:
             return true;
     }

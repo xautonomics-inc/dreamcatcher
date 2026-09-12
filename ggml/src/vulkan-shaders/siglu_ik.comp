@@ -1,0 +1,12 @@
+#version 450
+
+// ik-vulkan-refresh: ik GGML_OP_FUSED_MUL_UNARY(gate, up, GGML_UNARY_OP_SIGMOID)
+// == sigmoid(gate) * up (used by shared-expert paths in several ik MoE archs)
+
+#include "glu_head.glsl"
+
+float op(float a, float b) {
+    return b / (1.0f + exp(-a));
+}
+
+#include "glu_main.glsl"

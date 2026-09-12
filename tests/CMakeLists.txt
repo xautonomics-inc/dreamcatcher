@@ -207,6 +207,9 @@ target_include_directories(test-iq4-ks-kt-decode PRIVATE ${PROJECT_SOURCE_DIR}/g
 
 # llama_target_and_test(test-opt.cpp) # SLOW
 
+# per-op validation of every registered backend against the CPU reference
+llama_build_and_test(test-backend-ops.cpp)
+
 llama_target_and_test(test-model-load-cancel.cpp  LABEL "model")
 llama_build_and_test(test-model-loader-metadata.cpp LABEL "model")
 llama_build_and_test(test-stage-manifest.cpp LABEL "model")
