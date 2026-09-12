@@ -2391,6 +2391,19 @@ static bool test_backend(ggml_backend_t backend, test_mode mode, const char * op
             test_cases.emplace_back(new test_mul_mat(type_a, GGML_TYPE_F32, 3840, n, 15360, {1, 1}, {1, 1}));
         }
     }
+    // hyper-connection mixer shapes: a low-rank pair whose up projection has a short k
+    // (320 = 10 q8_0 blocks, not a multiple of the mat-vec kernels' per-iteration width)
+    // against a wide m; the down projection is the transpose. Also the iq types at model
+    // shapes, which the k=256 sweep below never reaches.
+    for (ggml_type type_a : {GGML_TYPE_Q8_0, GGML_TYPE_F16, GGML_TYPE_Q4_0, GGML_TYPE_IQ4_XS, GGML_TYPE_IQ4_NL, GGML_TYPE_IQ3_S}) {
+        for (int n : {1, 7, 32}) {
+            if (320 % ggml_blck_size(type_a) == 0) {
+                test_cases.emplace_back(new test_mul_mat(type_a, GGML_TYPE_F32, 10240, n,   320, {1, 1}, {1, 1}));
+            }
+            test_cases.emplace_back(new test_mul_mat(type_a, GGML_TYPE_F32,   320, n, 10240, {1, 1}, {1, 1}));
+            test_cases.emplace_back(new test_mul_mat(type_a, GGML_TYPE_F32,  2560, n,  2560, {1, 1}, {1, 1}));
+        }
+    }
 
     for (ggml_type type_a : base_types) {
         for (ggml_type type_b : {GGML_TYPE_F32, GGML_TYPE_F16}) {
