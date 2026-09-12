@@ -99,7 +99,12 @@ struct llama_model_loader {
     llama_model_loader(const std::string & fname, int ncmoe, bool use_mmap, bool check_tensors, bool repack_tensors, bool use_thp,
             bool merge_qkv, bool merge_up_gate_exps, bool defer_experts,
             const llama_model_kv_override * param_overrides_p,
-            const llama_model_tensor_buft_override * param_tensor_buft_overrides_p);
+            const llama_model_tensor_buft_override * param_tensor_buft_overrides_p,
+            // layer-library assembly (llama_model_load_from_parts): mutually exclusive
+            // with fname; blk.J names in parts[i] are remapped to blk.(blk_base+J) and
+            // the window-shape KVs re-derived as per-file sums.
+            const llama_model_part * parts = nullptr,
+            size_t n_parts = 0);
 
     ~llama_model_loader();
 
