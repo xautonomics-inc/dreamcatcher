@@ -1530,6 +1530,32 @@ struct test_sum_rows : public test_case {
     }
 };
 
+// GGML_OP_MULTI_ADD (ik): sum n_add consecutive column chunks of every row.
+// The graph builders hand the op a [ne0, nrows] view whose row stride spans the n_add
+// chunks (MoE expert combine, hyper-connection stream mixing), so the op reads past the
+// view's nominal ggml_nbytes(): chunks 1..n_add-1 of the last row lie beyond it.
+struct test_multi_add : public test_case {
+    const ggml_type type;
+    const int64_t ne0;
+    const int64_t n_add;
+    const int64_t nrows;
+
+    std::string vars() override {
+        return VARS_TO_STR4(type, ne0, n_add, nrows);
+    }
+
+    test_multi_add(ggml_type type = GGML_TYPE_F32,
+            int64_t ne0 = 2560, int64_t n_add = 4, int64_t nrows = 1)
+        : type(type), ne0(ne0), n_add(n_add), nrows(nrows) {}
+
+    ggml_tensor * build_graph(ggml_context * ctx) override {
+        ggml_tensor * a = ggml_new_tensor_3d(ctx, type, ne0, n_add, nrows);
+        ggml_tensor * v = ggml_view_2d(ctx, a, ne0, nrows, a->nb[2], 0);
+        ggml_tensor * out = ggml_multi_add(ctx, v, n_add);
+        return out;
+    }
+};
+
 // GGML_OP_UPSCALE
 struct test_upscale : public test_case {
     const ggml_type type;
@@ -2365,6 +2391,19 @@ static bool test_backend(ggml_backend_t backend, test_mode mode, const char * op
             test_cases.emplace_back(new test_mul_mat(type_a, GGML_TYPE_F32, 3840, n, 15360, {1, 1}, {1, 1}));
         }
     }
+    // hyper-connection mixer shapes: a low-rank pair whose up projection has a short k
+    // (320 = 10 q8_0 blocks, not a multiple of the mat-vec kernels' per-iteration width)
+    // against a wide m; the down projection is the transpose. Also the iq types at model
+    // shapes, which the k=256 sweep below never reaches.
+    for (ggml_type type_a : {GGML_TYPE_Q8_0, GGML_TYPE_F16, GGML_TYPE_Q4_0, GGML_TYPE_IQ4_XS, GGML_TYPE_IQ4_NL, GGML_TYPE_IQ3_S}) {
+        for (int n : {1, 7, 32}) {
+            if (320 % ggml_blck_size(type_a) == 0) {
+                test_cases.emplace_back(new test_mul_mat(type_a, GGML_TYPE_F32, 10240, n,   320, {1, 1}, {1, 1}));
+            }
+            test_cases.emplace_back(new test_mul_mat(type_a, GGML_TYPE_F32,   320, n, 10240, {1, 1}, {1, 1}));
+            test_cases.emplace_back(new test_mul_mat(type_a, GGML_TYPE_F32,  2560, n,  2560, {1, 1}, {1, 1}));
+        }
+    }
 
     for (ggml_type type_a : base_types) {
         for (ggml_type type_b : {GGML_TYPE_F32, GGML_TYPE_F16}) {
@@ -2543,6 +2582,11 @@ static bool test_backend(ggml_backend_t backend, test_mode mode, const char * op
     }
 
     test_cases.emplace_back(new test_sum_rows());
+    for (int64_t nrows : {1, 7, 32}) {
+        test_cases.emplace_back(new test_multi_add(GGML_TYPE_F32, 2560,  4, nrows)); // hyper-connection mix, hc = 4
+        test_cases.emplace_back(new test_multi_add(GGML_TYPE_F32, 2560, 10, nrows)); // MoE combine, n_expert_used = 10
+    }
+    test_cases.emplace_back(new test_multi_add(GGML_TYPE_F32, 128, 4, 5));           // pooled indexer keys, ratio 4
     test_cases.emplace_back(new test_upscale());
     test_cases.emplace_back(new test_upscale(GGML_TYPE_F32, { 512, 512, 3, 1 }, 2, true));
     test_cases.emplace_back(new test_upscale_ext());
