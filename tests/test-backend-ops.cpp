@@ -1530,6 +1530,32 @@ struct test_sum_rows : public test_case {
     }
 };
 
+// GGML_OP_MULTI_ADD (ik): sum n_add consecutive column chunks of every row.
+// The graph builders hand the op a [ne0, nrows] view whose row stride spans the n_add
+// chunks (MoE expert combine, hyper-connection stream mixing), so the op reads past the
+// view's nominal ggml_nbytes(): chunks 1..n_add-1 of the last row lie beyond it.
+struct test_multi_add : public test_case {
+    const ggml_type type;
+    const int64_t ne0;
+    const int64_t n_add;
+    const int64_t nrows;
+
+    std::string vars() override {
+        return VARS_TO_STR4(type, ne0, n_add, nrows);
+    }
+
+    test_multi_add(ggml_type type = GGML_TYPE_F32,
+            int64_t ne0 = 2560, int64_t n_add = 4, int64_t nrows = 1)
+        : type(type), ne0(ne0), n_add(n_add), nrows(nrows) {}
+
+    ggml_tensor * build_graph(ggml_context * ctx) override {
+        ggml_tensor * a = ggml_new_tensor_3d(ctx, type, ne0, n_add, nrows);
+        ggml_tensor * v = ggml_view_2d(ctx, a, ne0, nrows, a->nb[2], 0);
+        ggml_tensor * out = ggml_multi_add(ctx, v, n_add);
+        return out;
+    }
+};
+
 // GGML_OP_UPSCALE
 struct test_upscale : public test_case {
     const ggml_type type;
@@ -2543,6 +2569,11 @@ static bool test_backend(ggml_backend_t backend, test_mode mode, const char * op
     }
 
     test_cases.emplace_back(new test_sum_rows());
+    for (int64_t nrows : {1, 7, 32}) {
+        test_cases.emplace_back(new test_multi_add(GGML_TYPE_F32, 2560,  4, nrows)); // hyper-connection mix, hc = 4
+        test_cases.emplace_back(new test_multi_add(GGML_TYPE_F32, 2560, 10, nrows)); // MoE combine, n_expert_used = 10
+    }
+    test_cases.emplace_back(new test_multi_add(GGML_TYPE_F32, 128, 4, 5));           // pooled indexer keys, ratio 4
     test_cases.emplace_back(new test_upscale());
     test_cases.emplace_back(new test_upscale(GGML_TYPE_F32, { 512, 512, 3, 1 }, 2, true));
     test_cases.emplace_back(new test_upscale_ext());

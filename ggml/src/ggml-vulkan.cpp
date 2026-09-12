@@ -10477,6 +10477,20 @@ static void ggml_vk_op_f32(ggml_backend_vk_context * ctx, vk_context& subctx, co
     ggml_pipeline_request_descriptor_sets(ctx, pipeline, 1);
 
     vk_subbuffer src0_buf = ggml_vk_tensor_subbuffer(ctx, src0, true);
+    if (op == GGML_OP_MULTI_ADD) {
+        // ik-port: MULTI_ADD sums n_add column chunks per row, and the graph builders hand it a
+        // [ne0, nrows] view whose row stride spans those chunks (MoE combine, hyper-connection
+        // mixing). ggml_nbytes() of that view ends after the last row's FIRST chunk, so binding
+        // it as the descriptor range leaves chunks 1..n_add-1 of the last row outside the bound
+        // range; the hardware clamps such reads to zero and every single-row (decode) sum is
+        // wrong. Bind the range the kernel actually reads.
+        const uint32_t n_add = (uint32_t) dst->op_params[0];
+        const size_t   need  = (src0_buf.size - ggml_nbytes(src0)) /* misalignment */ +
+                               src0->nb[1] * (ne01 - 1) + (size_t) n_add * ne00 * ggml_type_size(src0->type);
+        const size_t   avail = ggml_vk_get_max_buffer_range(ctx, src0_buf.buffer, src0_buf.offset);
+        GGML_ASSERT(need <= avail);
+        src0_buf.size = std::max<size_t>(src0_buf.size, need);
+    }
     vk_subbuffer src1_buf = use_src1 ? ggml_vk_tensor_subbuffer(ctx, src1, true) : vk_subbuffer{};
     vk_subbuffer src2_buf = use_src2 ? ggml_vk_tensor_subbuffer(ctx, src2, true) : vk_subbuffer{};
     vk_subbuffer src3_buf = use_src3 ? ggml_vk_tensor_subbuffer(ctx, src3, true) : vk_subbuffer{};
