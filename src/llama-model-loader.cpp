@@ -29,6 +29,87 @@
 #include <mutex>
 #include <cstring>
 
+namespace {
+
+size_t gguf_scalar_size(enum gguf_type type) {
+    switch (type) {
+        case GGUF_TYPE_UINT8:
+        case GGUF_TYPE_INT8:
+        case GGUF_TYPE_BOOL:    return 1;
+        case GGUF_TYPE_UINT16:
+        case GGUF_TYPE_INT16:   return 2;
+        case GGUF_TYPE_UINT32:
+        case GGUF_TYPE_INT32:
+        case GGUF_TYPE_FLOAT32: return 4;
+        case GGUF_TYPE_UINT64:
+        case GGUF_TYPE_INT64:
+        case GGUF_TYPE_FLOAT64: return 8;
+        case GGUF_TYPE_STRING:
+        case GGUF_TYPE_ARRAY:
+        case GGUF_TYPE_COUNT:   break;
+    }
+    throw std::runtime_error(format("unsupported GGUF array element type %s", gguf_type_name(type)));
+}
+
+struct gguf_array_slice {
+    std::string              key;
+    enum gguf_type           type;
+    std::vector<uint8_t>     data;
+    std::vector<std::string> strings;
+};
+
+} // namespace
+
+void llama_model_loader_slice_block_arrays(
+        gguf_context * meta,
+              int32_t source_blk_count,
+              int32_t source_blk_start,
+              int32_t assembled_blk_count) {
+    if (source_blk_count <= 0 || source_blk_start < 0 || assembled_blk_count < 0 ||
+            assembled_blk_count > source_blk_count ||
+            source_blk_start > source_blk_count - assembled_blk_count) {
+        throw std::runtime_error(format(
+                "invalid assembly metadata window [%d,%d) for source block_count=%d",
+                source_blk_start, source_blk_start + assembled_blk_count, source_blk_count));
+    }
+
+    std::vector<gguf_array_slice> slices;
+    for (int kid = 0; kid < gguf_get_n_kv(meta); ++kid) {
+        if (gguf_get_kv_type(meta, kid) != GGUF_TYPE_ARRAY ||
+                gguf_get_arr_n(meta, kid) != source_blk_count) {
+            continue;
+        }
+
+        gguf_array_slice slice = { gguf_get_key(meta, kid), gguf_get_arr_type(meta, kid), {}, {} };
+        if (slice.type == GGUF_TYPE_STRING) {
+            slice.strings.reserve(assembled_blk_count);
+            for (int32_t i = 0; i < assembled_blk_count; ++i) {
+                slice.strings.emplace_back(gguf_get_arr_str(meta, kid, source_blk_start + i));
+            }
+        } else {
+            const size_t elem_size = gguf_scalar_size(slice.type);
+            const auto * src = static_cast<const uint8_t *>(gguf_get_arr_data(meta, kid));
+            const auto * begin = src + elem_size * source_blk_start;
+            slice.data.assign(begin, begin + elem_size * assembled_blk_count);
+        }
+        slices.emplace_back(std::move(slice));
+    }
+
+    for (const auto & slice : slices) {
+        gguf_remove_key(meta, slice.key.c_str());
+        if (slice.type == GGUF_TYPE_STRING) {
+            std::vector<const char *> strings;
+            strings.reserve(slice.strings.size());
+            for (const auto & value : slice.strings) {
+                strings.push_back(value.c_str());
+            }
+            gguf_set_arr_str(meta, slice.key.c_str(), strings.data(), (int) strings.size());
+        } else {
+            gguf_set_arr_data(meta, slice.key.c_str(), slice.type, slice.data.data(), assembled_blk_count);
+        }
+    }
+}
+
 #if defined(_WIN32)
     #define WIN32_LEAN_AND_MEAN
     #ifndef NOMINMAX
@@ -357,6 +438,8 @@ llama_model_loader::llama_model_loader(const std::string & fname, int ncmoe, boo
         }
 
         std::set<int32_t> blk_seen;
+        const int32_t source_blk_start = parts[0].source_blk_start;
+        const int32_t source_blk_count = parts[0].source_blk_count;
 
         // window-shape keys, summed across part files
         static const enum llm_kv shape_kv[3] = { LLM_KV_BLOCK_COUNT, LLM_KV_LEADING_DENSE_BLOCK_COUNT, LLM_KV_NEXTN_PREDICT_LAYERS };
@@ -381,6 +464,13 @@ llama_model_loader::llama_model_loader(const std::string & fname, int ncmoe, boo
         for (size_t i = 0; i < n_parts; ++i) {
             const char *  fname_part = parts[i].path;
             const int32_t blk_base   = parts[i].blk_base;
+
+            if (parts[i].source_blk_start != source_blk_start || parts[i].source_blk_count != source_blk_count) {
+                throw std::runtime_error(format(
+                        "invalid assembly: part %zu metadata window [%d,+%d) differs from part 0 [%d,+%d)",
+                        i, parts[i].source_blk_start, parts[i].source_blk_count,
+                        source_blk_start, source_blk_count));
+            }
 
             ctx = NULL;
             struct gguf_context * meta_part = gguf_init_from_file(fname_part, params);
@@ -450,6 +540,8 @@ llama_model_loader::llama_model_loader(const std::string & fname, int ncmoe, boo
         if (!blk_seen.empty() && (int64_t) *blk_seen.rbegin() >= n_blk) {
             throw std::runtime_error(format("invalid assembly: blk.%d beyond window block_count=%d", (int) *blk_seen.rbegin(), (int) n_blk));
         }
+
+        llama_model_loader_slice_block_arrays(meta, source_blk_count, source_blk_start, n_blk);
 
         // inject the summed window-shape values as internal overrides (an explicit
         // user override for the same key wins)
