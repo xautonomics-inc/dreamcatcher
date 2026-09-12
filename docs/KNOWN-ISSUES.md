@@ -188,7 +188,7 @@ narrow the space for the next such bug: BF16 `indexer.k_proj` placement changed
 nothing; flash attention on/off reproduced identically; cross-vendor bit-identical
 output pointed at a backend graph/binding fault, which is exactly what it was.
 **Workaround (pre-fix builds).** Run this model where it is coherent — CUDA
-(monolith or ring) or CPU. **Status.** Fixed on `fork-base`; NVIDIA coopmat1
+(monolith or ring) or CPU. **Status.** Fixed; NVIDIA coopmat1
 verified, RDNA3 re-measure pending. Related: `meta#85` (different path, same
 device class).
 
@@ -214,7 +214,7 @@ nullptr)`, blocking the library-vs-monolith hidden-state A/B.
 the buffer was never allocated. Unified into a single policy with a
 truth-table test. Landed on `fork-base` (project 29 MR !40). **Payoff.**
 GLM-5.3 library-vs-monolith hidden state is byte-identical (md5-equal) and
-generation is unchanged. **Status.** Fixed on `fork-base`. Related:
+generation is unchanged. **Status.** Fixed. Related:
 `meta#90` (no single-process server for a library — still open).
 
 ## `meta#95` — deepseek4 on Vulkan NVIDIA (coopmat1): degenerate output on the published tree
