@@ -129,9 +129,11 @@ struct llama_hparams {
     float    f_attn_temp_scale       = 0.1;
 
     // DSA (deepseek sparse attention)
-    uint32_t indexer_n_head    = 0;
-    uint32_t indexer_head_size = 0;
-    uint32_t indexer_top_k     = 0;
+    uint32_t indexer_n_head     = 0;
+    uint32_t indexer_head_size  = 0;
+    uint32_t indexer_top_k      = 0;
+    // k-pool indexer: tokens per compressed key cell (GGUF attention.indexer.kpool); 0 = plain per-token DSA (as in GLM-5.2)
+    uint32_t indexer_block_size = 0;
     // GLM-5.2 IndexShare: per-layer full/shared indexer map. "full" layers compute their own lightning-
     // indexer top-k; "shared" layers reuse the previous full layer's top-k. Populated from GGUF
     // indexer_types metadata if present, else derived from the GLM-5.2 config rule at load time.
@@ -299,7 +301,20 @@ struct llama_hparams {
         GGML_ABORT("fatal error");
     }
 
+    // Width of one row of the inter-block residual stream.
+    // Hyper-connection architectures do not carry a single vector per token between
+    // blocks: they carry `hyper_connection.count` parallel streams, so the residual
+    // bundle is hc * n_embd wide. Every other architecture keeps one stream.
+    uint32_t n_embd_hc_bundle() const {
+        return dsv4_hc_mult > 1 ? n_embd * dsv4_hc_mult : n_embd;
+    }
+
     uint32_t n_embd_inp() const {
+        // a hyper-connection residual bundle is the model's real inter-block width
+        if (dsv4_hc_mult > 1) {
+            return n_embd_hc_bundle();
+        }
+
         uint32_t n_embd_inp = n_embd;
 
         if (n_deepstack_layers > 0) {

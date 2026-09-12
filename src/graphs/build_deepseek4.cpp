@@ -2,6 +2,7 @@
 #include "../llama-context.h"
 #include "../llama-build-context.h"
 #include "../llama-dsv4.h"
+#include "llm_stage.h"
 
 #include <algorithm>
 #include <cmath>
@@ -1298,6 +1299,13 @@ ggml_cgraph * llm_build_context::build_deepseek4() {
     const int n_layer_begin = is_mtp ? n_layer - hparams.nextn_predict_layers : 0;
     const int n_layer_end   = is_mtp ? n_layer : n_layer - hparams.nextn_predict_layers;
 
+    // --- multi-stage pipeline: a head stage emits the post-window residual, not logits.
+    // Only the normal (non-MTP) path is staged; an MTP companion always finishes to logits.
+    const int n_proc_layers  = n_layer - hparams.nextn_predict_layers;
+    const llama_stage_cfg sc = llama_stage_get_cfg(n_proc_layers);
+    const bool stage_emit    = !is_mtp && sc.active && sc.emit_hidden &&
+                               llama_stage_consumes_last(sc, n_proc_layers);
+
     if (kv_self.any_compacted()) {
         // an MTP companion walks only its dense NextN layer while its other layers compact
         bool walked_compacted = false, walked_dense = false;
@@ -1346,9 +1354,16 @@ ggml_cgraph * llm_build_context::build_deepseek4() {
         cb(inpL, "mtp_eh_proj", il_mtp);
     } else {
         ggml_tensor * inp = llm_build_inp_embd(ctx0, lctx, hparams, batch, model.tok_embd, cb);
-        inpL = ggml_reshape_3d(ctx0, inp, n_embd, 1, n_tokens);
-        inpL = ggml_repeat_4d(ctx0, inpL, n_embd, hc, n_tokens, 1);
-        cb(inpL, "hc_init", -1);
+        if (inp->ne[0] == hc * n_embd) {
+            // a downstream pipeline stage is handed the upstream window's wide residual
+            // bundle, which already IS the hc stream set: no token embedding, no expansion
+            inpL = ggml_reshape_3d(ctx0, inp, n_embd, hc, n_tokens);
+            cb(inpL, "hc_init_in", -1);
+        } else {
+            inpL = ggml_reshape_3d(ctx0, inp, n_embd, 1, n_tokens);
+            inpL = ggml_repeat_4d(ctx0, inpL, n_embd, hc, n_tokens, 1);
+            cb(inpL, "hc_init", -1);
+        }
     }
 
     for (int il = n_layer_begin; il < n_layer_end; ++il) {
@@ -1479,7 +1494,24 @@ ggml_cgraph * llm_build_context::build_deepseek4() {
         ggml_build_forward_expand(gf, h_nextn);
     }
 
-    if (n_outputs != n_tokens) {
+    if (stage_emit) {
+        // STAGE EMIT: export the post-window residual hidden state (all rows) for the next
+        // stage; skip the hc head mixer, output_norm and the lm head. The residual stream
+        // between blocks is the hc bundle, so the WHOLE bundle crosses the wire, flattened
+        // to [hc*n_embd, n_tokens]; build_hc_head below would collapse it to one stream and
+        // the downstream window would not be the monolithic model. Named "result_norm" so
+        // the existing embeddings extraction (POOLING_NONE -> lctx.embd) picks it up;
+        // llama_get_embeddings_ith then returns hc*n_embd floats per row, which is what
+        // llama_model_n_embd_inp() reports for this architecture.
+        ggml_tensor * bundle = ggml_reshape_2d(ctx0, inpL, n_embd*hc, n_tokens);
+        cb(bundle, "result_norm", -1);
+        ggml_set_output(bundle);
+        ggml_build_forward_expand(gf, bundle);
+        return gf;
+    }
+
+    // an emitting stage hands every row to the next stage, so it never reduces to out_ids
+    if (n_outputs != n_tokens && !stage_emit) {
         ggml_tensor * inp_out_ids = build_inp_out_ids();
         ggml_tensor * flat = ggml_reshape_2d(ctx0, inpL, n_embd*hc, n_tokens);
         flat = ggml_get_rows(ctx0, flat, inp_out_ids);

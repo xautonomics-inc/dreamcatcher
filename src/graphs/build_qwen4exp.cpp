@@ -2,6 +2,7 @@
 #include "../llama-model.h"
 #include "../llama-context.h"
 #include "../llama-delta-net.h"
+#include "llm_stage.h"
 
 #include <optional>
 
@@ -521,8 +522,17 @@ ggml_cgraph * llm_build_context::build_qwen4exp() {
     const int n_layer_begin = is_mtp ? n_layer - hparams.nextn_predict_layers : 0;
     const int n_layer_end   = is_mtp ? n_layer : n_layer - hparams.nextn_predict_layers;
 
+    // --- multi-stage pipeline: a head stage emits the post-window residual, not logits.
+    // Only the normal (non-MTP) path is staged; an MTP companion always finishes to logits.
+    const int n_proc_layers  = n_layer - hparams.nextn_predict_layers;
+    const llama_stage_cfg sc = llama_stage_get_cfg(n_proc_layers);
+    const bool stage_emit    = !is_mtp && sc.active && sc.emit_hidden &&
+                               llama_stage_consumes_last(sc, n_proc_layers);
+
     ggml_tensor * inp_pos = build_inp_pos();
-    ggml_tensor * inp_out_ids = (is_mtp || n_tokens > 1) ? build_inp_out_ids() : nullptr;
+    // only a stage that finishes to logits reduces to the output rows; an emitting
+    // stage must hand every row to the next stage.
+    ggml_tensor * inp_out_ids = (is_mtp || (n_tokens > 1 && !stage_emit)) ? build_inp_out_ids() : nullptr;
     ggml_tensor * KQ_mask = build_inp_KQ_mask();
 
     float KQ_scale = hparams.f_attention_scale == 0.0f ? 1.0f / sqrtf(float(n_embd_head)) : hparams.f_attention_scale;
@@ -563,11 +573,18 @@ ggml_cgraph * llm_build_context::build_qwen4exp() {
         cb(lctx.inp_s_seq_qnext, "inp_s_seq_qnext", -1);
         ggml_set_input(lctx.inp_s_seq_qnext);
 
-        // the wide residual starts as hc identical copies of the embedding
-        res_hc = ggml_repeat_4d(ctx0,
-                ggml_reshape_3d(ctx0, inpL, n_embd, 1, n_tokens),
-                n_embd, hc, n_tokens, 1);
-        cb(res_hc, "hc_residual", -1);
+        if (inpL->ne[0] == (int64_t) hc * n_embd) {
+            // a downstream pipeline stage is handed the upstream window's wide residual
+            // bundle, which already IS the hc stream set: no token embedding, no expansion
+            res_hc = ggml_reshape_3d(ctx0, inpL, n_embd, hc, n_tokens);
+            cb(res_hc, "hc_residual_in", -1);
+        } else {
+            // the wide residual starts as hc identical copies of the embedding
+            res_hc = ggml_repeat_4d(ctx0,
+                    ggml_reshape_3d(ctx0, inpL, n_embd, 1, n_tokens),
+                    n_embd, hc, n_tokens, 1);
+            cb(res_hc, "hc_residual", -1);
+        }
 
         if (hparams.ple_n_heads > 0) {
             lctx.inp_ple_rows = ggml_new_tensor_1d(ctx0, GGML_TYPE_I32, hparams.ple_n_heads * n_tokens);
@@ -675,6 +692,22 @@ ggml_cgraph * llm_build_context::build_qwen4exp() {
         cb(h_nextn, "result_mtp_embd", -1);
         ggml_set_output(h_nextn);
         ggml_build_forward_expand(gf, h_nextn);
+    }
+
+    if (stage_emit) {
+        // STAGE EMIT: export the post-window residual hidden state (all rows) for the next
+        // stage; skip the head mixer and the lm head. The residual stream between blocks is
+        // the hc bundle, so the WHOLE bundle crosses the wire, flattened to
+        // [hc*n_embd, n_tokens]; collapsing it here (head mix, or a mean) would throw away
+        // hc-1 of the hc streams and the downstream window would not be the monolithic model.
+        // Named "result_norm" so the existing embeddings extraction (POOLING_NONE ->
+        // lctx.embd) picks it up; llama_get_embeddings_ith then returns hc*n_embd floats
+        // per row, which is what llama_model_n_embd_inp() reports for this architecture.
+        ggml_tensor * bundle = ggml_reshape_2d(ctx0, res_hc, hc * n_embd, n_tokens);
+        cb(bundle, "result_norm", -1);
+        ggml_set_output(bundle);
+        ggml_build_forward_expand(gf, bundle);
+        return gf;
     }
 
     ggml_tensor * cur = qwen4exp_hc_mix(*this, ctx0, lctx, hparams, res_hc,
