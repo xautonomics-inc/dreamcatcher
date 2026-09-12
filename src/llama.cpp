@@ -18,6 +18,7 @@
 #include "llama-cparams.h"
 #include "llama-hparams.h"
 #include "llama-context.h"
+#include "llama-output-policy.h"
 #include "llama-spec-features.h"
 #include "llama-dflash.h"
 #include "llama-dsv4.h"
@@ -6481,7 +6482,7 @@ static size_t llama_output_reserve(llama_context & lctx, size_t n_outputs) {
 
     // TODO: use a per-batch flag for logits presence instead
     const bool has_mtp = llama_context_has_mtp_outputs(lctx);
-    const bool has_logits = !cparams.embeddings || has_mtp;
+    const bool has_logits = llama_output_has_logits(cparams.embeddings, has_mtp);
     const bool has_embd   = lctx.is_encoding || (cparams.embeddings && (cparams.pooling_type == LLAMA_POOLING_TYPE_NONE)) || has_mtp;
 
     const size_t logits_size = has_logits ? n_vocab*n_outputs_max : 0;
@@ -7046,7 +7047,7 @@ static int llama_decode_internal(
                     }
                 }
             }
-            if (cparams.embeddings && lctx.model.hparams.nextn_predict_layers == 0 && !has_mtp) {
+            if (!llama_output_has_logits(cparams.embeddings, has_mtp)) {
                 res = nullptr; // do not extract logits for embedding case
             } else {
                 if (!embd) { // do not extract embeddings when not needed

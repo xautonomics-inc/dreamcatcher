@@ -214,6 +214,7 @@ llama_build_and_test(test-quant-matmul.cpp LABEL "quant")
 llama_target_and_test(test-model-load-cancel.cpp  LABEL "model")
 llama_build_and_test(test-model-loader-metadata.cpp LABEL "model")
 llama_build_and_test(test-stage-manifest.cpp LABEL "model")
+llama_build_and_test(test-output-policy.cpp)
 llama_target_and_test(test-autorelease.cpp        LABEL "model")
 
 
