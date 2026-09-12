@@ -20,9 +20,11 @@ enum llama_fver {
     GGUF_FILE_VERSION_V3 = 3,
 };
 
-// Slice every source-block-length GGUF metadata array to an assembled block window.
-// Kept separate from model loading so synthetic metadata can cover every GGUF scalar
-// array type without constructing model tensors.
+// Rebase a source model's per-layer GGUF metadata onto an assembled block window:
+// slice every source-block-length array (and the few per-layer arrays that carry extra
+// trailing slots), rebase sparse lists of block indices, and shift the counts that
+// describe a LEADING RUN of blocks. Kept separate from model loading so synthetic
+// metadata can cover every GGUF scalar array type without constructing model tensors.
 void llama_model_loader_slice_block_arrays(
         gguf_context * meta,
               int32_t source_blk_count,

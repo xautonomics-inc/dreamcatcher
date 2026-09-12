@@ -880,6 +880,79 @@ static void dsv4_set_mask_tensor(
     }
 }
 
+// Is any layer OF THIS WINDOW of the given compression class? A stage window
+// (--model-dir/--layers) holds only the blocks it owns, so a family can be absent from it
+// entirely - a one-block CSA window has no HCA layer and therefore no HCA state ring.
+static bool dsv4_window_has_ratio(const llama_context & lctx, uint32_t ratio) {
+    const auto & hparams = lctx.model.hparams;
+    for (uint32_t il = 0; il < hparams.n_layer; ++il) {
+        if (hparams.dsv4_compress_ratios[(size_t) il] == ratio) {
+            return true;
+        }
+    }
+    return false;
+}
+
+// The compression class of every block comes from the compress_ratios metadata, and the
+// weights that implement it come from the block itself. A window whose metadata was not
+// rebased onto it - or a hand-built library missing a block's compressor - disagrees with
+// itself, and the graph then reads a null weight or a null state ring and dies in the
+// backend with no hint of which layer was wrong. Say which layer, and how, instead.
+static bool dsv4_validate_window_layers(const llama_model & model) {
+    const auto & hparams = model.hparams;
+    const uint32_t n_layer = std::min<uint32_t>(hparams.n_layer, (uint32_t) model.layers.size());
+
+    bool ok = true;
+    for (uint32_t il = 0; il < n_layer; ++il) {
+        const uint32_t ratio = hparams.dsv4_compress_ratios[(size_t) il];
+        const auto & layer   = model.layers[(size_t) il];
+
+        if (ratio != 0 &&
+                ratio != llama_context::dsv4_runtime::CSA_RATIO &&
+                ratio != llama_context::dsv4_runtime::HCA_RATIO) {
+            LLAMA_LOG_ERROR("%s: DSV4 layer %u has compress ratio %u; only 0 (dense), %u (CSA) and %u (HCA) are implemented\n",
+                    __func__, il, ratio,
+                    (uint32_t) llama_context::dsv4_runtime::CSA_RATIO,
+                    (uint32_t) llama_context::dsv4_runtime::HCA_RATIO);
+            ok = false;
+            continue;
+        }
+
+        if (ratio != 0 && layer.attn_comp_wkv == nullptr) {
+            LLAMA_LOG_ERROR("%s: DSV4 layer %u is compressed (ratio %u) but its block carries no attention compressor: "
+                    "this layer window's compress_ratios do not describe the blocks it holds\n", __func__, il, ratio);
+            ok = false;
+        }
+        if (ratio == 0 && layer.attn_comp_wkv != nullptr) {
+            LLAMA_LOG_ERROR("%s: DSV4 layer %u is dense per compress_ratios but its block carries an attention compressor: "
+                    "this layer window's compress_ratios do not describe the blocks it holds\n", __func__, il);
+            ok = false;
+        }
+        if (ratio == llama_context::dsv4_runtime::CSA_RATIO && layer.indexer_comp_wkv == nullptr) {
+            LLAMA_LOG_ERROR("%s: DSV4 layer %u is a CSA layer but its block carries no indexer compressor\n", __func__, il);
+            ok = false;
+        }
+
+        // A hash layer routes through a fixed tid2eid map that only the leading blocks carry:
+        // claiming one that is not there is a null read in the graph, so refuse. The other way
+        // round the graph merely runs a hash layer as an ordinary MoE layer - wrong, but it
+        // runs, and a GGUF that omits hash_layer_count altogether should not be unloadable.
+        const bool is_hash  = il < hparams.dsv4_hash_layer_count;
+        const bool has_hash = layer.ffn_gate_tid2eid != nullptr;
+        if (is_hash && !has_hash) {
+            LLAMA_LOG_ERROR("%s: DSV4 layer %u is a hash-routed MoE layer per hash_layer_count=%u but its block "
+                    "carries no tid2eid map: this layer window's hash_layer_count does not describe the blocks it holds\n",
+                    __func__, il, hparams.dsv4_hash_layer_count);
+            ok = false;
+        } else if (!is_hash && has_hash) {
+            LLAMA_LOG_WARN("%s: DSV4 layer %u carries a tid2eid map but hash_layer_count=%u leaves it out; "
+                    "it will run as an ordinary MoE layer\n", __func__, il, hparams.dsv4_hash_layer_count);
+        }
+    }
+
+    return ok;
+}
+
 bool llama_context::ensure_dsv4_cache_tensors() {
     const int32_t n_layer = model.hparams.n_layer;
     const int64_t n_embd_head = model.hparams.n_embd_head_k(0);
@@ -897,6 +970,10 @@ bool llama_context::ensure_dsv4_cache_tensors() {
         (int32_t) dsv4.cache.csa_k.size() == n_layer &&
         dsv4.cache.n_stream == n_stream) {
         return true;
+    }
+
+    if (!dsv4_validate_window_layers(model)) {
+        return false;
     }
 
     free_dsv4_cache_tensors();
@@ -1747,20 +1824,48 @@ bool llama_prepare_dsv4_graph_inputs(llama_context & lctx, const llama_batch & b
         return false;
     }
 
+    // The state ring is sized from the cache, and the cache holds rows only for the layers
+    // THIS WINDOW owns. Plan a family only when the window actually holds layers of that
+    // class: a window of CSA layers alone has no HCA ring, and planning against a zero-row
+    // ring is what used to be reported as "delta row[0] src=0 dst=0 is outside the
+    // batch/state ring". An empty plan leaves that family's graph inputs unconsumed, and
+    // every layer that would read them is by construction not in this window.
+    const bool plan_csa = dsv4_window_has_ratio(lctx, llama_context::dsv4_runtime::CSA_RATIO);
+    const bool plan_hca = dsv4_window_has_ratio(lctx, llama_context::dsv4_runtime::HCA_RATIO);
+
+    if (plan_csa && (csa_state_size == 0 || csa_kv_size == 0 || lid_state_size == 0 || lid_kv_size == 0)) {
+        LLAMA_LOG_ERROR("%s: DSV4 layer window holds CSA layers but its CSA/LID state ring is empty "
+                "(csa state=%u kv=%u, lid state=%u kv=%u)\n",
+                __func__, csa_state_size, csa_kv_size, lid_state_size, lid_kv_size);
+        return false;
+    }
+    if (plan_hca && (hca_state_size == 0 || hca_kv_size == 0)) {
+        LLAMA_LOG_ERROR("%s: DSV4 layer window holds HCA layers but its HCA state ring is empty (state=%u kv=%u)\n",
+                __func__, hca_state_size, hca_kv_size);
+        return false;
+    }
+
     //auto tim1 = ggml_time_us();
-    lctx.dsv4.csa_plan = build_plan(llama_context::dsv4_runtime::CSA_RATIO, true, csa_state_size, csa_kv_size, cache_n_stream);
-    lctx.dsv4.hca_plan = build_plan(llama_context::dsv4_runtime::HCA_RATIO, false, hca_state_size, hca_kv_size, cache_n_stream);
-    lctx.dsv4.lid_plan = build_plan(llama_context::dsv4_runtime::CSA_RATIO, true, lid_state_size, lid_kv_size, cache_n_stream);
+    lctx.dsv4.csa_plan = plan_csa ? build_plan(llama_context::dsv4_runtime::CSA_RATIO, true, csa_state_size, csa_kv_size, cache_n_stream)
+                                  : llama_context::dsv4_runtime::comp_plan{};
+    lctx.dsv4.hca_plan = plan_hca ? build_plan(llama_context::dsv4_runtime::HCA_RATIO, false, hca_state_size, hca_kv_size, cache_n_stream)
+                                  : llama_context::dsv4_runtime::comp_plan{};
+    lctx.dsv4.lid_plan = plan_csa ? build_plan(llama_context::dsv4_runtime::CSA_RATIO, true, lid_state_size, lid_kv_size, cache_n_stream)
+                                  : llama_context::dsv4_runtime::comp_plan{};
     lctx.dsv4.csa_ctx = dsv4_build_comp_context(batch, cache_n_stream, lctx.dsv4.csa_plan.n_kv);
     lctx.dsv4.hca_ctx = dsv4_build_comp_context(batch, cache_n_stream, lctx.dsv4.hca_plan.n_kv);
     lctx.dsv4.lid_ctx = dsv4_build_comp_context(batch, cache_n_stream, lctx.dsv4.lid_plan.n_kv);
     //auto tim2 = ggml_time_us();
     //fprintf(stderr, "%s: %ld us to buils plans\n", __func__, tim2-tim1);
 
-    if (!dsv4_validate_comp_plan("csa", batch, lctx.dsv4.csa_plan, llama_context::dsv4_runtime::CSA_RATIO, true, csa_state_size, csa_kv_size, cache_n_stream) ||
-        !dsv4_validate_comp_plan("hca", batch, lctx.dsv4.hca_plan, llama_context::dsv4_runtime::HCA_RATIO, false, hca_state_size, hca_kv_size, cache_n_stream) ||
-        !dsv4_validate_comp_plan("lid", batch, lctx.dsv4.lid_plan, llama_context::dsv4_runtime::CSA_RATIO, true, lid_state_size, lid_kv_size, cache_n_stream) ||
-        !dsv4_validate_csa_lid_visibility(lctx, csa_kv_size, lid_kv_size)) {
+    if (plan_csa &&
+        (!dsv4_validate_comp_plan("csa", batch, lctx.dsv4.csa_plan, llama_context::dsv4_runtime::CSA_RATIO, true, csa_state_size, csa_kv_size, cache_n_stream) ||
+         !dsv4_validate_comp_plan("lid", batch, lctx.dsv4.lid_plan, llama_context::dsv4_runtime::CSA_RATIO, true, lid_state_size, lid_kv_size, cache_n_stream) ||
+         !dsv4_validate_csa_lid_visibility(lctx, csa_kv_size, lid_kv_size))) {
+        return false;
+    }
+    if (plan_hca &&
+        !dsv4_validate_comp_plan("hca", batch, lctx.dsv4.hca_plan, llama_context::dsv4_runtime::HCA_RATIO, false, hca_state_size, hca_kv_size, cache_n_stream)) {
         return false;
     }
 
