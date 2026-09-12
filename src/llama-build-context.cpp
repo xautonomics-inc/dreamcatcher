@@ -4,6 +4,7 @@
 #include "llama-model.h"
 #include "llama-context.h"
 #include "llama-delta-net.h"
+#include "llama-experts-remote.h"
 
 #include "ggml.h"
 
@@ -55,7 +56,12 @@ llm_build_context::llm_build_context(
         n_embd_head_v    (hparams.n_embd_head_v(0)),
         n_embd_v_gqa     (hparams.n_embd_v_gqa()),
         n_expert         (hparams.n_expert),
-        n_expert_used    (warmup ? hparams.n_expert : hparams.n_expert_used),
+        // The warmup pass normally selects EVERY expert so that all expert weights
+        // get faulted in. With expert-tensor disaggregation that is both pointless
+        // (the covered layers' weights live in another process, already prewarmed
+        // there) and fatal: the expert-server rejects a call whose k exceeds its
+        // bound. Keep the real k when any expert-server is configured.
+        n_expert_used    ((warmup && !llama_experts_remote_get_cfg().enabled) ? hparams.n_expert : hparams.n_expert_used),
         freq_base        (cparams.rope_freq_base),
         freq_scale       (cparams.rope_freq_scale),
         ext_factor       (cparams.yarn_ext_factor),
@@ -1578,6 +1584,48 @@ llm_expert_gating_func_type   gating_op,
         ggml_build_forward_expand(graph, weights);
     }
 
+    // --- expert-tensor disaggregation (P1) ---------------------------------
+    // If an expert-server covers this layer, ship { hidden, topk ids, topk
+    // weights } and receive the accumulated routed-expert output instead of
+    // computing it here. Everything up to this point - router, gating, the
+    // selection bias, top-k, weight softmax/norm/scale - ran locally through
+    // the exact same ops as the local path, and the server mirrors the op
+    // sequence below on the same tensor bytes, so the split is bit-exact
+    // against the single-process baseline.
+    //
+    // The custom op is CPU-only, so on a GPU attention stage the scheduler
+    // splits the graph here and moves hidden/ids/weights to host - which is
+    // where they have to be for the wire anyway.
+    //
+    // Note: the local path below, this tree's fused MoE kernels included, is
+    // reached unchanged for every layer no server covers.
+    if (il >= 0 && llama_experts_remote_get_cfg().layer_covered(il)) {
+        // v1 supports the plain separate gate/up path only. Note that
+        // up/gate/down_exps are normally nullptr here - covered layers
+        // TENSOR_SKIP their exps at load time; the server owns those weights.
+        const auto & er_hparams = lctx.model.hparams;
+        GGML_ASSERT(!weight_before_ffn      && "experts-remote: weight_before_ffn archs unsupported");
+        GGML_ASSERT(up_gate_exps == nullptr && "experts-remote: merged gate_up MoE unsupported");
+        GGML_ASSERT(up_gate_exps_b == nullptr && "experts-remote: merged gate_up expert bias unsupported");
+        GGML_ASSERT(up_exps_b == nullptr && gate_exps_b == nullptr && down_exps_b == nullptr && "experts-remote: expert biases unsupported");
+        GGML_ASSERT(down_exps_s == nullptr  && "experts-remote: per-expert output scales unsupported");
+        GGML_ASSERT(type_op == LLM_FFN_SILU && "experts-remote: only SILU experts supported");
+        GGML_ASSERT(er_hparams.n_expert_groups <= 1 && "experts-remote: grouped expert selection unsupported");
+
+        ggml_tensor * moe_out = ggml_map_custom3(ctx, cur, selected_experts, weights,
+                llama_experts_remote_custom_cb, 1, (void *)(intptr_t) il);
+        cb(moe_out, "ffn_moe_out_remote", il);
+
+        // the residual add is this tree's, not the server's - keep it local so
+        // the remote path returns exactly what the local path would
+        if (add_input) {
+            moe_out = ggml_add(ctx, moe_out, input);
+            cb(moe_out, "ffn_out_with_inp", il);
+        }
+
+        return moe_out;
+    }
+
     cur = ggml_reshape_3d(ctx, cur, n_embd, 1, n_tokens);
 
     if (weight_before_ffn) {
@@ -1739,7 +1787,10 @@ llm_expert_gating_func_type   gating_op,
 
     auto split_up_exps    = up_exps ? (ggml_split_tensor_t *)up_exps->extra : nullptr;
     auto split_gate_exps  = gate_exps ? (ggml_split_tensor_t *)gate_exps->extra : nullptr;
-    auto split_down_exps  = (ggml_split_tensor_t *)down_exps->extra;
+    // down_exps is null on a layer whose routed experts are served remotely
+    // (they were TENSOR_SKIPped at load), so this needs the same guard the
+    // up/gate lookups above already have
+    auto split_down_exps  = down_exps ? (ggml_split_tensor_t *)down_exps->extra : nullptr;
     auto split_up_shexp   = up_shexp   ? (ggml_split_tensor_t *)up_shexp->extra   : nullptr;
     auto split_gate_shexp = gate_shexp ? (ggml_split_tensor_t *)gate_shexp->extra : nullptr;
     auto split_down_shexp = down_shexp ? (ggml_split_tensor_t *)down_shexp->extra : nullptr;
