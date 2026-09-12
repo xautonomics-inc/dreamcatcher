@@ -4754,10 +4754,12 @@ static void ggml_vk_load_shaders(vk_device& device) {
             ggml_vk_create_pipeline2(device, device->pipeline_multi_add[i],     "multi_add_f32_"     + std::to_string(i+1), multi_add_f32_len,     multi_add_f32_data,     "main", MAX_PARAMETER_COUNT, sizeof(vk_op_multi_add_push_constants), {512, 1, 1}, {i+2}, 1);
             ggml_vk_create_pipeline2(device, device->pipeline_multi_add_rms[i], "multi_add_rms_f32_" + std::to_string(i+1), multi_add_rms_f32_len, multi_add_rms_f32_data, "main", MAX_PARAMETER_COUNT, sizeof(vk_op_multi_add_push_constants), {512, 1, 1}, {i+2}, 1);
         }
-        { // ik-port: ik GGML_OP_MULTI_ADD
-            ggml_vk_create_pipeline(device, device->pipeline_multi_add_ik_f32, "multi_add_ik_f32", multi_add_ik_f32_len, multi_add_ik_f32_data, "main", 2, sizeof(vk_op_multiadd_ik_push_constants), {512, 1, 1}, {}, 1);
-            ggml_vk_create_pipeline(device, device->pipeline_mul_multi_add_ik_f32, "mul_multi_add_ik_f32", mul_multi_add_ik_f32_len, mul_multi_add_ik_f32_data, "main", 5, sizeof(vk_op_mul_multi_add_ik_push_constants), {512, 1, 1}, {}, 1);
-        }
+    }
+    { // ik-port: ik GGML_OP_MULTI_ADD / GGML_OP_MUL_MULTI_ADD are graph ops, not the fused-ADD
+      // chain that device->multi_add gates (a device property plus GGML_VK_DISABLE_MULTI_ADD);
+      // supports_op accepts them unconditionally, so their pipelines must exist unconditionally
+        ggml_vk_create_pipeline(device, device->pipeline_multi_add_ik_f32, "multi_add_ik_f32", multi_add_ik_f32_len, multi_add_ik_f32_data, "main", 2, sizeof(vk_op_multiadd_ik_push_constants), {512, 1, 1}, {}, 1);
+        ggml_vk_create_pipeline(device, device->pipeline_mul_multi_add_ik_f32, "mul_multi_add_ik_f32", mul_multi_add_ik_f32_len, mul_multi_add_ik_f32_data, "main", 5, sizeof(vk_op_mul_multi_add_ik_push_constants), {512, 1, 1}, {}, 1);
     }
 
     ggml_vk_create_pipeline(device, device->pipeline_add_id_f32, "add_id_f32", add_id_f32_len, add_id_f32_data, "main", 4, sizeof(vk_op_add_id_push_constants), {1, 1, 1}, {}, 1);
