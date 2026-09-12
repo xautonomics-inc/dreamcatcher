@@ -16,6 +16,7 @@
 #include "llama.h"
 #include "chat.h"
 #include "json-schema-to-grammar.h"
+#include "layer-library.h"
 #include <algorithm>
 #include <cinttypes>
 #include <climits>
@@ -655,6 +656,17 @@ void free_command_line(int argc, char** argv) {
 
 
 void gpt_params_handle_model_default(gpt_params & params) {
+    if (!params.model_dir.empty()) {
+        // A layer library (--model-dir) is an alternative model SOURCE: it replaces
+        // -m / --model-url / --hf-repo rather than defaulting alongside them.
+        if (!params.model.empty() || !params.model_url.empty() || !params.hf_repo.empty()) {
+            throw std::invalid_argument("error: --model-dir is mutually exclusive with --model / --model-url / --hf-repo\n");
+        }
+        return;
+    }
+    if (!params.model_dir_layers.empty() || !params.model_dir_parts.empty()) {
+        throw std::invalid_argument("error: --layers / --stage-parts require --model-dir\n");
+    }
     if (!params.hf_repo.empty()) {
         // short-hand to avoid specifying --hf-file -> default it to --model
         if (params.hf_file.empty()) {
@@ -1618,6 +1630,21 @@ bool gpt_params_find_arg(int argc, char ** argv, const std::string & arg, gpt_pa
     if (arg == "-m" || arg == "--model") {
         CHECK_ARG
         params.model = argv[i];
+        return true;
+    }
+    if (arg == "--model-dir") {
+        CHECK_ARG
+        params.model_dir = argv[i];
+        return true;
+    }
+    if (arg == "--layers") {
+        CHECK_ARG
+        params.model_dir_layers = argv[i];
+        return true;
+    }
+    if (arg == "--stage-parts") {
+        CHECK_ARG
+        params.model_dir_parts = argv[i];
         return true;
     }
     if (arg == "-md" || arg == "--model-draft") {
@@ -3369,6 +3396,11 @@ void gpt_params_print_usage(int /*argc*/, char ** argv, const gpt_params & param
     options.push_back({ "*",           "-m,    --model FNAME",          "model path (default: models/$filename with filename from --hf-file\n"
                                                                         "or --model-url if set, otherwise %s)", DEFAULT_MODEL_PATH });
     options.push_back({ "*",           "-md,   --model-draft FNAME",    "draft model for speculative decoding (default: unused)" });
+    options.push_back({ "*",           "       --model-dir DIR",        "per-layer model library directory (alternative to -m; mutually exclusive).\n"
+                                                                        "A library is a directory of blk-NNNNN.gguf / parts-*.gguf files plus\n"
+                                                                        "manifest.json; it is loaded in-process exactly like a monolithic GGUF" });
+    options.push_back({ "*",           "       --layers A,B",           "with --model-dir: absolute block window [A,B) to load (default: the whole model)" });
+    options.push_back({ "*",           "       --stage-parts SPEC",     "with --model-dir: auto (default) | none | comma list of embd,output,nextn,other" });
     options.push_back({ "*",           "-mu,   --model-url MODEL_URL",  "model download url (default: unused)" });
     options.push_back({ "*",           "-hfr,  --hf-repo REPO",         "Hugging Face model repository (default: unused)" });
     options.push_back({ "*",           "-hff,  --hf-file FILE",         "Hugging Face model file (default: unused)" });
@@ -4051,7 +4083,27 @@ struct llama_init_result llama_init_from_gpt_params(gpt_params & params) {
 
     llama_model * model = nullptr;
 
-    if (!params.hf_repo.empty() && !params.hf_file.empty()) {
+    if (!params.model_dir.empty()) {
+        // Layer library: enumerate the part files and assemble them into one model
+        // in this process. Everything downstream (-ngl, -ot, --tensor-split, -fmoe,
+        // -cmoe, the context params) is unchanged - only the model SOURCE differs.
+        int win_a = -1, win_b = -1;   // default: the full model
+        if (!params.model_dir_layers.empty() &&
+            !layer_library::parse_window(params.model_dir_layers, win_a, win_b)) {
+            fprintf(stderr, "%s: error: --layers wants A,B (got '%s')\n", __func__, params.model_dir_layers.c_str());
+            return iparams;
+        }
+        std::vector<layer_library::part> parts;
+        if (!layer_library::assemble(params.model_dir, win_a, win_b, params.model_dir_parts, parts, "model-dir")) {
+            fprintf(stderr, "%s: error: cannot assemble layer library '%s'\n", __func__, params.model_dir.c_str());
+            return iparams;
+        }
+        std::vector<llama_model_part> pv(parts.size());
+        for (size_t k = 0; k < parts.size(); ++k) {
+            pv[k] = { parts[k].path.c_str(), parts[k].blk_base, parts[k].source_blk_start, parts[k].source_blk_count };
+        }
+        model = llama_model_load_from_parts(pv.data(), pv.size(), mparams);
+    } else if (!params.hf_repo.empty() && !params.hf_file.empty()) {
         model = llama_load_model_from_hf(params.hf_repo.c_str(), params.hf_file.c_str(), params.model.c_str(), params.hf_token.c_str(), mparams);
     } else if (!params.model_url.empty()) {
         model = llama_load_model_from_url(params.model_url.c_str(), params.model.c_str(), params.hf_token.c_str(), mparams);
@@ -4059,15 +4111,17 @@ struct llama_init_result llama_init_from_gpt_params(gpt_params & params) {
         model = llama_model_load_from_file(params.model.c_str(), mparams);
     }
 
+    const std::string model_source = params.model_dir.empty() ? params.model : params.model_dir;
+
     if (model == NULL) {
-        fprintf(stderr, "%s: error: failed to load model '%s'\n", __func__, params.model.c_str());
+        fprintf(stderr, "%s: error: failed to load model '%s'\n", __func__, model_source.c_str());
         return iparams;
     }
 
     // a predictor-only MTP GGUF has no main blocks, so it cannot be the target model
     if (llama_model_mtp_package(model) == LLAMA_MTP_PACKAGE_COMPANION) {
         fprintf(stderr, "%s: error: '%s' is an MTP companion, pass it with -md instead\n",
-                __func__, params.model.c_str());
+                __func__, model_source.c_str());
         llama_free_model(model);
         return iparams;
     }
@@ -4076,7 +4130,7 @@ struct llama_init_result llama_init_from_gpt_params(gpt_params & params) {
 
     llama_context * lctx = llama_init_from_model(model, cparams);
     if (lctx == NULL) {
-        fprintf(stderr, "%s: error: failed to create context with model '%s'\n", __func__, params.model.c_str());
+        fprintf(stderr, "%s: error: failed to create context with model '%s'\n", __func__, model_source.c_str());
         llama_free_model(model);
         return iparams;
     }
