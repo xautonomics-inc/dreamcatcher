@@ -20,7 +20,7 @@ See [KNOWN-ISSUES.md](KNOWN-ISSUES.md) for the known-bad cases.
 | Architecture | head/tail split | Backends |
 |---|---|---|
 | `deepseek4` | mechanism verified; library windows currently fail (see backends) | CUDA monolith **verified** on `20c308ca` (UD-Q4_K_XL; library-vs-monolith full-model CUDA forward pass byte-identical, md5-equal hidden states; 1328/1328 tensor hashes). CUDA library form: **unusable** — any `--model-dir --layers` window fails (`dsv4_validate_comp_plan: CSA delta row outside the batch/state ring` — the state-ring plan is not window-aware) and the ring tail segfaults after load; `llama-server` cannot read a library (`meta#90`). Vulkan (any vendor): not measured for this arch |
-| `qwen4exp` | verified (pre-publish); CUDA ring not token-exact on `20c308ca` (see backends) | CUDA **verified** on `20c308ca`: monolith coherent 23.2 tok/s (`llama-server`), library ring coherent 17.4 tok/s, full-model forward pass byte-identical mono-vs-library (1224/1224 hashes); the ring is **not token-exact** — the tail drops `per_layer_token_embd` for a non-zero window (`meta#91`). Vulkan: **known-bad, all vendors** — UD-IQ4_XS degenerate on RDNA3 (RX 7900 XT x4, RADV) and on NVIDIA (coopmat1), flash-attention-independent, BF16-tensor hypothesis refuted; CPU on the same hosts coherent (`meta#88`) |
+| `qwen4exp` | verified (pre-publish); CUDA ring not token-exact on `20c308ca` (see backends) | CUDA **verified** on `20c308ca`: monolith coherent 23.2 tok/s (`llama-server`), library ring coherent 17.4 tok/s, full-model forward pass byte-identical mono-vs-library (1224/1224 hashes); the ring is **not token-exact** — the tail drops `per_layer_token_embd` for a non-zero window (`meta#91`). Vulkan: **fixed on `fork-base` (MULTI_ADD full-chunk-range bind, `meta#88`)** — NVIDIA coopmat1 verified coherent, agrees with CUDA within rounding; RDNA3 re-measure pending |
 | `glm5next` | verified | CUDA **verified** on `20c308ca`: library head+tail ring generates coherently, 7.5 tok/s greedy (UD-IQ4_XS, 1383/1383 hashes vs monolith); single-process A/B blocked by a new bug (any GLM load under `STAGE_EMIT=hidden` with `nextn_predict_layers>0` aborts, `GGML_ASSERT(lctx.logits != nullptr)`). `--role server` times out awaiting a return edge (`meta#90`). Vulkan (any vendor): not measured for this arch |
 | `gemma4` | self-consistent (both stages agree) | CPU verified (Q4_K embedding); CUDA batched prefill known-bad (`meta#81`); Q6_K embedding known-bad (`meta#80`); Vulkan: measured on this model at the lane-9 checkpoint (pre-`20c308ca`) — RDNA4 and RDNA3 (RADV) FA sweep clean and token-exact on chat-formatted prompts, bare greedy prompt can differ from CPU by rounding (`meta#85`); NVIDIA (coopmat1): CPU-exact; Intel ANV: self-consistent, not CPU-exact; AMD RDNA3.5 (8060S APU): verified for the expert-server path with GLM-5.3-Flash experts |
 
@@ -44,11 +44,10 @@ RTX 5060 Ti x4 coopmat1.
 > **qwen4exp — CUDA verified** (monolith coherent 23.2 tok/s; library head/tail
 > ring coherent 17.4 tok/s, **not token-exact** — the tail drops
 > `per_layer_token_embd` for a non-zero window, `meta#91`; library ≡ monolith
-> tensor-wise and forward-pass byte-identical). **Vulkan known-bad, all
-> vendors:** degenerate output on AMD RDNA3 (RX 7900 XT, RADV) and on NVIDIA
-> (coopmat1) alike, independent of flash attention and of BF16 tensor
-> placement; CPU is coherent on the same hosts (`meta#88`). RDNA4 / Intel ANV:
-> not measured for this architecture.
+> tensor-wise and forward-pass byte-identical). **Vulkan: fixed on `fork-base`
+> (MULTI_ADD full-chunk-range bind, `meta#88`)** — NVIDIA coopmat1 verified
+> coherent and agreeing with CUDA within rounding order; RDNA3 re-measure
+> pending. RDNA4 / Intel ANV: not measured for this architecture.
 
 > **glm5next — CUDA verified** (library head/tail ring coherent, greedy,
 > 7.5 tok/s, experts on CPU; library ≡ monolith 1383/1383 hashes). No
@@ -88,14 +87,15 @@ conditional on the quant variant and the backend.
 - **backends:** CUDA **verified** on `20c308ca`: monolith via `llama-server`
   coherent at 23.2 tok/s; library head+tail ring coherent at 17.4 tok/s;
   library ≡ monolith — 1224/1224 tensor hashes and a byte-identical full
-  forward pass. Vulkan: **known-bad on all vendors** — UD-IQ4_XS emits
-  degenerate output (`**:** **:**;**;**…`) on AMD RDNA3 (RX 7900 XT x4, RADV;
-  full offload and `-ngl 12`, flash attention on and off) and identically on
-  NVIDIA (4x 5060 Ti, coopmat1); forcing the 24 BF16 tensors to CPU changes
-  nothing, so the defect is in the Vulkan backend for this arch, not in a
-  device quirk. CPU is coherent on the same hosts and build (`meta#88`).
-  Vulkan on AMD RDNA4 / Intel ANV: not measured for this architecture on the
-  published tree (the RDNA4 sweeps on record were Gemma-4 12B and Qwen3 8B).
+  forward pass. Vulkan: **fixed on `fork-base`** — the degenerate UD-IQ4_XS
+  output seen on every vendor (AMD RDNA3 RADV and NVIDIA coopmat1, flash
+  attention on and off) was the `MULTI_ADD` op binding a view-sized descriptor
+  range: the shader read chunks 1..n of the last row out of bounds (zeros), so
+  each hyper-connection mix returned one stream instead of the 4-stream mean.
+  Fixed by binding the full chunk range (op tests 7/7 fail → pass); NVIDIA
+  coopmat1 monolith now coherent and CUDA-agreeing within rounding; RDNA3
+  re-measure pending (`meta#88`). Vulkan on AMD RDNA4 / Intel ANV: not
+  measured for this architecture on the published tree.
 
 ### `glm5next`
 - **head/tail split:** verified — on `20c308ca` the library head+tail ring

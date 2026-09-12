@@ -151,7 +151,7 @@ attention returns NaN for `q8_0` / `q4_0` K/V when there is no mask or when
 `max_bias > 0`; the iqk kernels' mask contract is 0 / -inf only (see the harness notes
 in `docs/VULKAN-BACKEND.md`). Neither combination is emitted by a graph.
 
-## `meta#88` — qwen4exp on Vulkan (any vendor): degenerate output on UD-IQ4_XS, flash-attention-independent
+## `meta#88` — qwen4exp on Vulkan (any vendor): degenerate output on UD-IQ4_XS — fixed (MULTI_ADD descriptor range)
 
 **What was reported.** On the published tree (`20c308ca`), RX 7900 XT x4 (RADV):
 Qwen3.8-Flash-Next UD-IQ4_XS via Vulkan full offload emits `**:** **:** ;**;**…`;
@@ -173,18 +173,31 @@ this matrix. Not a regression: an unsupported generalization, now falsified by t
 published-tree check. All per-arch backend rows now state the model + quant + host
 actually token-run on the published tree.
 
-**What it is.** Under triage, and broader than the title suggests. Forcing all 24
-BF16 `indexer.k_proj` tensors to CPU on the NVIDIA run changes nothing — the BF16
-placement hypothesis is refuted. Flash attention on and off both reproduce, so the
-meta#85 reduction path is not the culprit either. The identical output across
-vendors points at a qwen4exp-specific fault in the Vulkan backend itself (op
-coverage or graph construction for the SSM/gated-delta path), not a device quirk
-in either driver. Discriminators still worth running on an RDNA3 host: disable
-integer-dot product; force SSM tensors to CPU via `-ot`; single-GPU `--device` to
-exclude the cross-card tensor-split mapping (device order differs from HIP order);
-op-level localization against the CPU reference with `GGML_VULKAN_CHECK_RESULTS`.
+**Root cause and fix.** The `MULTI_ADD` op bound a **view-sized descriptor
+range**: the shader read chunks 1..n of the last row out of bounds (zeros), so on
+every vendor each hyper-connection mix returned one stream instead of the 4-stream
+mean — hence the identical garbage on both vendors, and the CPU/HIP coherence (no
+MULTI_ADD path involved). Not BF16 placement, not the SSM ops, not flash
+attention: all hypotheses from the triage below are superseded. Fixed by binding
+the full chunk range (and creating the MULTI_ADD pipelines unconditionally); op
+tests 7/7 fail → pass; the monolith on NVIDIA Vulkan now generates coherently and
+agrees with CUDA within rounding order. Landed on `fork-base` (project 29 MR !39).
 
-**Workaround.** Run this model where it is coherent on the published tree — CUDA
-(monolith or ring) or CPU; the HIP result above is an out-of-fork data point, not
-a supported backend. **Status.** Open. Related: `meta#85` (different path, same
+**What it is (triage history).** The refuted hypotheses are kept because they
+narrow the space for the next such bug: BF16 `indexer.k_proj` placement changed
+nothing; flash attention on/off reproduced identically; cross-vendor bit-identical
+output pointed at a backend graph/binding fault, which is exactly what it was.
+**Workaround (pre-fix builds).** Run this model where it is coherent — CUDA
+(monolith or ring) or CPU. **Status.** Fixed on `fork-base`; NVIDIA coopmat1
+verified, RDNA3 re-measure pending. Related: `meta#85` (different path, same
 device class).
+
+## `meta#94` — CPU `iq4_xs`/`iq4_kss`/`iq5_ks` mat-vec at n<32 disagrees with its own dequantizer
+
+**What was found.** Side finding while fixing `meta#88`: at vector counts below 32
+the CPU mat-vec kernels for `iq4_xs`, `iq4_kss` and `iq5_ks` return results off
+from a dequantize-then-reference-multiply comparison by ~7x the quantization noise
+— coherent output but measurably degraded. This hits IQ4_XS experts evaluated on
+CPU at decode (`-cmoe` / `-ot exps=CPU`), the exact layout many mixed CPU/GPU
+deployments use. Regression test added; kernel fix pending. **Status.** Open
+(kernel fix in progress).

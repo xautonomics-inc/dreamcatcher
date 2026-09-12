@@ -67,7 +67,7 @@ cmake -B build -DGGML_VULKAN=ON
 cmake --build build --config Release -j$(nproc)
 ```
 
-Vulkan backend support (measured with Gemma-4 12B Q4_0, greedy, at the lane-9 checkpoint, which predates the published tree `20c308ca`): AMD RDNA4 and RDNA3 (RADV) flash-attention sweep clean and token-exact on chat-formatted prompts, a bare greedy prompt can differ from CPU by rounding (see meta#85); NVIDIA (coopmat1): CPU-exact; Intel ANV: self-consistent, not CPU-exact; AMD RDNA3.5 (8060S APU): verified for the expert-server path. Per-architecture status of the published model libraries is in `docs/HF-MODEL-CARDS.md`; note qwen4exp on RDNA3 is known-bad (meta#88).
+Vulkan backend support (measured with Gemma-4 12B Q4_0, greedy, at the lane-9 checkpoint, which predates the published tree `20c308ca`): AMD RDNA4 and RDNA3 (RADV) flash-attention sweep clean and token-exact on chat-formatted prompts, a bare greedy prompt can differ from CPU by rounding (see meta#85); NVIDIA (coopmat1): CPU-exact; Intel ANV: self-consistent, not CPU-exact; AMD RDNA3.5 (8060S APU): verified for the expert-server path. Per-architecture status of the published model libraries is in `docs/HF-MODEL-CARDS.md`; note the qwen4exp Vulkan defect (meta#88) is fixed on `fork-base` — NVIDIA coopmat1 verified, RDNA3 re-measure pending).
 See [Vulkan backend docs](docs/VULKAN-BACKEND.md) for device compatibility, build prerequisites
 (including the new `spirv-headers` dependency), and the `-ngl 0` semantics.
 
@@ -77,7 +77,7 @@ See [Vulkan backend docs](docs/VULKAN-BACKEND.md) for device compatibility, buil
 |---------|-----------|--------|-------|
 | CPU | `-DGGML_NATIVE=ON` | Production | `AVX2` or better, `ARM_NEON` or better |
 | CUDA | `-DGGML_CUDA=ON` | Production | Turing or newer |
-| Vulkan | `-DGGML_VULKAN=ON` | Verified (per-device, see notes) | Measured on Gemma-4 12B Q4_0 at the lane-9 checkpoint (pre-`20c308ca`): AMD RDNA4 + RDNA3 (RADV; FA sweep clean, chat-prompt token-exact, bare-prompt rounding-sensitive — meta#85), NVIDIA (coopmat1, CPU-exact), Intel ANV (self-consistent), AMD RDNA3.5 APU (expert-server path verified). Per-model status of the published libraries on `20c308ca` in `docs/HF-MODEL-CARDS.md`; qwen4exp on RDNA3 known-bad (meta#88) |
+| Vulkan | `-DGGML_VULKAN=ON` | Verified (per-device, see notes) | Measured on Gemma-4 12B Q4_0 at the lane-9 checkpoint (pre-`20c308ca`): AMD RDNA4 + RDNA3 (RADV; FA sweep clean, chat-prompt token-exact, bare-prompt rounding-sensitive — meta#85), NVIDIA (coopmat1, CPU-exact), Intel ANV (self-consistent), AMD RDNA3.5 APU (expert-server path verified). Per-model status of the published libraries on `20c308ca` in `docs/HF-MODEL-CARDS.md`; qwen4exp Vulkan fixed on `fork-base`, RDNA3 re-measure pending (meta#88) |
 | Expert-server | N/A | Verified | Distributed MoE; CPU byte-exact with all expert layers remote (Mellum2, Qwen3.8-Flash-Next); GPU expert server proof pending |
 
 Distributed MoE inference is supported via the expert-server role (`llama-expert-server`),
