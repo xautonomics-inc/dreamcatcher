@@ -4754,10 +4754,12 @@ static void ggml_vk_load_shaders(vk_device& device) {
             ggml_vk_create_pipeline2(device, device->pipeline_multi_add[i],     "multi_add_f32_"     + std::to_string(i+1), multi_add_f32_len,     multi_add_f32_data,     "main", MAX_PARAMETER_COUNT, sizeof(vk_op_multi_add_push_constants), {512, 1, 1}, {i+2}, 1);
             ggml_vk_create_pipeline2(device, device->pipeline_multi_add_rms[i], "multi_add_rms_f32_" + std::to_string(i+1), multi_add_rms_f32_len, multi_add_rms_f32_data, "main", MAX_PARAMETER_COUNT, sizeof(vk_op_multi_add_push_constants), {512, 1, 1}, {i+2}, 1);
         }
-        { // ik-port: ik GGML_OP_MULTI_ADD
-            ggml_vk_create_pipeline(device, device->pipeline_multi_add_ik_f32, "multi_add_ik_f32", multi_add_ik_f32_len, multi_add_ik_f32_data, "main", 2, sizeof(vk_op_multiadd_ik_push_constants), {512, 1, 1}, {}, 1);
-            ggml_vk_create_pipeline(device, device->pipeline_mul_multi_add_ik_f32, "mul_multi_add_ik_f32", mul_multi_add_ik_f32_len, mul_multi_add_ik_f32_data, "main", 5, sizeof(vk_op_mul_multi_add_ik_push_constants), {512, 1, 1}, {}, 1);
-        }
+    }
+    { // ik-port: ik GGML_OP_MULTI_ADD / GGML_OP_MUL_MULTI_ADD are graph ops, not the fused-ADD
+      // chain that device->multi_add gates (a device property plus GGML_VK_DISABLE_MULTI_ADD);
+      // supports_op accepts them unconditionally, so their pipelines must exist unconditionally
+        ggml_vk_create_pipeline(device, device->pipeline_multi_add_ik_f32, "multi_add_ik_f32", multi_add_ik_f32_len, multi_add_ik_f32_data, "main", 2, sizeof(vk_op_multiadd_ik_push_constants), {512, 1, 1}, {}, 1);
+        ggml_vk_create_pipeline(device, device->pipeline_mul_multi_add_ik_f32, "mul_multi_add_ik_f32", mul_multi_add_ik_f32_len, mul_multi_add_ik_f32_data, "main", 5, sizeof(vk_op_mul_multi_add_ik_push_constants), {512, 1, 1}, {}, 1);
     }
 
     ggml_vk_create_pipeline(device, device->pipeline_add_id_f32, "add_id_f32", add_id_f32_len, add_id_f32_data, "main", 4, sizeof(vk_op_add_id_push_constants), {1, 1, 1}, {}, 1);
@@ -10477,6 +10479,20 @@ static void ggml_vk_op_f32(ggml_backend_vk_context * ctx, vk_context& subctx, co
     ggml_pipeline_request_descriptor_sets(ctx, pipeline, 1);
 
     vk_subbuffer src0_buf = ggml_vk_tensor_subbuffer(ctx, src0, true);
+    if (op == GGML_OP_MULTI_ADD) {
+        // ik-port: MULTI_ADD sums n_add column chunks per row, and the graph builders hand it a
+        // [ne0, nrows] view whose row stride spans those chunks (MoE combine, hyper-connection
+        // mixing). ggml_nbytes() of that view ends after the last row's FIRST chunk, so binding
+        // it as the descriptor range leaves chunks 1..n_add-1 of the last row outside the bound
+        // range; the hardware clamps such reads to zero and every single-row (decode) sum is
+        // wrong. Bind the range the kernel actually reads.
+        const uint32_t n_add = (uint32_t) dst->op_params[0];
+        const size_t   need  = (src0_buf.size - ggml_nbytes(src0)) /* misalignment */ +
+                               src0->nb[1] * (ne01 - 1) + (size_t) n_add * ne00 * ggml_type_size(src0->type);
+        const size_t   avail = ggml_vk_get_max_buffer_range(ctx, src0_buf.buffer, src0_buf.offset);
+        GGML_ASSERT(need <= avail);
+        src0_buf.size = std::max<size_t>(src0_buf.size, need);
+    }
     vk_subbuffer src1_buf = use_src1 ? ggml_vk_tensor_subbuffer(ctx, src1, true) : vk_subbuffer{};
     vk_subbuffer src2_buf = use_src2 ? ggml_vk_tensor_subbuffer(ctx, src2, true) : vk_subbuffer{};
     vk_subbuffer src3_buf = use_src3 ? ggml_vk_tensor_subbuffer(ctx, src3, true) : vk_subbuffer{};

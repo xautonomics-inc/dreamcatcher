@@ -18,8 +18,14 @@ what it deliberately refuses to do, what it costs, and how to check it on a new 
   `mul_mat_vec` and `mul_mm` kernels and entries in the `supports_op` type allowlists.
   These are marked `ik-port` in the source.
 - ik's fused ops, which have no mainline equivalent: `FUSED_UP_GATE`,
-  `MOE_FUSED_UP_GATE`, `MUL_MULTI_ADD` and `FUSED_MUL_UNARY`, the last mapped onto the
-  mainline GLU split path for `SIGMOID`.
+  `MOE_FUSED_UP_GATE`, `MULTI_ADD`, `MUL_MULTI_ADD` and `FUSED_MUL_UNARY`, the last
+  mapped onto the mainline GLU split path for `SIGMOID`. `MULTI_ADD` reads past the
+  nominal `ggml_nbytes()` of the view it is given (the row stride spans the `n_add`
+  chunks it sums), so its `src0` descriptor is bound over the range the kernel reads
+  rather than the view's size — the omission that broke every hyper-connection model at
+  decode (`meta#88` in `docs/KNOWN-ISSUES.md`). Its pipelines, and `MUL_MULTI_ADD`'s,
+  are created unconditionally; they are graph ops, not the fused-ADD chain that
+  `device->multi_add` and `GGML_VK_DISABLE_MULTI_ADD` gate.
 - `ggml-vulkan-ik-compat.h`, which holds the shims the grafted code needs here. ik is
   pre-module-split, so mainline's `ggml-cpu.h`, `GGML_LOG_*` and backend-registry entry
   points do not exist and are provided there.
@@ -217,7 +223,7 @@ Two knobs help when the sweep is clean and a model still differs:
 
 Measured on an Arc B580 (ANV), same host and same harness, comparing the pre-graft
 backend against this one (these counts predate the harness corrections above; the
-corrected sweep has 2152 cases, and its `FLASH_ATTN_EXT` failures on that device would
+corrected sweep has 2207 cases, and its `FLASH_ATTN_EXT` failures on that device would
 need re-measuring against the new reference):
 
 | | pre-graft backend | this backend |
@@ -246,6 +252,27 @@ The remaining full-sweep failures on that device are `FLASH_ATTN_EXT` (256), `CP
 `PAD` (1). They are device-specific: on an NVIDIA card the same build fails only `CPY` and
 `FLASH_ATTN_EXT`.
 
+The `iq4_xs` entries are the reference, not the backend. `test-quant-matmul` (CPU only)
+shows the CPU's `iq4_xs` kernel disagreeing with its own dequantizer by NMSE ~3e-2 at
+`n < 32` on an AVX2 host, and the Vulkan `iq4_xs` mat-mat case (`n = 32`) passes exactly
+where the CPU agrees with itself; see the CPU entry at the end of `docs/KNOWN-ISSUES.md`.
+On the RTX 50-class card the current sweep is 2195/2207: `CPY` (4), `iq4_xs` `MUL_MAT`
+(5, all `n < 32`), `bf16` k=1 (1), `iq4_xs` `MUL_MAT_ID` (1), `PAD` (1).
+
+Two things the sweep now covers that it did not before `meta#88`, both of which have to
+be asked for explicitly because no generic shape generator produces them:
+
+- **`MULTI_ADD` at the shapes the graphs emit** — a `[ne0, nrows]` view over a
+  `[ne0, n_add, nrows]` tensor, `n_add` = the expert count or the hyper-connection width,
+  `nrows` = 1 for decode. The failure signature of a range bug is NMSE that shrinks as
+  `1/nrows` (only the last row is wrong): 2.9 at one row, 0.02 at 32.
+- **Mat-vec at a short `k`** (`k = 320` against `m = 10240`, the hyper-connection mixer's
+  low-rank up projection) and the `iq` types at model shapes. All pass on the card
+  measured here; the mixer shape was the first thing `GGML_VULKAN_CHECK_RESULTS` flagged
+  on the `qwen4exp` graph (average error 0.015 against the check's own tolerance of
+  0.01), and the standalone case at NMSE < 5e-4 is what showed that flag to be the
+  harness's quantized-activation noise rather than a kernel fault.
+
 For a suspected numerical mismatch rather than a missing op, build with
 `-DGGML_VULKAN_CHECK_RESULTS=ON`: every Vulkan result is then recomputed on the CPU and
 compared node by node. That harness had bit-rotted against ik and is fixed here.
@@ -260,7 +287,7 @@ compared node by node. That harness had bit-rotted against ik and is fixed here.
 | `GGML_VK_DISABLE_COOPMAT` | Disable `KHR_cooperative_matrix`. |
 | `GGML_VK_DISABLE_INTEGER_DOT_PRODUCT`, `GGML_VK_DISABLE_BFLOAT16`, `GGML_VK_DISABLE_F16` | Disable the corresponding feature path. |
 | `GGML_VK_DISABLE_MMVQ`, `GGML_VK_FORCE_MMVQ` | Force the quantised mat-vec path off or on. Useful for bisecting a wrong-output device. |
-| `GGML_VK_DISABLE_FUSION`, `GGML_VK_DISABLE_MULTI_ADD`, `GGML_VK_DISABLE_GRAPH_OPTIMIZE` | Turn off graph-level fusion and reordering. |
+| `GGML_VK_DISABLE_FUSION`, `GGML_VK_DISABLE_MULTI_ADD`, `GGML_VK_DISABLE_GRAPH_OPTIMIZE` | Turn off graph-level fusion and reordering. `GGML_VK_DISABLE_MULTI_ADD` gates mainline's fused-ADD chain only; ik's `MULTI_ADD` graph op stays available (before `meta#88` it did not, and the run aborted with `Missing op: MULTI_ADD`). |
 | `GGML_VK_ALLOW_FUG`, `GGML_VK_ALLOW_FMOE` | Re-enable the fused up/gate and fused-MoE graphs when offloading to Vulkan. |
 | `GGML_OP_OFFLOAD_MIN_BATCH` | Batch threshold above which the scheduler may move a CPU-resident op to the GPU (default 32). A very large value pins the graph to the CPU. |
 | `LLAMA_NO_HOST_OVERRIDES` | Allocate `-ot` / `--cpu-moe` / `-ncmoe` tensors from plain CPU buffers instead of the backend host buffer type. Under Vulkan that host buffer is device-visible host memory, capped by the GTT aperture, and a large expert set exhausts it long before system RAM runs out. |
