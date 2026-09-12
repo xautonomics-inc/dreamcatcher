@@ -148,11 +148,12 @@ compared against the same build's CPU output.
 
 | Device / driver | Matrix path | Result with this backend |
 |---|---|---|
-| AMD RDNA4 (RX 9070 class, RADV) | none | **Fixed.** Reproduces the CPU output exactly. The pre-graft backend produced garbage on this device. |
+| AMD RDNA4 (RX 9070 class, RADV) | none | **Fixed.** Flash-attention sweep clean (828/828 with the corrected harness); the pre-graft backend produced garbage on this device. Token-exact against the CPU at the lane-9 checkpoint; on the current tip a bare greedy prompt can differ from the CPU by rounding on the integer-dot matmul path (same class as RDNA3, see meta#85); the head/tail split reproduces the single-process output exactly. |
 | NVIDIA Blackwell (RTX 50 class) | `KHR_coopmat` | **Exact.** Reproduces the CPU output token for token -- the only GPU configuration measured that does so on this hardware. |
 | NVIDIA Blackwell (RTX 50 class) | `NV_coopmat2` | Wrong. Declined by default; see above. |
 | Intel Arc B-series (BMG, ANV) | `KHR_coopmat` | Self-consistent and unchanged from the pre-graft backend, but does not reproduce the CPU output token for token. Not investigated further. |
-| AMD RDNA3 | -- | Not measured. |
+| AMD RDNA3.5 (Radeon 8060S APU, RADV) | `KHR_coopmat` | **Verified for the expert-server path.** 111 GiB of GLM-5.3-Flash routed experts served from the APU to a CUDA head: 12/12 tokens identical to the local-experts reference; `MUL_MAT_ID` 1647/1648 and `MUL_MAT` 1646/1648 (the iq4_xs / bf16 cases fail as on every other device). |
+| AMD RDNA3 (RX 7900 XT, RADV) | `KHR_coopmat` | **Op-exact; token-exact on a well-posed prompt.** Every flash-attention shape a Gemma-4 12B emits passes against the CPU (830 `FLASH_ATTN_EXT` cases in the corrected sweep below, 0 failures; 2144/2152 for the whole sweep, the 8 left being the pre-existing `CPY`, `iq4_xs` / `bf16` `MUL_MAT`, `MUL_MAT_ID` and `PAD` cases), a Qwen3 8B is token-exact with `-fa on` and `-fa off`, and the chat-formatted Gemma-4 prompt reproduces the CPU output token for token. The bare completion prompt used for the rows above does **not** reproduce the CPU tokens on this device; see `meta#85` in `docs/KNOWN-ISSUES.md` for why that is rounding-order sensitivity of that prompt, not a kernel fault. |
 
 A CPU-only run (`-ngl 0`, every tensor forced to the CPU with `-ot`) produces
 byte-identical output to the pre-graft build -- with the Vulkan backend compiled in and
@@ -174,8 +175,50 @@ per op. It is the tool the `SSM_*` and GLU mismatches above were found with, and
 also the only thing that exercises ik's `IQ4_K` / `IQ5_K` / `IQ6_K` Vulkan kernels. It is
 wired into the test CMakeLists here; before this work it was in the tree but never built.
 
+### What the sweep here can and cannot see
+
+The harness is only as good as its CPU reference, and ik's CPU kernels have a narrower
+contract than mainline's. Two things had to change before the flash-attention numbers
+meant anything, and both are worth knowing when reading a failure:
+
+- **The mask must be a keep/drop pattern.** ik's CPU flash attention
+  (`iqk_flash_attn_noalibi`) applies the mask as 0 / -inf: the AVX-512 kernels binarise
+  it and the AVX2 kernels add it before the scale is applied. Any other value gives a
+  wrong *reference*. The old sweep filled the mask with uniform random values and so
+  reported every `mask=1, max_bias=0` case on the head sizes the iqk kernels cover
+  (64, 128, 256 -- everything but 80) as a backend failure with NMSE 0.17-0.19, on every
+  device, while the backend was computing the right thing. The sweep now builds masks
+  the way the graph builders do (blocks of -inf on a zero field, first key always
+  visible) and those failures are gone.
+- **Quantized K/V only with a mask and without ALiBi.** Without a mask, or with
+  `max_bias > 0`, ik routes flash attention to its generic CPU path, and that path
+  returns NaN for `q8_0` / `q4_0` K/V. No graph emits that combination, so the sweep
+  skips it rather than compare against NaN.
+
+With those two corrections the sweep also covers what the old one never generated:
+grouped-query attention (`nr2` > 1, the only form current models emit and the one the
+backends special-case), both accumulator precisions, the exact decode shapes of a
+Gemma-4 12B (head size 256 with 2 query heads per K/V head, head size 512 with 16 on a
+single K/V head), MLA-style asymmetric K/V head sizes, and `MUL_MAT` at model shapes
+(`k` = 3840 / 15360, `n` = 1 / 6 / 32) that reach the integer-dot mat-vec path decode
+actually runs -- the old `k = 256` cases never did.
+
+Two knobs help when the sweep is clean and a model still differs:
+
+- `GGML_VULKAN_CHECK_RESULTS=ON` builds a backend that recomputes every op on the CPU
+  from the GPU's own inputs and reports the average absolute error per node.
+  `GGML_VK_CHECK_RESULTS_TOL` raises the abort threshold (default 0.01) so a run can
+  be followed past the quantized mat-vec noise floor -- `q4_0` weights against
+  8-bit activations sit at a few 1e-3 -- to the op that is actually wrong.
+- `GGML_VK_DISABLE_INTEGER_DOT_PRODUCT=1` and `GGML_VK_DISABLE_F16=1` switch the
+  mat-vec and flash-attention kernels to their non-integer-dot and fp32 variants. If
+  the output changes but nothing becomes "right", the model is sensitive to rounding
+  order rather than broken (see `meta#85` in `docs/KNOWN-ISSUES.md` for a worked case).
+
 Measured on an Arc B580 (ANV), same host and same harness, comparing the pre-graft
-backend against this one:
+backend against this one (these counts predate the harness corrections above; the
+corrected sweep has 2152 cases, and its `FLASH_ATTN_EXT` failures on that device would
+need re-measuring against the new reference):
 
 | | pre-graft backend | this backend |
 |---|---|---|
