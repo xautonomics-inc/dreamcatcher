@@ -58,6 +58,55 @@ struct gguf_array_slice {
     std::vector<std::string> strings;
 };
 
+bool key_has_suffix(const char * key, const char * suffix) {
+    const size_t n_key    = strlen(key);
+    const size_t n_suffix = strlen(suffix);
+    return n_key >= n_suffix && strcmp(key + n_key - n_suffix, suffix) == 0;
+}
+
+// Per-layer arrays that are LONGER than block_count. The DSV4 converter copies
+// attention.compress_ratios straight out of the upstream config, which covers the blocks
+// PLUS a few trailing companion slots, so the array is 46 long for a 43-block model and the
+// value-per-block pass (which matches on length == source_blk_count) never sees it. Its
+// first source_blk_count entries ARE the blocks, so a window slices the same range out of
+// them as it does out of any other per-layer array.
+bool is_long_per_block_array(const char * key) {
+    for (const char * suffix : { ".attention.compress_ratios" }) {
+        if (key_has_suffix(key, suffix)) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool gguf_get_int_scalar(const gguf_context * meta, int kid, int64_t & value) {
+    switch (gguf_get_kv_type(meta, kid)) {
+        case GGUF_TYPE_UINT8:  value = gguf_get_val_u8 (meta, kid); return true;
+        case GGUF_TYPE_INT8:   value = gguf_get_val_i8 (meta, kid); return true;
+        case GGUF_TYPE_UINT16: value = gguf_get_val_u16(meta, kid); return true;
+        case GGUF_TYPE_INT16:  value = gguf_get_val_i16(meta, kid); return true;
+        case GGUF_TYPE_UINT32: value = gguf_get_val_u32(meta, kid); return true;
+        case GGUF_TYPE_INT32:  value = gguf_get_val_i32(meta, kid); return true;
+        case GGUF_TYPE_UINT64: value = (int64_t) gguf_get_val_u64(meta, kid); return true;
+        case GGUF_TYPE_INT64:  value = gguf_get_val_i64(meta, kid); return true;
+        default:               return false;
+    }
+}
+
+void gguf_set_int_scalar(gguf_context * meta, const char * key, enum gguf_type type, int64_t value) {
+    switch (type) {
+        case GGUF_TYPE_UINT8:  gguf_set_val_u8 (meta, key, (uint8_t)  value); break;
+        case GGUF_TYPE_INT8:   gguf_set_val_i8 (meta, key, (int8_t)   value); break;
+        case GGUF_TYPE_UINT16: gguf_set_val_u16(meta, key, (uint16_t) value); break;
+        case GGUF_TYPE_INT16:  gguf_set_val_i16(meta, key, (int16_t)  value); break;
+        case GGUF_TYPE_UINT32: gguf_set_val_u32(meta, key, (uint32_t) value); break;
+        case GGUF_TYPE_INT32:  gguf_set_val_i32(meta, key, (int32_t)  value); break;
+        case GGUF_TYPE_UINT64: gguf_set_val_u64(meta, key, (uint64_t) value); break;
+        case GGUF_TYPE_INT64:  gguf_set_val_i64(meta, key, value); break;
+        default:               break;
+    }
+}
+
 } // namespace
 
 void llama_model_loader_slice_block_arrays(
@@ -75,8 +124,13 @@ void llama_model_loader_slice_block_arrays(
 
     std::vector<gguf_array_slice> slices;
     for (int kid = 0; kid < gguf_get_n_kv(meta); ++kid) {
-        if (gguf_get_kv_type(meta, kid) != GGUF_TYPE_ARRAY ||
-                gguf_get_arr_n(meta, kid) != source_blk_count) {
+        if (gguf_get_kv_type(meta, kid) != GGUF_TYPE_ARRAY) {
+            continue;
+        }
+        const int64_t n_arr = gguf_get_arr_n(meta, kid);
+        // one value per block, or one value per block plus trailing non-block slots
+        if (n_arr != source_blk_count &&
+                !(n_arr > source_blk_count && is_long_per_block_array(gguf_get_key(meta, kid)))) {
             continue;
         }
 
@@ -190,6 +244,40 @@ void llama_model_loader_slice_block_arrays(
             }
         }
         gguf_set_arr_data(meta, key.c_str(), elem_type, data.data(), (int) indices.size());
+    }
+
+    // And a few per-layer keys are neither: they are a COUNT OF A LEADING RUN of blocks -
+    // "the first N blocks carry this feature". block_count, leading_dense_block_count and
+    // nextn_predict_layers are re-derived per part file by the assembler and summed, but a
+    // count like hash_layer_count is not, so every part keeps the SOURCE model's value and
+    // the first N layers of EVERY window then look like the feature layers: a window opening
+    // at block 22 would build its blk.0 as a hash-routed MoE layer and read the tid2eid map
+    // that only the real leading blocks carry. Shift the run onto the window and clamp it to
+    // the window's length (a window past the run keeps the key with a count of 0).
+    for (const char * suffix : { ".hash_layer_count" }) {
+        for (int kid = 0; kid < gguf_get_n_kv(meta); ++kid) {
+            const char * k = gguf_get_key(meta, kid);
+            if (!key_has_suffix(k, suffix) || gguf_get_kv_type(meta, kid) == GGUF_TYPE_ARRAY) {
+                continue;
+            }
+
+            int64_t count = 0;
+            if (!gguf_get_int_scalar(meta, kid, count)) {
+                throw std::runtime_error(format("part assembly: %s is not an integer block count", k));
+            }
+
+            const int64_t rebased = std::min<int64_t>(
+                    std::max<int64_t>(count - source_blk_start, 0), assembled_blk_count);
+            if (rebased != count) {
+                const std::string   key  = k;
+                const enum gguf_type type = gguf_get_kv_type(meta, kid);
+                gguf_set_int_scalar(meta, key.c_str(), type, rebased);
+                LLAMA_LOG_INFO("%s: window [%d,%d) rebases %s from %d to %d\n",
+                        __func__, source_blk_start, source_blk_start + assembled_blk_count,
+                        key.c_str(), (int) count, (int) rebased);
+            }
+            break;
+        }
     }
 }
 
