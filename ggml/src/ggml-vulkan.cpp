@@ -16539,6 +16539,17 @@ static bool ggml_backend_vk_device_supports_op_impl(size_t dev_num, const ggml_t
             }
         case GGML_OP_GET_ROWS:
             {
+                // ik-port: op_params[0] == 1 is ik's gather-along-dim-0 mode
+                // (out[i, r] = src0[idx[i, r], r]; the single-token sparse-attention mask).
+                // The get_rows shaders gather whole rows and never read op_params, so they
+                // would silently compute the plain gather; decline it and let the CPU do it.
+                if (op->op_params[0] == 1) {
+                    return false;
+                }
+                // ik's same-type gather keeps src0's type; the pipelines only write f32/f16/i32
+                if (op->type != GGML_TYPE_F32 && op->type != GGML_TYPE_F16 && op->type != GGML_TYPE_I32) {
+                    return false;
+                }
                 switch (op->src[0]->type) {
                     case GGML_TYPE_F32:
                     case GGML_TYPE_F16:

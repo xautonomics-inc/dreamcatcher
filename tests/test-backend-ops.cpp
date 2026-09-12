@@ -783,6 +783,50 @@ struct test_get_rows : public test_case {
     }
 };
 
+// GGML_OP_GET_ROWS in ik's extended forms (ggml_get_rows_ext):
+//   dim0 = true : gather along dim 0 within each row, out[i, r] = a[idx[i, r], r], op_params[0] = 1
+//                 (the single-token sparse-attention mask of deepseek4)
+//   same_type   : a plain row gather that keeps src0's type instead of returning f32
+struct test_get_rows_ext : public test_case {
+    const ggml_type type;
+    const int n_kv;
+    const int n_tokens;
+    const int top_k;
+    const bool dim0;
+
+    std::string vars() override {
+        return VARS_TO_STR5(type, n_kv, n_tokens, top_k, dim0);
+    }
+
+    test_get_rows_ext(ggml_type type = GGML_TYPE_F16, int n_kv = 4096, int n_tokens = 1, int top_k = 2048, bool dim0 = true)
+        : type(type), n_kv(n_kv), n_tokens(n_tokens), top_k(top_k), dim0(dim0) {}
+
+    ggml_tensor * build_graph(ggml_context * ctx) override {
+        if (dim0) {
+            ggml_tensor * a   = ggml_new_tensor_2d(ctx, type, n_kv, n_tokens);
+            ggml_tensor * idx = ggml_new_tensor_2d(ctx, GGML_TYPE_I32, top_k, n_tokens);
+            return ggml_get_rows_ext(ctx, a, idx, true, true);
+        }
+        ggml_tensor * a   = ggml_new_tensor_2d(ctx, type, 256, n_kv);
+        ggml_tensor * idx = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, top_k);
+        return ggml_get_rows_ext(ctx, a, idx, true, false);
+    }
+
+    void initialize_tensors(ggml_context * ctx) override {
+        for (ggml_tensor * t = ggml_get_first_tensor(ctx); t != NULL; t = ggml_get_next_tensor(ctx, t)) {
+            if (t->type == GGML_TYPE_I32) {
+                std::vector<int> data(ggml_nelements(t));
+                for (auto & v : data) {
+                    v = rand() % n_kv;
+                }
+                ggml_backend_tensor_set(t, data.data(), 0, data.size() * sizeof(int));
+            } else {
+                init_tensor_uniform(t);
+            }
+        }
+    }
+};
+
 // GGML_OP_REPEAT
 struct test_repeat : public test_case {
     const ggml_type type;
@@ -2242,6 +2286,11 @@ static bool test_backend(ggml_backend_t backend, test_mode mode, const char * op
     }
 
     test_cases.emplace_back(new test_get_rows(GGML_TYPE_F32, 1, 8, 2, 1, false));
+    for (ggml_type t : {GGML_TYPE_F16, GGML_TYPE_F32}) {
+        test_cases.emplace_back(new test_get_rows_ext(t, 4096, 1, 2048, true));  // deepseek4 csa mask, decode
+        test_cases.emplace_back(new test_get_rows_ext(t, 4096, 4, 2048, true));
+        test_cases.emplace_back(new test_get_rows_ext(t, 4096, 1, 2048, false)); // same-type row gather
+    }
     for (ggml_type type : all_types) {
         for (int b : {1, 7}) {
             for (bool v : {false, true}) {

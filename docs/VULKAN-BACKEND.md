@@ -91,6 +91,15 @@ logged when a device advertises it. The device keeps `KHR_coopmat`, so this cost
 faster matmul on NVIDIA rather than acceleration itself. Whoever fixes the coopmat2
 kernels against ik's graph shapes can flip the default back.
 
+### `GET_ROWS` in ik's dim-0 form
+
+`ggml_get_rows_ext(…, dim0 = true)` reuses the `GET_ROWS` op id with `op_params[0] = 1` to
+mean a gather along dim 0 within each row (`out[i, r] = src0[idx[i, r], r]`), the shape a
+single-token sparse-attention mask cut takes. The grafted shaders gather whole rows and
+never look at `op_params`, so the node was accepted and computed as the plain gather.
+`supports_op` now declines that form, and the same-type form whose output type has no
+pipeline; both run on the CPU. (`meta#88`, second defect, found on `deepseek4`.)
+
 ### `IQ4_KS` and `IQ4_KT` (no Vulkan offload)
 
 This is the one capability the graft loses outright. Upstream added Vulkan support for
