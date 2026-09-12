@@ -22,3 +22,6 @@ compile_commands.json
 Dockerfile
 
 **/*.md
+# ...but keep the tool docs: the frozen tools/ tree's READMEs are part of
+# what the tools image ships (meta#70).
+!tools/**/*.md

@@ -47,6 +47,15 @@ docker buildx create --name ik-llama-builder --use
 VARIANT=cpu docker buildx bake --builder ik-llama-builder --load full swap
 ```
 
+The `server` target (also ships `llama-stage-runner`) needs its Containerfile
+set explicitly outside the default group, which the CI workflow does with a
+`--set`. Locally:
+
+```bash
+VARIANT=cpu docker buildx bake --builder ik-llama-builder --load \
+  --set server.dockerfile=docker/ik_llama-cpu.Containerfile server
+```
+
 Or with custom tags:
 
 ```bash
@@ -65,12 +74,35 @@ First, set the CUDA version and GPU architecture in `ik_llama-cuda.Containerfile
 VARIANT=cu12 docker buildx bake --builder ik-llama-builder --load full swap
 ```
 
+Base images are pinned by digest. The bake file defaults to the **12.6.2**
+pins; for a cu13 build pass the matching pins (see the `cu13` matrix row in
+`.github/workflows/build-container.yml` for current digests):
+
+```bash
+VARIANT=cu13 \
+BASE_CUDA_DEV_CONTAINER=docker.io/nvidia/cuda:13.1.1-devel-ubuntu24.04@sha256:9cf8694a27722418a1f175d90f85d5afb5a728fd4a9907d7f0565efecfa14d32 \
+BASE_CUDA_RUN_CONTAINER=docker.io/nvidia/cuda:13.1.1-runtime-ubuntu24.04@sha256:12e26235ebe186000d71f8e457a9ad2aed6c0cb743a7935f0443bacef206aa34 \
+docker buildx bake --builder ik-llama-builder --load full swap
+```
+
+The bake file deliberately avoids `locals`/conditionals so it parses on
+distro-buildx (tested against 0.13.1); base selection is env/variable-
+driven.
+
 ### Build Targets
 
 Builds two image tags per variant:
 
 - **`full`**: Includes `llama-server`, `llama-quantize`, and other utilities.
 - **`swap`**: Includes only `llama-swap` and `llama-server`.
+
+CI additionally tags every image with the source SHA (`…-<sha>`). Locally that
+tag comes from the bake **variable** `GIT_SHA`, not a build arg — export it or
+a local bake tags `…-0000000`:
+
+```bash
+GIT_SHA=$(git rev-parse --short HEAD) VARIANT=cpu docker buildx bake …
+```
 
 ## Run
 
@@ -167,3 +199,46 @@ docker run -it --name ik_llama_full --rm -v /my_local_files/gguf:/models:ro --ru
 All credits to the awesome community:
 
 [llama-swap](https://github.com/mostlygeek/llama-swap)
+
+## Expert-parallel staging (`llama-stage-runner`) and the tools image
+
+The `server`/`swap` images ship `llama-stage-runner` beside `llama-server`: a
+thin driver that loads one stage of a very deep MoE (graph-build layer window
+via `STAGE_IL_START`/`STAGE_IL_END`), streams activations to the next stage
+over TCP **or RDMA**, and can serve the head stage's OpenAI HTTP endpoint.
+`llama-expert-server` is **not present in this fork's tree** and therefore not
+in the images; porting it is tracked separately.
+
+**Serve a chat model from the `server` image** — note `--jinja`: several chat
+templates (e.g. gemma) are rejected without it and requests to `/v1/chat/…`
+answer 500:
+
+```bash
+docker run --rm -p 9292:8080 -v /my_local_files/gguf:/models:ro \
+  localhost/ik_llama-cpu:server -m /models/model.gguf --jinja -c 2048 -t 8
+```
+
+**RDMA (RoCE) transport.** Servers are compiled with `GGML_RPC=ON` and
+`GGML_RPC_RDMA=ON` (libibverbs). Stage handshakes exchange transport
+capabilities and use RDMA when **both** ends expose `/dev/infiniband`; with
+the device absent on either side they fall back to TCP, so the same image
+runs unchanged on non-RDMA hosts. To use it, pass the device through:
+
+```bash
+docker run --rm --device /dev/infiniband ik_llama-cpu:server ...
+```
+
+Stage-runner roles (`server` = head with HTTP API, `head`, `tail`, `relay`)
+and the full knob list (`--slots`, `--connect`, `--listen`, `--return-listen`,
+`--n-ctx`, `--tensor-split`, `-ot`, `-cmoe`, ...) are in
+`examples/stage-runner/stage-runner.cpp`. KV geometry must be byte-identical
+across stages — start from `gslot plan` (`tools/gslot/README.md`) rather than
+hand-rolling a launch set.
+
+**Tools image.** `ik-llama-cpp:tools` is a minimal Python 3.12 image with the
+`gslot` placement planner and the layer-distribution analysis scripts frozen
+into it (stdlib-only, no network). It is built and tagged by the bake matrix
+but **not yet published** — no registry publish path is wired for it yet
+(tracked gap). `fleet-console` itself is not in this repository yet; its
+planned image path is commented in
+`docker/ik_llama-tools.Containerfile`.

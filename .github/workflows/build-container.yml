@@ -18,12 +18,19 @@ jobs:
           - variant: "cu12"
             cuda_version: "12.6.2"
             containerfile: "ik_llama-cuda.Containerfile"
+            base_cuda_dev: "docker.io/nvidia/cuda:12.6.2-devel-ubuntu24.04@sha256:738fba0fbdb225b7a2931c58a5c8f03a84d3cd2f6a84975826a157339ef750b8"
+            base_cuda_run: "docker.io/nvidia/cuda:12.6.2-runtime-ubuntu24.04@sha256:16411bb06f363425265b410810a86fc43da705847ee9721be45b478bc4d0ea26"
           - variant: "cu13"
             cuda_version: "13.1.1"
             containerfile: "ik_llama-cuda.Containerfile"
+            base_cuda_dev: "docker.io/nvidia/cuda:13.1.1-devel-ubuntu24.04@sha256:9cf8694a27722418a1f175d90f85d5afb5a728fd4a9907d7f0565efecfa14d32"
+            base_cuda_run: "docker.io/nvidia/cuda:13.1.1-runtime-ubuntu24.04@sha256:12e26235ebe186000d71f8e457a9ad2aed6c0cb743a7935f0443bacef206aa34"
           - variant: "cpu"
             cuda_version: "none"
             containerfile: "ik_llama-cpu.Containerfile"
+          - variant: "tools"
+            cuda_version: "none"
+            containerfile: "ik_llama-tools.Containerfile"
 
     steps:
       - name: Checkout
@@ -86,11 +93,19 @@ jobs:
           REPO_OWNER: ${{ env.REPO_LOWER }}
           VARIANT: ${{ matrix.variant }}
           BUILD_NUMBER: ${{ env.BUILD_NUMBER }}
+          GIT_SHA: ${{ github.sha }}
           CUDA_VERSION: ${{ matrix.cuda_version }}
+          BASE_CUDA_DEV_CONTAINER: ${{ matrix.base_cuda_dev }}
+          BASE_CUDA_RUN_CONTAINER: ${{ matrix.base_cuda_run }}
           GGML_NATIVE: "OFF" # Force OFF for CI portability
           USE_CCACHE: "true"
         with:
           push: true
+          # Provenance + SBOM attestations (meta#70): every pushed manifest
+          # carries a SLSA provenance statement and an SBOM.
+          provenance: mode=max
+          sbom: true
+          metadata-file: bake-out/${{ matrix.variant }}.metadata.json
           files: ./docker-bake.hcl
           set: |
             *.context=.
@@ -98,6 +113,28 @@ jobs:
             *.cache-from=type=gha,scope=ccache-${{ matrix.variant }}
             *.cache-to=type=gha,mode=max,scope=ccache-${{ matrix.variant }}
           source: .
+
+      # Digest of exactly what was pushed, recorded in the job summary so a
+      # run's artifacts are pin-able without browsing the registry (meta#70).
+      - name: Record digests in job summary
+        if: always()
+        run: |
+          {
+            echo "## ${{ matrix.variant }} image digests"
+            echo '```'
+            python3 - bake-out/${{ matrix.variant }}.metadata.json <<'PYEOF'
+          import json, sys
+          try:
+              d = json.load(open(sys.argv[1]))
+          except Exception as e:
+              print("no metadata file produced:", e); raise SystemExit(0)
+          print("digest:", d.get("containerimage.digest", "?"))
+          for k, v in sorted(d.items()):
+              if str(k).endswith(".tags"):
+                  print(f"{k}: {v}")
+          PYEOF
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
 
   cleanup:
     runs-on: ubuntu-latest

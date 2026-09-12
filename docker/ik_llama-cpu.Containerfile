@@ -1,7 +1,10 @@
-ARG UBUNTU_VERSION=24.04
+# Base image pinned by digest (docker.io/library/ubuntu 24.04, multi-arch
+# index; resolved 2026-09). Bake passes BASE_IMAGE explicitly; override here
+# with a fresh digest when refreshing.
+ARG BASE_IMAGE=docker.io/library/ubuntu:24.04@sha256:224a1869083a311ef3f13648a154ba79832fbef6364d31493642ca03082da254
 
 # Stage 1: Build
-FROM docker.io/ubuntu:$UBUNTU_VERSION AS build
+FROM ${BASE_IMAGE} AS build
 
 # Build arguments
 ARG GGML_NATIVE=ON
@@ -21,7 +24,7 @@ ENV CCACHE_COMPRESSLEVEL=6
 ENV CCACHE_BASEDIR=/app
 
 RUN apt-get update && \
-    apt-get install -yq --no-install-recommends ca-certificates build-essential libcurl4-openssl-dev curl libgomp1 cmake ccache git && \
+    apt-get install -yq --no-install-recommends ca-certificates build-essential libcurl4-openssl-dev curl libgomp1 cmake ccache git libibverbs-dev && \
     rm -rf /var/lib/apt/lists/*
 
 # Copy source code (excluding hidden files/dirs via .dockerignore)
@@ -38,7 +41,8 @@ RUN --mount=type=cache,target=/ccache \
     fi && \
     cmake -B build \
         -DGGML_NATIVE=${GGML_NATIVE} \
-        -DLLAMA_CURL=ON && \
+        -DLLAMA_CURL=ON \
+        -DGGML_RPC=ON -DGGML_RPC_RDMA=ON && \
     cmake --build build --config Release -j$(nproc) && \
     if [ "${USE_CCACHE}" = "true" ]; then \
         ccache -s; \
@@ -55,10 +59,22 @@ RUN mkdir -p /app/dist/lib /app/dist/full /app/dist/bin && \
     cp requirements.txt /app/dist/full/ && \
     cp .devops/tools.sh /app/dist/full/
 
+# Server-stage payload. llama-expert-server is not a build target yet (tracked
+# gap), so it is collected only when present; the rest always ships.
+RUN mkdir -p /app/dist/server && \
+    cp /app/dist/bin/llama-server /app/dist/bin/llama-stage-runner /app/dist/server/ && \
+    if [ -f /app/dist/bin/llama-expert-server ]; then \
+        cp /app/dist/bin/llama-expert-server /app/dist/server/; \
+    fi
+
 # Stage 2: Base (Shared Runtime)
-FROM docker.io/ubuntu:$UBUNTU_VERSION AS base
+ARG BASE_IMAGE
+FROM ${BASE_IMAGE} AS base
+# rdma-core: libibverbs runtime for the RoCE transport tier. The transport
+# probes for a device at startup and falls back to plain TCP when
+# /dev/infiniband is absent, so this costs nothing on non-RDMA hosts.
 RUN apt-get update && \
-    apt-get install -yq --no-install-recommends libgomp1 curl ca-certificates && \
+    apt-get install -yq --no-install-recommends libgomp1 curl ca-certificates rdma-core libibverbs1 && \
     rm -rf /var/lib/apt/lists/*
 WORKDIR /app
 ENV LD_LIBRARY_PATH=/app/lib
@@ -73,10 +89,14 @@ RUN apt-get update && \
     rm -rf /var/lib/apt/lists/*
 ENTRYPOINT ["/app/tools.sh"]
 
-# Stage 4: Server
+# Stage 4: Server (llama-server + multi-stage drivers)
 FROM base AS server
 ENV LLAMA_ARG_HOST=0.0.0.0
-COPY --from=build /app/dist/bin/llama-server /app/llama-server
+# Multi-stage split serving: the runner drives stage-server roles over the
+# hidden-state transport (TCP, auto-negotiating RDMA when both ends see RoCE).
+# llama-expert-server lands here automatically when that target exists (see
+# the collect step -- it is not a build target yet, tracked gap).
+COPY --from=build /app/dist/server/ /app/
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD [ "curl", "-f", "http://localhost:8080/health" ]
 ENTRYPOINT [ "/app/llama-server" ]
