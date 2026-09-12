@@ -211,3 +211,64 @@ a loader-level harness (`check54`: `llama_model_load_from_parts` over explicit
   `n_layer=5`, 48 tensors;
 - gap in the window (blk 0,1,3): load aborts — `invalid assembly: no tensors
   for blk.2 (window block_count=3)`.
+
+## Window-relative vs source-absolute per-layer values
+
+A window is a *slice of a source model*, not a small model of its own. Anything
+the source model indexes by its **absolute** block number has to be rebuilt from
+the window's offset, or a window that does not start at block 0 reads the wrong
+value for every one of its layers. The loader therefore records the window it
+assembled and hands it to the rest of the loader:
+
+- `llama_model_loader::window_il_offset` / `window_n_layer_src` — set from the
+  `llama_model_part` window; `0` / `block_count` for a monolithic `-m` file.
+- `llama_hparams::il_offset` / `n_layer_src`, read through `il_abs(il)` and
+  `n_layer_source()`. For a monolithic model `il_abs()` is the identity, so
+  nothing about the `-m` path changes.
+
+Two families of value need it:
+
+1. **"every k-th block" patterns** — the linear-vs-full attention interval
+   (`full_attention_interval`) and sliding-window periods. Built from the local
+   index, a window starting at a block that is not a multiple of the period
+   gives every one of its layers the wrong kind of attention. A window whose
+   start *is* a multiple of the period was accidentally correct, which is why
+   24- and 40-block splits of a period-4 model never showed it.
+2. **Per-layer token-embedding tables** — `per_layer_token_embd` is stored whole,
+   one slice per source block, and is indexed by the source block number. It is
+   sized by `n_layer_source()`, and the window's slice
+   `[il_offset, il_offset + n_layer)` is cut out at graph-build time.
+
+### Per-layer embeddings need the batch's TOKEN IDS
+
+A per-layer embedding is a lookup keyed by the token, so a window that owns such
+a block needs the token ids as well as the table. A pipeline stage past the first
+is handed **hidden states**, not tokens, and the lookup silently falls back to a
+placeholder row. Two architectures are affected, differently:
+
+- **gemma4** with `embedding_length_per_layer_input > 0`: *every* block consumes
+  a per-layer embedding, so only the stage that owns source block 0 can be
+  correct. A later window now warns at load time. (Before this change such a
+  window could not load at all: the table was sized with the window's block
+  count and did not match the stored shape.)
+- **qwen4exp**: only the blocks listed in `ple.layers` consume the PLE n-gram
+  table — a single block in the shipped Flash-Next models. `ple.layers` is
+  rebased onto the window and dropped when empty, so a window with no PLE block
+  correctly does **not** load the table. The loader now says that explicitly
+  instead of leaving only a bare `skipped N unused tensors` line, which reads
+  like a window losing a weight it needed. A window that *does* own a PLE block
+  and does not start at block 0 warns.
+
+Carrying token ids alongside the hidden handoff would lift the restriction; the
+transport does not do that today.
+
+## Sampling parity with a monolithic server
+
+A tail samples the **last row of each sequence** and discards the rest. It used
+to ask `llama_decode` for logits on *every* row of the handoff, which makes the
+final `lm_head` an `n_rows`-wide matmul where a monolithic server runs a
+one-row one — a different kernel, so different rounding, so a different argmax
+whenever the top two candidates are close. The tail now requests logits only on
+the rows it reads. On an 80B-A6B `qwen4exp` this changed the **first** sampled
+token of a 7-token prompt, and made two different splits of the same model agree
+with each other where they had not before.

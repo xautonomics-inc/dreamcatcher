@@ -41,7 +41,10 @@ ggml_cgraph * llm_build_context::build_llama() {
         struct ggml_tensor * inpSA = inpL;
 
         bool use_rope = model.arch == LLM_ARCH_LLAMA4 ? (il + 1) % hparams.n_no_rope_layer_step != 0 : true;
-        auto this_KQ_mask = hparams.n_swa > 0 && hparams.n_swa_pattern > 0 && il % hparams.n_swa_pattern < (hparams.n_swa_pattern - 1) ?
+        // il_abs(): the SWA period runs over the SOURCE model's blocks, so a layer-library
+        // window that does not start on the period keeps the right mask. Identity when the
+        // model is monolithic. [meta#91]
+        auto this_KQ_mask = hparams.n_swa > 0 && hparams.n_swa_pattern > 0 && hparams.il_abs(il) % hparams.n_swa_pattern < (hparams.n_swa_pattern - 1) ?
             KQ_mask_swa : KQ_mask;
         int this_n_swa = this_KQ_mask == KQ_mask_swa ? hparams.n_swa : 0;
 
