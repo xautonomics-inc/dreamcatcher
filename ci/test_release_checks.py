@@ -14,6 +14,11 @@ import check_image_entrypoints as entrypoints
 import smoke_serve
 
 
+# A real short answer, and the loop a broken layer-library load actually produced.
+COHERENT = "A small bird flew over the quiet river at dawn and sang."
+DEGENERATE = "**:** **:**;**;**:** **:**;**;**:** **:**;**;**:** **:**;**;**"
+
+
 class Handler(BaseHTTPRequestHandler):
     mode = "ok"
     requests: list[str] = []
@@ -48,7 +53,11 @@ class Handler(BaseHTTPRequestHandler):
         if self.mode == "invalid_json":
             self.wfile.write(b"not json")
             return
-        content = "" if self.mode in ("empty", "reasoning") else "A bird flew."
+        content = COHERENT
+        if self.mode in ("empty", "reasoning"):
+            content = ""
+        elif self.mode == "degenerate":
+            content = DEGENERATE
         tokens: object = 0 if self.mode == "zero" else 8
         if self.mode == "bool_tokens":
             tokens = True
@@ -95,7 +104,9 @@ class SmokeTests(unittest.TestCase):
         )
         self.assertIn("started_at", result)
         self.assertIn("completed_at", result)
-        self.assertNotIn("A bird flew", json.dumps(result))
+        # the generated text is evidence and is emitted; credentials never are
+        self.assertEqual(result["text"], COHERENT)
+        self.assertNotIn("error", result)
 
     def test_threshold_failure_and_explicit_model(self) -> None:
         result = smoke_serve.smoke(self.base + "/v1", 1e12, "fixture", "", 2)
@@ -106,6 +117,7 @@ class SmokeTests(unittest.TestCase):
     def test_refusals_and_no_redirect(self) -> None:
         for mode in [
             "empty",
+            "degenerate",
             "reasoning",
             "zero",
             "bool_tokens",
@@ -118,6 +130,11 @@ class SmokeTests(unittest.TestCase):
                 Handler.mode = mode
                 result = smoke_serve.smoke(self.base, 0, "fixture", "test-value", 2)
                 self.assertFalse(result["ok"])
+                if mode == "degenerate":
+                    self.assertEqual(
+                        result["error"], "degenerate_low_alphanumeric_ratio"
+                    )
+                    self.assertEqual(result["text"], DEGENERATE)
                 if mode == "reasoning":
                     self.assertEqual(result["error"], "reasoning_only")
                     with (
@@ -148,6 +165,59 @@ class SmokeTests(unittest.TestCase):
             patch("builtins.print"),
         ):
             self.assertEqual(smoke_serve.main(), 1)
+
+
+class CoherenceTests(unittest.TestCase):
+    def test_coherent_text_passes(self) -> None:
+        for text in [
+            COHERENT,
+            "Once upon a time a heron stood still in the shallows, waiting.",
+            "The answer is 42, because the search terminated after four probes.",
+        ]:
+            with self.subTest(text=text):
+                self.assertNotIn("error", smoke_serve.coherence(text))
+                self.assertTrue(smoke_serve.check_text(text)["ok"])
+
+    def test_degenerate_text_fails(self) -> None:
+        cases = {
+            DEGENERATE: "degenerate_low_alphanumeric_ratio",
+            "": "degenerate_empty_text",
+            "bird": "degenerate_too_few_distinct_words",
+            "a b c d e a b c d e a b c d e": "degenerate_low_distinct_ratio",
+            ";;;;;;;;;;;;": "degenerate_repeated_symbol_run",
+            "ok " + "!" * 9 + " a b c d e f g h": "degenerate_repeated_symbol_run",
+            "a b c d e f {}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}{}":
+                "degenerate_repeated_symbol_run",
+        }
+        for text, expected in cases.items():
+            with self.subTest(text=text[:24]):
+                self.assertEqual(smoke_serve.coherence(text).get("error"), expected)
+                result = smoke_serve.check_text(text)
+                self.assertFalse(result["ok"])
+                self.assertEqual(result["error"], expected)
+
+    def test_low_alphanumeric_ratio_fails(self) -> None:
+        text = "alpha beta gamma delta epsilon <|><|>=<|>~<|>^<|>+<|>%<|>&<|>#<|>@"
+        report = smoke_serve.coherence(text)
+        self.assertLess(report["alnum_space_ratio"], 0.6)
+        self.assertIn("error", report)
+
+    def test_check_text_cli(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            good = Path(tmp) / "good.txt"
+            good.write_text(COHERENT, encoding="utf-8")
+            bad = Path(tmp) / "bad.txt"
+            bad.write_text(DEGENERATE, encoding="utf-8")
+            with (
+                patch("sys.argv", ["smoke", "--check-text", str(good)]),
+                patch("builtins.print"),
+            ):
+                self.assertEqual(smoke_serve.main(), 0)
+            with (
+                patch("sys.argv", ["smoke", "--check-text", str(bad)]),
+                patch("builtins.print"),
+            ):
+                self.assertEqual(smoke_serve.main(), 1)
 
 
 class EntrypointTests(unittest.TestCase):
