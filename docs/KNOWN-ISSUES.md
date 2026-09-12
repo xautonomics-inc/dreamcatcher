@@ -255,6 +255,26 @@ continuation is decided from there. Every per-step top-5 agrees with CUDA to wit
 about 0.5 percentage points. This is the `meta#85` class of difference, not a kernel
 fault; a well-posed prompt does not show it.
 
+**Second defect, found while chasing DeepSeek-V4-Flash (`deepseek4`) under the same
+handle — real, but not that model's cause.** `ggml_get_rows_ext(a, idx,
+same_type, dim0 = true)` is a `GET_ROWS` node with `op_params[0] = 1` meaning a gather
+*along dim 0 within each row* (`out[i, r] = a[idx[i, r], r]`), which `deepseek4` uses at
+decode to cut the sparse-attention mask to the selected cells. The Vulkan `supports_op`
+looked only at the source type and the get_rows shaders never read `op_params`, so the
+backend accepted the node and computed a plain row gather over rows that do not exist —
+a wrong mask on every decode step (prefill takes the other, `n_tokens > 1`, path). Both
+ik-only forms are now declined (`op_params[0] == 1`, and a
+same-type gather whose output type has no pipeline, which would have aborted) and run on
+the CPU. Op level: `GET_ROWS(type=f16, n_kv=4096, n_tokens=1, top_k=2048, dim0=1)` failed
+with NMSE = inf and is now reported unsupported; the same-type row gather passes.
+DeepSeek-V4-Flash itself (`UD-Q4_K_XL`, experts on the CPU, `-fa on -ctk q8_0 -amb 512`)
+still generates `\n\n\nimportimportimport\n##…` on the build with both fixes (7.8 tokens/s
+on one RTX 50-class card), so that graph has at least one more Vulkan-side fault. It is not
+in the mixer path: `deepseek4` mixes through `HC_PRE` / `HC_POST` (declined, CPU) and
+`MUL_MULTI_ADD` (passes at its shapes, see the harness), and never emits `MULTI_ADD` with
+experts on the CPU. Localizing it needs a `GGML_VULKAN_CHECK_RESULTS` pass over that graph;
+not done here.
+
 **Status:** fixed. The Vulkan backend on the `qwen4exp` graph is claimed as working
 for the single-card + CPU-experts configuration above (NVIDIA, `KHR_coopmat`, measured
 at 8.8-10.1 tokens/s decode on a shared host against 23.4 tokens/s for CUDA on the same
