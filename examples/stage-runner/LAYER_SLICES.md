@@ -86,15 +86,53 @@ Debug: `LLAMA_DUMP_TENSOR_HASH=1` logs a FNV-1a-64 hash of every tensor's
 in-memory bytes after load (stage-runner also disables repack "extra" bufts under
 this env so hashes are byte-comparable across load paths).
 
-## 3. Stage binary: launch parameters
+## 3. Serving a library in ONE process: `llama-server --model-dir` (recommended)
 
-WIRED in `stage-runner.cpp` (port of the mainline driver's assembly block):
-`--model-dir` / `--layers` / `--stage-parts` select and assemble the part files
-exactly as designed below; stage launches may use `--model-dir` in place of
-`-m` slices. Deviations in the ik v1 runner (see its header comment): no
-`--pipeline` (depth==slots, non-pipelined v1) and no `gen` role, so the
-equivalence harness below runs in FILE mode (`--prompt … --last`) or as the
-loader-level tensor-hash check instead; `STAGE_EMIT=hidden` file emit is kept.
+A layer library is a complete model, not only a pipeline input. `llama-server`
+(and `llama-cli`) accept `--model-dir` as an alternative model SOURCE to `-m`:
+the enumeration in `common/layer-library.h` composes the part list and the server
+loads it through `llama_model_load_from_parts()`. **This is the recommended way to
+run a downloaded library** — one process, one API, no ring, no TCP handoff.
+
+```
+--model-dir DIR       layer library directory (alternative to -m; mutually exclusive)
+--layers A,B          ABSOLUTE window [A,B) into the library; default = the WHOLE model
+--stage-parts SPEC    auto (default) | none | comma list of embd,output,nextn,other
+```
+
+The default window is the full model (all layers + `parts-embd` + `parts-output` +
+any NextN blocks), so a plain `--model-dir DIR` serves exactly what `-m mono.gguf`
+would. Every other flag keeps its meaning — `-ngl`, `-ot`, `--tensor-split`, `-fmoe`,
+`-cmoe`, `-c`, `-fa`, `--jinja`, sampling, all unchanged:
+
+```
+# serve a downloaded library, experts on CPU, everything else on the GPUs
+llama-server --model-dir /models/qwen-lib \
+  -ngl 999 -cmoe -c 8192 -fa on --jinja --host 127.0.0.1 --port 8080
+
+# equivalent monolithic launch, for comparison
+llama-server -m /models/qwen/model-00001-of-00003.gguf \
+  -ngl 999 -cmoe -c 8192 -fa on --jinja --host 127.0.0.1 --port 8080
+```
+
+A very large CPU-overridden tensor (e.g. a multi-GiB `per_layer_token_embd.weight`
+under `-ot '...=CPU'`) no longer aborts the load: the loader now falls back from the
+pinned host buffer to the plain CPU buffer for that tensor and logs one line.
+`LLAMA_NO_HOST_OVERRIDES=1` remains the explicit all-tensors override.
+
+Smoke it with `ci/smoke-serve.sh http://127.0.0.1:8080 --min-tps 1.0`, which screens
+the completion for degenerate output as well as throughput.
+
+## 4. Stage binary: launch parameters
+
+WIRED in `stage-runner.cpp`, over the same `common/layer-library.h` enumeration the
+server uses: `--model-dir` / `--layers` / `--stage-parts` select and assemble the
+part files exactly as designed below; stage launches may use `--model-dir` in place
+of `-m` slices. Deviations in the ik v1 runner (see its header comment): no
+`--pipeline` (depth==slots, non-pipelined v1), and its roles are
+`server` / `head` / `tail` / `relay` only. There is no `gen` role and no
+single-process generation mode here — for that, use `llama-server --model-dir`
+(section 3). `STAGE_EMIT=hidden` file emit is kept.
 
 ```
 --model-dir DIR       layer library directory (alternative to -m; mutually exclusive)
@@ -131,17 +169,23 @@ STAGE_ACTIVE=1 STAGE_IL_START=0 STAGE_IL_END=18 \
     -ngl 999 --split-mode tensor --role tail --listen 53600 --token-return HEAD:PORT --pipeline
 ```
 
-Local correctness harness (used for the equivalence proof, CPU-only):
+Local correctness harness (used for the equivalence proof):
 
 ```
-# greedy generation (temp 0) — identical token streams across load paths
-llama-stage-runner -m model.gguf            --role gen --prompt "..." --max-tokens 48
-llama-stage-runner --model-dir lib --layers 0,22 --role gen --prompt "..." --max-tokens 48
+# greedy generation (temp 0, top_k 1, fixed seed) — identical token streams across
+# load paths. Run each server in turn on the same port and diff the completions.
+llama-server -m model.gguf            -c 8192 -fa on --port 8080   # then POST /completion
+llama-server --model-dir lib          -c 8192 -fa on --port 8080   # same body, same tokens
 
-# loader-level byte equality for any window
+# loader-level byte equality for any window (either binary)
 LLAMA_DUMP_TENSOR_HASH=1 llama-stage-runner -m mono-5-9.gguf ... | grep tensor-hash | sort
 LLAMA_DUMP_TENSOR_HASH=1 llama-stage-runner --model-dir lib --layers 5,9 ... | grep tensor-hash | sort
 ```
+
+> `llama-stage-runner --role gen --prompt … --last` is NOT a generation path: the
+> runner's roles are `server` / `head` / `tail` / `relay`, and the FILE-mode emit path
+> forces embeddings mode (`STAGE_EMIT=hidden`), so it cannot produce logits to sample.
+> The wider stage-runner documentation drift is tracked separately (issue #89).
 
 ## Verified (TinyLlama-1.1B Q4_K_M, CPU build, 2026-07-12)
 

@@ -9,6 +9,76 @@ It covers:
 4. **Two boxes over TCP**: Distributed execution across separate physical hosts over TCP sockets.
 5. **Acceptance measurement**: Explicit verification criteria, captured logs, and smoke testing for every phase.
 
+Multi-stage is for models that do not fit one box. **If the library fits one box, do
+not build a pipeline at all** — serve it in a single process (section 0).
+
+---
+
+## 0. Single-Process Serving: `llama-server --model-dir` (start here)
+
+A layer library is a whole model stored as one file per block. `llama-server` and
+`llama-cli` take `--model-dir DIR` as an alternative model source to `-m`: the parts
+are enumerated and assembled at load time via `llama_model_load_from_parts()`, in the
+serving process. **This is the recommended way to run a downloaded library.** Nothing
+else changes — same HTTP API, same flags, same completions as the monolithic GGUF.
+
+```bash
+# Pin GPUs by UUID, never by index
+export CUDA_VISIBLE_DEVICES=GPU-12345678-abcd-ef01-2345-6789abcdef00
+
+llama-server \
+  --model-dir /models/gemma4-12b-q4_0-layers \
+  -ngl 999 \
+  -cmoe \
+  -c 8192 \
+  -fa on \
+  --jinja \
+  --host 127.0.0.1 --port 8080
+```
+
+| flag | meaning |
+|------|---------|
+| `--model-dir DIR` | layer library directory; mutually exclusive with `-m` / `--model-url` / `--hf-repo` |
+| `--layers A,B` | optional ABSOLUTE block window `[A,B)`; **default is the whole model** |
+| `--stage-parts SPEC` | optional; `auto` (default) \| `none` \| comma list of `embd,output,nextn,other` |
+
+Everything else behaves exactly as with `-m`: `-ngl`, `-ot`, `--tensor-split`,
+`-fmoe`, `-cmoe` / expert overrides, context and sampling flags are untouched.
+
+#### What to Measure to Know It Worked
+1. The assembly line appears before the loader banner:
+   ```
+   model-dir: assembling window [0,48) from 51 part files in /models/... (embd=1 output=1 other=0)
+   llama_model_loader: assembled 51 parts: block_count=48 leading_dense_block_count=0 nextn_predict_layers=0 (...)
+   ```
+2. `llm_load_print_meta: n_layer` equals the library's `source.block_count`.
+3. The server reports `HTTP server listening` and `/v1/models` answers.
+4. The release smoke gate passes, throughput **and** coherence:
+   ```bash
+   ci/smoke-serve.sh http://127.0.0.1:8080 --min-tps 1.0
+   # -> {"ok": true, ..., "text": "<the generated completion>"}
+   ```
+   `ci/smoke_serve.py` screens the completion for degenerate output (symbol loops,
+   low distinct-word ratio, low alphanumeric share), so a server that loads but
+   decodes garbage fails the gate instead of passing on tok/s alone. To screen a
+   saved sample without a server: `ci/smoke-serve.sh --check-text sample.txt`.
+5. Equivalence against the monolithic GGUF: greedy completion
+   (`"temperature": 0, "top_k": 1, "seed": 1`) of a fixed prompt must be
+   token-identical across the two load paths, and `LLAMA_DUMP_TENSOR_HASH=1` must
+   produce identical sorted tensor-hash lists.
+
+> **Large CPU-overridden tensors.** With `-ot '...=CPU'` / `-cmoe`, an override used to
+> be placed in a PINNED host buffer whose single-allocation cap aborted the load for
+> very large tensors ("tensor ... is too large to fit in a ..._Host buffer"). The loader
+> now falls back to the plain CPU buffer for exactly that tensor and logs one line.
+> `LLAMA_NO_HOST_OVERRIDES=1` remains the explicit override for every tensor.
+
+> **There is no `llama-stage-runner --role gen`.** The runner's roles are
+> `server` / `head` / `tail` / `relay`; its FILE mode (`--prompt … --last`) forces
+> embeddings mode on the emit path and therefore cannot sample tokens. Any recipe that
+> claims otherwise is stale — use `llama-server --model-dir` for single-process
+> generation. The wider stage-runner documentation drift is tracked in issue #89.
+
 ---
 
 ## 1. Architecture & Pipeline Topology
