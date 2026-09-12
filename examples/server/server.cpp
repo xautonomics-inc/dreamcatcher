@@ -515,7 +515,8 @@ int main(int argc, char ** argv) {
     }
 
     if (params.model_alias == "unknown") {
-        params.model_alias = params.model;
+        // a layer library (--model-dir) is the model source when -m is absent
+        params.model_alias = params.model.empty() ? params.model_dir : params.model;
     }
 
     llama_backend_init();
