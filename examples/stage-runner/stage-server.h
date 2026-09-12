@@ -14,6 +14,7 @@
 #pragma once
 #include "httplib.h"
 #include "nlohmann/json.hpp"
+#include "gslot_client.h"
 #include <functional>
 #include <atomic>
 #include <memory>
@@ -280,7 +281,13 @@ static void run_server_pipelined(model_bundle & b, const std::string & connect_t
             std::vector<int32_t> sq(send_tok.size(), seq), ps(send_tok.size());
             for (size_t i = 0; i < send_tok.size(); ++i) ps[i] = send_base + (int) i;
             hidden_blob h;
+            while (!g_gslot.open(gslot::now_ms_monotonic())) {
+                if (stop) break;
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            }
+            if (stop) break;
             bool ok = run_tokens(b, send_tok, sq, ps, h) && send_hidden(fd, h);
+            g_gslot.handoff();
             if (!ok) {
                 std::lock_guard<std::mutex> lk(M);
                 if (stop) break;
@@ -471,9 +478,11 @@ static void run_server(model_bundle & b, const std::string & connect_to, int ret
             std::vector<int32_t> tk, sq, ps;
             for (size_t p = woff; p < wend; ++p) { tk.push_back(prompt[p]); sq.push_back(0); ps.push_back((int) p); }
             hidden_blob h;
+            while (!g_gslot.open(gslot::now_ms_monotonic())) { usleep(2000); }
             if (!run_tokens(b, tk, sq, ps, h)) { fprintf(stderr, "server: prefill run_tokens FAILED (wave %zu/%zu rows=%zu)\n", wi + 1, wsz.size(), tk.size()); ring_close(); return 0; }
             errno = 0;
             if (!send_hidden(fd, h))           { fprintf(stderr, "server: prefill send_hidden FAILED errno=%d (%s)\n", errno, strerror(errno)); ring_close(); return 0; }
+            g_gslot.handoff();
             errno = 0;
             if (!recv_mtp_ret(rfd, m))         { fprintf(stderr, "server: prefill recv_mtp_msg FAILED errno=%d (%s)\n", errno, strerror(errno)); ring_close(); return 0; }
             woff = wend;
@@ -491,12 +500,15 @@ static void run_server(model_bundle & b, const std::string & connect_to, int ret
             std::vector<int32_t> dt = m.issue, ds(m.issue.size(), 0), dp(m.issue.size());
             for (size_t i = 0; i < m.issue.size(); ++i) dp[i] = m.p_base + (int) i;
             hidden_blob hh;
+            while (!g_gslot.open(gslot::now_ms_monotonic())) { usleep(2000); }
             if (!run_tokens(b, dt, ds, dp, hh)) { fprintf(stderr, "server: decode run_tokens FAILED\n"); ring_close(); return n; }
             errno = 0;
             if (!send_hidden(fd, hh))           { fprintf(stderr, "server: decode send_hidden FAILED errno=%d (%s)\n", errno, strerror(errno)); ring_close(); return n; }
+            g_gslot.handoff();
             errno = 0;
             if (!recv_mtp_ret(rfd, m))          { fprintf(stderr, "server: decode recv_mtp_msg FAILED errno=%d (%s)\n", errno, strerror(errno)); ring_close(); return n; }
         }
+        g_gslot.yield();
         cached = prompt; cached.insert(cached.end(), generated.begin(), generated.end());   // KV now holds prompt+generated
         return n;
     };
