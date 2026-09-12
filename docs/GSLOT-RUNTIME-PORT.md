@@ -134,7 +134,7 @@ Acceptance gate:
 ### Platform & Topology
 - **Host**: build VM (AMD EPYC 7B12, 8 vCPUs, 32 GiB RAM)
 - **Model**: Gemma-4 12B Q4_0 (a Gemma-4 12B Q4_0 per-layer library, 48 layers)
-- **Branch**: `agent/emma/gslot-runtime` (commit `18b5d366`, based on `fork-base` `ea5bd7e7` with lanes 9 and 10)
+- **Branch**: the lane-11 port branch (based on the staging tip with lanes 9 and 10)
 - **Pipeline Shape**:
   - Head stage: layers `[0, 24)`, `STAGE_THREADS=4`, `STAGE_EMIT=hidden`, `STAGE_GSLOT_MODE=burst`
   - Tail stage: layers `[24, 48)`, `STAGE_THREADS=4`, `STAGE_PRINT=1`, `STAGE_GSLOT_MODE=burst`
