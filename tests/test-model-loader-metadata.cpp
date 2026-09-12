@@ -56,5 +56,69 @@ int main() {
     CHECK(rejected);
 
     gguf_free(meta);
+
+    // A per-layer array can be LONGER than block_count: DSV4 copies attention.compress_ratios
+    // out of the upstream config, which covers the blocks plus trailing companion slots. Its
+    // block prefix still has to follow the window, or every layer of a window that does not
+    // open at block 0 is built with another layer's compression class. hash_layer_count counts
+    // a LEADING RUN of blocks and has to be shifted onto the window for the same reason.
+    const std::vector<uint32_t> ratios     = { 0, 0, 4, 128, 4, 128, 0, 0 };  // 6 blocks + 2 extra
+    const std::vector<uint32_t> per_block_6 = { 9, 8, 7, 6, 5, 4 };           // plain per-block array
+    const std::vector<uint32_t> long_other  = { 1, 2, 3, 4, 5, 6, 7, 8 };     // long, not per-layer
+
+    struct window_case {
+        int32_t  start;
+        int32_t  count;
+        uint32_t ratio_first;
+        uint32_t ratio_last;
+        uint32_t hash_layers;
+    };
+    const window_case cases[] = {
+        { 0, 6, 0, 128, 3 },  // the whole model: nothing moves
+        { 2, 2, 4, 128, 1 },  // [2,4): one hash layer left (block 2), CSA then HCA
+        { 4, 2, 4, 128, 0 },  // [4,6): past the hash run entirely
+    };
+
+    for (const auto & c : cases) {
+        gguf_context * win = gguf_init_empty();
+        gguf_set_arr_data(win, "deepseek4.attention.compress_ratios", GGUF_TYPE_UINT32, ratios.data(), ratios.size());
+        gguf_set_arr_data(win, "test.per_block_6", GGUF_TYPE_UINT32, per_block_6.data(), per_block_6.size());
+        gguf_set_arr_data(win, "test.long_not_per_layer", GGUF_TYPE_UINT32, long_other.data(), long_other.size());
+        gguf_set_val_u32(win, "deepseek4.hash_layer_count", 3);
+
+        llama_model_loader_slice_block_arrays(win, 6, c.start, c.count);
+
+        int wid = gguf_find_key(win, "deepseek4.attention.compress_ratios");
+        CHECK(gguf_get_arr_n(win, wid) == c.count);
+        const auto * win_ratios = static_cast<const uint32_t *>(gguf_get_arr_data(win, wid));
+        CHECK(win_ratios[0] == c.ratio_first);
+        CHECK(win_ratios[c.count - 1] == c.ratio_last);
+
+        CHECK(gguf_get_val_u32(win, gguf_find_key(win, "deepseek4.hash_layer_count")) == c.hash_layers);
+
+        // a plain per-block array still follows the window; a long array that is not a known
+        // per-layer key is NOT sliced - only the allowlisted ones may exceed block_count
+        wid = gguf_find_key(win, "test.per_block_6");
+        CHECK(gguf_get_arr_n(win, wid) == c.count);
+        CHECK(static_cast<const uint32_t *>(gguf_get_arr_data(win, wid))[0] == per_block_6[(size_t) c.start]);
+
+        wid = gguf_find_key(win, "test.long_not_per_layer");
+        CHECK(gguf_get_arr_n(win, wid) == (int) long_other.size());
+
+        gguf_free(win);
+    }
+
+    // a per-layer key SHORTER than block_count is malformed metadata, not a window: left alone
+    gguf_context * odd = gguf_init_empty();
+    const std::vector<uint32_t> short_ratios = { 1, 2 };
+    gguf_set_arr_data(odd, "deepseek4.attention.compress_ratios", GGUF_TYPE_UINT32, short_ratios.data(), short_ratios.size());
+    llama_model_loader_slice_block_arrays(odd, 6, 2, 2);
+    const int oid = gguf_find_key(odd, "deepseek4.attention.compress_ratios");
+    CHECK(gguf_get_arr_n(odd, oid) == 2);
+    const auto * kept = static_cast<const uint32_t *>(gguf_get_arr_data(odd, oid));
+    CHECK(kept[0] == 1 && kept[1] == 2);
+    gguf_free(odd);
+
+    printf("model loader metadata: window slicing, long per-layer arrays and leading-run counts pass\n");
     return 0;
 }
