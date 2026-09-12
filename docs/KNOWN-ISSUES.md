@@ -150,3 +150,41 @@ that would show the flip is not specific to the GPU.
 attention returns NaN for `q8_0` / `q4_0` K/V when there is no mask or when
 `max_bias > 0`; the iqk kernels' mask contract is 0 / -inf only (see the harness notes
 in `docs/VULKAN-BACKEND.md`). Neither combination is emitted by a graph.
+
+## `meta#88` — qwen4exp on Vulkan (any vendor): degenerate output on UD-IQ4_XS, flash-attention-independent
+
+**What was reported.** On the published tree (`20c308ca`), RX 7900 XT x4 (RADV):
+Qwen3.8-Flash-Next UD-IQ4_XS via Vulkan full offload emits `**:** **:** ;**;**…`;
+`-ngl 12` emits empty/immediate-EOG. Both with flash attention on and off. On the
+same host and build, CPU (`-ngl 0`) is fully coherent (4.3 t/s), and an out-of-fork
+HIP build on the same card is coherent (20.1 t/s) — evidence that the quant and the
+weights are fine and the fault is in the fork's Vulkan compute path for this arch.
+The library itself is exact: 1224/1224 tensor hashes match the monolith it was
+sliced from and the full 48-block hidden state is byte-identical. The same build
+reproduces the **identical** degenerate output on NVIDIA Vulkan (4x RTX 5060 Ti,
+coopmat1 path) while the CUDA path on the same box is coherent (23.2 tok/s), so
+this is not an AMD-specific fault. Raw logs are attached to `meta#88`.
+
+**How the docs came to claim otherwise.** The "qwen4exp: Vulkan verified — RDNA3"
+row (README, `docs/HF-MODEL-CARDS.md`) was extrapolated from the lane-9 RDNA3
+evidence, which covered flash-attention shapes emitted by Gemma-4 12B (830 cases)
+and a Qwen3 8B run — qwen4exp itself was never token-run on RDNA3 (or RDNA4) before
+this matrix. Not a regression: an unsupported generalization, now falsified by the
+published-tree check. All per-arch backend rows now state the model + quant + host
+actually token-run on the published tree.
+
+**What it is.** Under triage, and broader than the title suggests. Forcing all 24
+BF16 `indexer.k_proj` tensors to CPU on the NVIDIA run changes nothing — the BF16
+placement hypothesis is refuted. Flash attention on and off both reproduce, so the
+meta#85 reduction path is not the culprit either. The identical output across
+vendors points at a qwen4exp-specific fault in the Vulkan backend itself (op
+coverage or graph construction for the SSM/gated-delta path), not a device quirk
+in either driver. Discriminators still worth running on an RDNA3 host: disable
+integer-dot product; force SSM tensors to CPU via `-ot`; single-GPU `--device` to
+exclude the cross-card tensor-split mapping (device order differs from HIP order);
+op-level localization against the CPU reference with `GGML_VULKAN_CHECK_RESULTS`.
+
+**Workaround.** Run this model where it is coherent on the published tree — CUDA
+(monolith or ring) or CPU; the HIP result above is an out-of-fork data point, not
+a supported backend. **Status.** Open. Related: `meta#85` (different path, same
+device class).
