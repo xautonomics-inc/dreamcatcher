@@ -344,6 +344,9 @@ struct gpt_params {
     std::string model                = ""; // model path
     std::string model_alias          = "unknown"; // model alias
     std::string model_url            = ""; // model url to download
+    std::string model_dir            = ""; // per-layer model library directory (alternative to -m)
+    std::string model_dir_layers     = ""; // --layers A,B : absolute window into the library (default: whole model)
+    std::string model_dir_parts      = ""; // --stage-parts: auto|none|comma list of embd,output,nextn,other
     std::string hf_token             = ""; // HF token
     std::string hf_repo              = ""; // HF repo
     std::string hf_file              = ""; // HF file
