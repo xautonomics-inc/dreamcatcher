@@ -8702,8 +8702,32 @@ struct llama_context * llama_init_from_model(
     cparams.mla_attn         = params.mla_attn;
     cparams.attn_max_batch   = params.attn_max_batch;
     cparams.fused_moe_up_gate= params.fused_moe_up_gate;
+#ifdef GGML_USE_VULKAN
+    // ik-vulkan-refresh: same policy as fused_up_gate below — the Vulkan
+    // MOE_FUSED_UP_GATE kernel works (Mellum2 MXFP4: 121.9 t/s vs 0.93 t/s
+    // before) but the decomposed graph is still ~40% faster at decode
+    // (206.8 t/s). Default to the split graph; GGML_VK_ALLOW_FMOE=1 opts in.
+    if (cparams.fused_moe_up_gate && model->n_gpu_layers > 0 && getenv("GGML_VK_ALLOW_FMOE") == nullptr) {
+        LLAMA_LOG_WARN("%s: Vulkan backend: using split MoE up/gate graph instead of fused_moe_up_gate (faster decode; GGML_VK_ALLOW_FMOE=1 opts into the fused kernel)\n", __func__);
+        cparams.fused_moe_up_gate = false;
+    }
+#endif
     cparams.grouped_expert_routing = params.grouped_expert_routing;
     cparams.fused_up_gate    = params.fused_up_gate;
+#ifdef GGML_USE_VULKAN
+    // ik-vulkan-refresh: the Vulkan backend now has a FUSED_UP_GATE implementation
+    // (two matmuls into a prealloc temp + GLU split). It is correct but measured
+    // ~11-17% slower at decode than the split-graph path (up/gate matmuls +
+    // FUSED_MUL_UNARY) because the intermediate handoff needs an in-op barrier,
+    // while prefill is identical. Default to the faster split graph on dense
+    // models; GGML_VK_ALLOW_FUG=1 opts into the fused kernel.
+    // (-fmoe / MOE_FUSED_UP_GATE is an explicit user flag and is honored as given;
+    // it now runs on the GPU via the same kernel instead of collapsing to CPU.)
+    if (cparams.fused_up_gate && model->n_gpu_layers > 0 && getenv("GGML_VK_ALLOW_FUG") == nullptr) {
+        LLAMA_LOG_WARN("%s: Vulkan backend: using split up/gate graph instead of fused_up_gate (faster decode; GGML_VK_ALLOW_FUG=1 opts into the fused kernel)\n", __func__);
+        cparams.fused_up_gate = false;
+    }
+#endif
     cparams.fused_mmad       = params.fused_mmad;
     cparams.rope_cache       = params.rope_cache;
     cparams.graph_reuse      = params.graph_reuse;

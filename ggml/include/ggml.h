@@ -425,6 +425,7 @@ extern "C" {
         GGML_TYPE_Q4_0_8_8  = 33,
         GGML_TYPE_I2_S      = 36,  // So we are able to consume MS BitNet I2_S quants
         GGML_TYPE_MXFP4     = 39,  // so we are compatible with mainline
+        GGML_TYPE_NVFP4     = 40,  // ik-vulkan-refresh: mainline id 40 (4 blocks, E4M3 scale); no CPU kernels in ik yet
         GGML_TYPE_Q1_0_G128 = 41,  // Bonsai 1-bit quants
         //
         //
@@ -715,6 +716,20 @@ extern "C" {
         GGML_OP_LATENT_ATTN,
         GGML_OP_DS4_COMP,
 
+        // ik-vulkan-refresh: ops from 2026 mainline ggml, needed by the grafted
+        // Vulkan backend (never emitted by ik graph builders yet)
+        GGML_OP_SIN,
+        GGML_OP_COS,
+        GGML_OP_ROLL,
+        GGML_OP_TOP_K,
+        GGML_OP_COUNT_EQUAL,
+        GGML_OP_IM2COL_3D,
+        GGML_OP_OPT_STEP_ADAMW,
+        GGML_OP_OPT_STEP_SGD,
+        GGML_OP_RWKV_WKV6,
+        GGML_OP_RWKV_WKV7,
+        GGML_OP_GATED_DELTA_NET,
+
         GGML_OP_COUNT,
     };
 
@@ -738,6 +753,12 @@ extern "C" {
         GGML_UNARY_OP_EXP,
         GGML_UNARY_OP_SOFTPLUS,
         GGML_UNARY_OP_SQRT_SOFTPLUS,
+        // ik-vulkan-refresh: from 2026 mainline (not emitted by ik builders yet)
+        GGML_UNARY_OP_CEIL,
+        GGML_UNARY_OP_FLOOR,
+        GGML_UNARY_OP_ROUND,
+        GGML_UNARY_OP_TRUNC,
+        GGML_UNARY_OP_XIELU,
 
         GGML_UNARY_OP_COUNT,
     };

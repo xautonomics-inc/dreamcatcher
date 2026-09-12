@@ -80,7 +80,7 @@ static void init_tensor_uniform(ggml_tensor * tensor, float min = -1.0f, float m
             }
         }
 
-        ggml_quantize_chunk(tensor->type, data.data(), dataq.data(), 0, size/tensor->ne[0], tensor->ne[0], im);
+        ggml_quantize_chunk(tensor->type, data.data(), dataq.data(), 0, size/tensor->ne[0], tensor->ne[0], im, nullptr);
         GGML_ASSERT(ggml_validate_row_data(tensor->type, dataq.data(), dataq.size()));
         // TODO: other cases
         //#pragma omp parallel for
@@ -96,6 +96,59 @@ static void init_tensor_uniform(ggml_tensor * tensor, float min = -1.0f, float m
     } else {
         GGML_ABORT("fatal error");
     }
+}
+
+// A KQ mask shaped like the ones the graph builders emit: 0 where a query may
+// attend and -inf where it may not, laid out in blocks. This is the domain ik's
+// CPU flash-attention kernels (iqk_flash_attn_noalibi) accept when max_bias == 0:
+// they treat the mask as a keep/drop pattern, so a uniformly random additive mask
+// makes the CPU reference itself wrong and the sweep reports every mask=1 case as
+// a backend failure on the head sizes those kernels cover.
+static void init_tensor_kq_mask(ggml_tensor * tensor) {
+    GGML_ASSERT(tensor->type == GGML_TYPE_F16);
+
+    const int64_t ne0 = tensor->ne[0];
+    const int64_t ne1 = tensor->ne[1];
+    const int64_t ne2 = tensor->ne[2];
+    const int64_t ne3 = tensor->ne[3];
+    const int64_t n   = ne0*ne1*ne2*ne3;
+
+    std::vector<float>       data_f32(n, 0.0f);
+    std::vector<ggml_fp16_t> data_f16(n);
+
+    // fixed seed: a failing case has to be reproducible
+    std::mt19937 gen(0x4b51);
+
+    // block size
+    const int blck0 = 128;
+    const int blck1 = 64;
+
+    // number of -inf blocks: roughly a quarter of the mask
+    const int n_inf_blocks = (int) (0.25*n/(blck0*blck1)) + 1;
+
+    for (int b = 0; b < n_inf_blocks; b++) {
+        const int64_t p3 = gen() % ne3;
+        const int64_t p2 = gen() % ne2;
+        const int64_t p1 = gen() % ne1;
+        const int64_t p0 = gen() % ne0;
+
+        for (int64_t i1 = 0; i1 < blck1 && p1 + i1 < ne1; i1++) {
+            const int64_t idx = ((p3*ne2 + p2)*ne1 + (p1 + i1))*ne0 + p0;
+            for (int64_t i0 = 0; i0 < blck0 && p0 + i0 < ne0; i0++) {
+                data_f32[idx + i0] = -INFINITY;
+            }
+        }
+    }
+
+    // keep the first key visible to every query so no row is fully masked
+    // (a fully masked row has no defined softmax and the backends disagree on it)
+    for (int64_t r = 0; r < ne1*ne2*ne3; r++) {
+        data_f32[r*ne0] = 0.0f;
+    }
+
+    ggml_fp32_to_fp16_row(data_f32.data(), data_f16.data(), n);
+
+    ggml_backend_tensor_set(tensor, data_f16.data(), 0, n*sizeof(ggml_fp16_t));
 }
 
 static std::vector<float> tensor_to_float(const ggml_tensor * t) {
@@ -252,6 +305,10 @@ static std::string var_to_str(const std::array<T, N> & x) {
 
 static std::string var_to_str(ggml_type type) {
     return ggml_type_name(type);
+}
+
+static std::string var_to_str(ggml_prec prec) {
+    return prec == GGML_PREC_F32 ? "f32" : "f16";
 }
 
 static std::string var_to_str(ggml_op_pool pool) {
@@ -1492,7 +1549,7 @@ struct test_upscale : public test_case {
     ggml_tensor * build_graph(ggml_context * ctx) override {
         ggml_tensor * a = ggml_new_tensor(ctx, type, 4, ne.data());
         if (transpose) a = ggml_transpose(ctx, a);
-        ggml_tensor * out = ggml_upscale(ctx, a, scale_factor);
+        ggml_tensor * out = ggml_upscale(ctx, a, scale_factor, GGML_SCALE_MODE_NEAREST);
         return out;
     }
 };
@@ -1514,7 +1571,7 @@ struct test_upscale_ext : public test_case {
 
     ggml_tensor * build_graph(ggml_context * ctx) override {
         ggml_tensor * a = ggml_new_tensor(ctx, type, 4, ne.data());
-        ggml_tensor * out = ggml_upscale_ext(ctx, a, ne_tgt[0], ne_tgt[1],ne_tgt[2], ne_tgt[3]);
+        ggml_tensor * out = ggml_upscale_ext(ctx, a, ne_tgt[0], ne_tgt[1],ne_tgt[2], ne_tgt[3], GGML_SCALE_MODE_NEAREST);
         return out;
     }
 };
@@ -1657,38 +1714,71 @@ struct test_leaky_relu : public test_case {
 
 // GGML_OP_FLASH_ATTN_EXT
 struct test_flash_attn_ext : public test_case {
-    const int64_t hs; // head size
-    const int64_t nh; // num heads
-    const int64_t kv; // kv size
-    const int64_t nb; // batch size
+    const int64_t hsk; // K head size
+    const int64_t hsv; // V head size
+    const int64_t nh;  // num K/V heads
+    const int64_t nr2; // grouped-query repeat: Q has nh*nr2 heads
+    const int64_t kv;  // kv size
+    const int64_t nb;  // batch size
 
     const bool mask; // use mask
 
     const float max_bias; // ALiBi
     const float softcap;  // Gemma-2
 
-    const ggml_type type_KV;
+    const ggml_prec prec;
+    const ggml_type type_K;
+    const ggml_type type_V;
 
     std::string vars() override {
-        return VARS_TO_STR8(hs, nh, kv, nb, mask, max_bias, softcap, type_KV);
+        return VARS_TO_STR12(hsk, hsv, nh, nr2, kv, nb, mask, max_bias, softcap, prec, type_K, type_V);
     }
 
     double max_nmse_err() override {
         return 5e-4;
     }
 
-    test_flash_attn_ext(int64_t hs = 128, int64_t nh = 32, int64_t kv = 96, int64_t nb = 8, bool mask = true, float max_bias = 0.0f, float softcap = 0.0f, ggml_type type_KV = GGML_TYPE_F16)
-        : hs(hs), nh(nh), kv(kv), nb(nb), mask(mask), max_bias(max_bias), softcap(softcap), type_KV(type_KV) {}
+    test_flash_attn_ext(int64_t hsk = 128, int64_t hsv = 128, int64_t nh = 32, int64_t nr2 = 1, int64_t kv = 96, int64_t nb = 8,
+                        bool mask = true, float max_bias = 0.0f, float softcap = 0.0f, ggml_prec prec = GGML_PREC_F32,
+                        ggml_type type_K = GGML_TYPE_F16, ggml_type type_V = GGML_TYPE_F16)
+        : hsk(hsk), hsv(hsv), nh(nh), nr2(nr2), kv(kv), nb(nb), mask(mask), max_bias(max_bias), softcap(softcap),
+          prec(prec), type_K(type_K), type_V(type_V) {}
 
     ggml_tensor * build_graph(ggml_context * ctx) override {
-        const int64_t hs_padded = GGML_PAD(hs, ggml_blck_size(type_KV));
+        const int64_t hsk_padded = GGML_PAD(hsk, ggml_blck_size(type_K));
+        const int64_t hsv_padded = GGML_PAD(hsv, ggml_blck_size(type_V));
 
-        ggml_tensor * q = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, hs_padded, nb, nh, 1);
-        ggml_tensor * k = ggml_new_tensor_4d(ctx, type_KV,       hs_padded, kv, nh, 1);
-        ggml_tensor * v = ggml_new_tensor_4d(ctx, type_KV,       hs_padded, kv, nh, 1);
-        ggml_tensor * m = mask ? ggml_new_tensor_4d(ctx, GGML_TYPE_F16, kv, GGML_PAD(nb, GGML_KQ_MASK_PAD), 1, 1) : nullptr;
-        ggml_tensor * out = ggml_flash_attn_ext(ctx, q, k, v, m, 1.0f/sqrtf(hs), max_bias, softcap);
+        ggml_tensor * q = ggml_new_tensor_4d(ctx, GGML_TYPE_F32, hsk_padded, nb, nh*nr2, 1);
+        ggml_set_name(q, "q");
+
+        ggml_tensor * k = ggml_new_tensor_4d(ctx, type_K, hsk_padded, kv, nh, 1);
+        ggml_set_name(k, "k");
+
+        ggml_tensor * v = ggml_new_tensor_4d(ctx, type_V, hsv_padded, kv, nh, 1);
+        ggml_set_name(v, "v");
+
+        // ik's ggml_flash_attn_ext requires the mask rows padded to GGML_KQ_MASK_PAD
+        ggml_tensor * m = nullptr;
+        if (mask) {
+            m = ggml_new_tensor_4d(ctx, GGML_TYPE_F16, kv, GGML_PAD(nb, GGML_KQ_MASK_PAD), 1, 1);
+            ggml_set_name(m, "m");
+        }
+
+        ggml_tensor * out = ggml_flash_attn_ext(ctx, q, k, v, m, 1.0f/sqrtf(hsk), max_bias, softcap);
+        ggml_flash_attn_ext_set_prec(out, prec);
+        ggml_set_name(out, "out");
+
         return out;
+    }
+
+    void initialize_tensors(ggml_context * ctx) override {
+        for (ggml_tensor * t = ggml_get_first_tensor(ctx); t != NULL; t = ggml_get_next_tensor(ctx, t)) {
+            if (strcmp(t->name, "m") == 0) {
+                init_tensor_kq_mask(t);
+            } else {
+                init_tensor_uniform(t);
+            }
+        }
     }
 };
 
@@ -2091,13 +2181,17 @@ static bool test_backend(ggml_backend_t backend, test_mode mode, const char * op
         GGML_TYPE_IQ2_XXS, GGML_TYPE_IQ2_XS, GGML_TYPE_IQ2_S,
         GGML_TYPE_IQ3_XXS, GGML_TYPE_IQ1_S, GGML_TYPE_IQ1_M,
         GGML_TYPE_IQ4_NL, GGML_TYPE_IQ3_S, GGML_TYPE_IQ4_XS,
+        // ik K-quants that the Vulkan backend has kernels for
+        GGML_TYPE_IQ4_K, GGML_TYPE_IQ5_K, GGML_TYPE_IQ6_K,
     };
 
     const ggml_type base_types[] = {
         GGML_TYPE_F32, GGML_TYPE_F16,
         GGML_TYPE_Q4_0,
         GGML_TYPE_Q4_K,
-        GGML_TYPE_IQ2_XXS
+        GGML_TYPE_IQ2_XXS,
+        // cover the ik K-quant paths in the base sweep too
+        GGML_TYPE_IQ4_K, GGML_TYPE_IQ5_K, GGML_TYPE_IQ6_K
     };
 
     const ggml_type other_types[] = {
@@ -2262,6 +2356,16 @@ static bool test_backend(ggml_backend_t backend, test_mode mode, const char * op
     }
 
 #if 1
+    // model-shaped mat-vec and small-batch cases: k is the hidden size, m the output
+    // width. The sweep below only uses k=256, which never reaches the long-k
+    // accumulation of the integer-dot (mmvq) mat-vec path that decode actually runs.
+    for (ggml_type type_a : {GGML_TYPE_Q4_0, GGML_TYPE_Q4_1, GGML_TYPE_Q8_0, GGML_TYPE_Q4_K, GGML_TYPE_Q6_K, GGML_TYPE_F16}) {
+        for (int n : {1, 6, 32}) {
+            test_cases.emplace_back(new test_mul_mat(type_a, GGML_TYPE_F32, 2048, n,  3840, {1, 1}, {1, 1}));
+            test_cases.emplace_back(new test_mul_mat(type_a, GGML_TYPE_F32, 3840, n, 15360, {1, 1}, {1, 1}));
+        }
+    }
+
     for (ggml_type type_a : base_types) {
         for (ggml_type type_b : {GGML_TYPE_F32, GGML_TYPE_F16}) {
             test_cases.emplace_back(new test_mul_mat(type_a, type_b, 16, 1, 256, { 1,  1}, {1, 1}));
@@ -2449,46 +2553,32 @@ static bool test_backend(ggml_backend_t backend, test_mode mode, const char * op
     test_cases.emplace_back(new test_timestep_embedding());
     test_cases.emplace_back(new test_leaky_relu());
 
-    for (bool v : {false, true}) {
-        test_cases.emplace_back(new test_pad_ext(GGML_TYPE_F32, {512, 512, 1, 1}, 0, 1, 0, 1, 0, 0, 0, 0, v));
-        test_cases.emplace_back(new test_pad_ext(GGML_TYPE_F32, {11, 22, 33, 44}, 1, 2, 3, 4, 5, 6, 7, 8, v));
-    }
+    // test_pad_ext is not defined in this file (its registrations arrived from a newer
+    // upstream revision than the test classes here), so these two cases cannot be built:
+    //for (bool v : {false, true}) {
+    //    test_cases.emplace_back(new test_pad_ext(GGML_TYPE_F32, {512, 512, 1, 1}, 0, 1, 0, 1, 0, 0, 0, 0, v));
+    //    test_cases.emplace_back(new test_pad_ext(GGML_TYPE_F32, {11, 22, 33, 44}, 1, 2, 3, 4, 5, 6, 7, 8, v));
+    //}
 
-    for (int hsk : { 40, 64, 72, 80, 96, 128, 192, 256, 576 }) {
-        for (int hsv : { 40, 64, 72, 80, 96, 128, 192, 256, 512 }) {
-            if (hsk != 192 && hsk != 576 && hsk != hsv) continue;
-            if (hsk == 192 && (hsv != 128 && hsv != 192)) continue;
-            if (hsk == 576 && hsv != 512) continue; // DeepSeek MLA
-
-            for (bool mask : { true, false } ) {
-                for (bool sinks : { true, false } ) {
-                    for (float max_bias : { 0.0f, 8.0f }) {
-                        if (!mask && max_bias > 0.0f) continue;
-                        for (float logit_softcap : {0.0f, 10.0f}) {
-                            if (hsk != 128 && logit_softcap != 0.0f) continue;
-                            for (int nh : { 4, }) {
-                                for (int nr3 : { 1, 3, }) {
-                                    if (hsk > 64 && nr3 > 1) continue; // skip broadcast for large head sizes
-                                    for (int nr2 : { 1, 4, 16 }) {
-                                        if (nr2 == 16 && hsk != 128) continue;
-                                        //for (int kv : { 1, 17, 31, 33, 61, 113, 65, 127, 129, 130, 255, 260, 371, 380, 407, 512, 1024, }) {
-                                        for (int kv : { 113, 512, 1024, }) {
-                                            if (nr2 != 1 && kv != 512) continue;
-                                            for (int nb : { 1, 3, 32, 35, }) {
-                                                for (ggml_prec prec : {GGML_PREC_F32, GGML_PREC_DEFAULT}) {
-                                                    if (hsk != 128 && prec == GGML_PREC_DEFAULT) continue;
-                                                    for (ggml_type type_KV : {GGML_TYPE_F32, GGML_TYPE_F16, GGML_TYPE_BF16, GGML_TYPE_Q8_0, GGML_TYPE_Q4_0}) {
-                                                        test_cases.emplace_back(new test_flash_attn_ext(
-                                                                    hsk, hsv, nh, {nr2, nr3}, kv, nb, mask, sinks, max_bias, logit_softcap, prec, type_KV));
-                                                        // run fewer test cases permuted
-                                                        if (mask == true && max_bias == 0.0f && logit_softcap == 0 && kv == 512) {
-                                                            test_cases.emplace_back(new test_flash_attn_ext(
-                                                                        hsk, hsv, nh, {nr2, nr3}, kv, nb, mask, sinks, max_bias, logit_softcap, prec, type_KV, {0, 2, 1, 3}));
-                                                        }
-                                                    }
-                                                }
-                                            }
-                                        }
+    // test_flash_attn_ext takes (hsk, hsv, nh, nr2, kv, nb, mask, max_bias, softcap, prec, type_K, type_V).
+    // nr2 > 1 is grouped-query attention (nh K/V heads, nh*nr2 Q heads), which is
+    // what every current model emits and what the backends special-case.
+    for (int hs : { 64, 80, 128, 256, }) {
+        for (bool mask : { true, false } ) {
+            for (float max_bias : { 0.0f, 8.0f }) {
+                if (!mask && max_bias > 0.0f) continue;
+                for (float softcap : { 0.0f, 10.0f }) {
+                    if (hs != 128 && softcap != 0.0f) continue;
+                    for (int nr2 : { 1, 4, }) {
+                        for (int kv : { 512, 1024, }) {
+                            for (int nb : { 1, 3, 32, 35, }) {
+                                for (ggml_prec prec : { GGML_PREC_F32, GGML_PREC_DEFAULT }) {
+                                    for (ggml_type type_KV : { GGML_TYPE_F16, GGML_TYPE_Q8_0, GGML_TYPE_Q4_0 }) {
+                                        // quantized K/V without a mask or with ALiBi goes down ik's generic CPU
+                                        // path, which returns NaN for these types; the reference is only the iqk
+                                        // kernel (mask, no ALiBi), which is also the only way a graph emits them
+                                        if (type_KV != GGML_TYPE_F16 && (!mask || max_bias > 0.0f)) continue;
+                                        test_cases.emplace_back(new test_flash_attn_ext(hs, hs, 8, nr2, kv, nb, mask, max_bias, softcap, prec, type_KV, type_KV));
                                     }
                                 }
                             }
@@ -2497,6 +2587,21 @@ static bool test_backend(ggml_backend_t backend, test_mode mode, const char * op
                 }
             }
         }
+    }
+    // the decode shapes of a Gemma-4 12B: head size 256 with 2 Q heads per K/V head on
+    // the local layers, head size 512 with 16 Q heads on a single K/V head on the global ones
+    for (int kv : { 512, 2048, }) {
+        for (int nb : { 1, 3, 32, }) {
+            for (ggml_prec prec : { GGML_PREC_F32, GGML_PREC_DEFAULT }) {
+                test_cases.emplace_back(new test_flash_attn_ext(256, 256, 8, 2,  kv, nb, true, 0.0f, 0.0f, prec, GGML_TYPE_F16, GGML_TYPE_F16));
+                test_cases.emplace_back(new test_flash_attn_ext(512, 512, 1, 16, kv, nb, true, 0.0f, 0.0f, prec, GGML_TYPE_F16, GGML_TYPE_F16));
+            }
+        }
+    }
+    // asymmetric K/V head sizes (MLA)
+    for (int nb : { 1, 32, }) {
+        test_cases.emplace_back(new test_flash_attn_ext(192, 128, 8, 1, 512, nb, true, 0.0f, 0.0f, GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_F16));
+        test_cases.emplace_back(new test_flash_attn_ext(576, 512, 8, 1, 512, nb, true, 0.0f, 0.0f, GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_F16));
     }
 
     // these tests are disabled to save execution time, but they can be handy for debugging

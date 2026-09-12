@@ -1,0 +1,41 @@
+#version 450
+
+#include "dequant_head.glsl"
+
+layout(local_size_x = 256, local_size_y = 1, local_size_z = 1) in;
+
+layout (binding = 0) readonly buffer A {A_TYPE data_a[];};
+layout (binding = 1) writeonly buffer D {D_TYPE data_b[];};
+
+void main() {
+    // Each thread handles one 16-element sub-group of a 256-element block
+    const uint i = gl_WorkGroupID.x * 256 + gl_LocalInvocationID.x;
+    const uint ib = i / 16;
+
+#ifdef NEEDS_INIT_IQ_SHMEM
+    init_iq_shmem(gl_WorkGroupSize);
+#endif
+
+    if (ib >= p.nel / 256) {
+        return;
+    }
+
+    const uint g = i % 16; // 16-element group within the block
+
+    const uint ib64 = g / 4;
+    const uint sub  = g & 3;
+
+    const float d = float(data_a[ib].d);
+    const uint shq = data_a[ib].scales_h[ib64];
+    const uint slq = data_a[ib].scales_l[2*ib64 + sub/2];
+    const uint lq  = (sub & 1) == 0 ? (slq & 0xF) : (slq >> 4);
+    const float dl = d * float(int(lq | (((shq >> (2*sub)) & 3) << 4)) - 32);
+    const uint tab = 32 * ((uint(data_a[ib].extra) >> (4*ib64 + sub)) & 1);
+
+    const uint b_idx = 256 * ib + 64 * ib64 + 16 * sub;
+    [[unroll]] for (uint l = 0; l < 16; ++l) {
+        const uint qs = (data_a[ib].qs[32*ib64 + 16*(sub & 1) + l] >> (4*(sub/2))) & 0xF;
+        const uint qh = (data_a[ib].qh[16*(sub & 1) + l] >> (2*ib64 + sub/2)) & 1;
+        data_b[b_idx + l] = D_TYPE(dl * kvalues_iq5k[tab + (qs | (qh << 4))]);
+    }
+}
