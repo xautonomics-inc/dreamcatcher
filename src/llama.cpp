@@ -6286,6 +6286,19 @@ static void llama_set_inputs(llama_context & lctx, const llama_batch & batch) {
         const llama_token img_tok = hp.ple_image_token_id != 0
             ? (llama_token) hp.ple_image_token_id
             : eos;
+        if (batch.token == nullptr) {
+            // A pipeline stage is handed hidden states, so there are no ids to hash and every
+            // n-gram row collapses to the placeholder. The window still computes, but it is not
+            // the model any more - warn once rather than drift silently. [meta#91]
+            static bool warned = false;
+            if (!warned) {
+                warned = true;
+                LLAMA_LOG_WARN("%s: this window owns a per-layer-embedding (PLE) block but the batch "
+                               "carries embeddings, not token ids: the n-gram rows fall back to the "
+                               "placeholder token and the output will NOT match the monolithic model\n",
+                               __func__);
+            }
+        }
         auto tok_of = [&](int32_t k) -> llama_token {
             return batch.token ? batch.token[k] : img_tok;
         };

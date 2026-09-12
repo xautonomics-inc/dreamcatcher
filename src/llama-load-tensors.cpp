@@ -1809,6 +1809,16 @@ bool create_tensors_helper::create_qwen4exp_tensors(const LLM_TN & tn) {
         }
         model.tok_embd_per_layer = create_tensor(ctx_input, tn(LLM_TENSOR_PER_LAYER_TOKEN_EMBD, "weight"),
                 {hparams.ple_head_dim, ple_rows});
+        if (hparams.il_offset > 0) {
+            // The n-gram rows are hashed from the batch's TOKEN IDS. A pipeline stage that is
+            // handed hidden states has none and falls back to the placeholder token, which is
+            // wrong but silent. Keep the table (this window really does need it) and say so.
+            LLAMA_LOG_WARN("%s: qwen4exp: this window starts at source block %u and owns a PLE block. "
+                           "The n-gram rows need the batch's token ids; a stage fed hidden states has "
+                           "none and would fall back to the placeholder token. Keep the PLE block(s) in "
+                           "the stage that owns source block 0, or hand this stage the token ids.\n",
+                           __func__, hparams.il_offset);
+        }
     } else {
         // A layer-library window carries the whole model's non-block parts, so the PLE n-gram
         // table can be PRESENT in the files while no layer in THIS window uses it. Count it as
@@ -1818,6 +1828,13 @@ bool create_tensors_helper::create_qwen4exp_tensors(const LLM_TN & tn) {
         // table (tens of GiB on a large vocabulary) out of the window's memory.
         const std::string ple_name = tn(LLM_TENSOR_PER_LAYER_TOKEN_EMBD, "weight");
         if (const auto * ple_w = ml.get_weight(ple_name.c_str())) {
+            // Say it out loud: on its own the loader only reports "skipped N unused tensors",
+            // which reads like a window silently losing a weight it needed. It did not - no
+            // block in THIS window is a PLE block, so the table has no consumer here. [meta#91]
+            LLAMA_LOG_INFO("%s: qwen4exp: source blocks [%u,%u) contain no PLE block, so the %.1f MiB "
+                           "n-gram table has no consumer in this window and is not loaded\n",
+                           __func__, hparams.il_offset, hparams.il_offset + hparams.n_layer,
+                           ggml_nbytes(ple_w->tensor)/1024.0/1024.0);
             create_tensor(ctx_input, ple_name, { ple_w->tensor->ne[0], ple_w->tensor->ne[1] },
                     llama_model_loader::TENSOR_SKIP);
         }
@@ -2582,9 +2599,25 @@ bool create_tensors_helper::create_gemma4_tensors(const LLM_TN & tn) {
     model.tok_embd = create_tensor(ctx_input, tn(LLM_TENSOR_TOKEN_EMBD, "weight"), {n_embd, n_vocab}, 0);
 
     if (n_embd_per_layer > 0) {
-        model.tok_embd_per_layer   = create_tensor(ctx_input, tn(LLM_TENSOR_PER_LAYER_TOKEN_EMBD, "weight"), {n_embd_per_layer * n_layer, n_vocab}, 0);
-        model.per_layer_model_proj = create_tensor(ctx_output, tn(LLM_TENSOR_PER_LAYER_MODEL_PROJ, "weight"), {n_embd, n_embd_per_layer * n_layer}, 0);
+        // The per-layer embedding table and its projection are stored WHOLE: one slice per
+        // SOURCE block, not per window block. Sizing them with the window's n_layer made a
+        // layer-library window refuse to load (shape mismatch) and, where it did load, index
+        // block il of the window into slice il of the source model. Keep the source shape and
+        // let the graph cut this window's slice out of it. [meta#91]
+        const uint32_t n_layer_src = hparams.n_layer_source();
+        model.tok_embd_per_layer   = create_tensor(ctx_input, tn(LLM_TENSOR_PER_LAYER_TOKEN_EMBD, "weight"), {n_embd_per_layer * n_layer_src, n_vocab}, 0);
+        model.per_layer_model_proj = create_tensor(ctx_output, tn(LLM_TENSOR_PER_LAYER_MODEL_PROJ, "weight"), {n_embd, n_embd_per_layer * n_layer_src}, 0);
         model.per_layer_proj_norm  = create_tensor(ctx_output, tn(LLM_TENSOR_PER_LAYER_PROJ_NORM,  "weight"), {n_embd_per_layer}, 0);
+        if (hparams.il_offset > 0) {
+            // every block here consumes a per-layer embedding, and those are looked up from the
+            // batch's TOKEN IDS. A stage that is handed hidden states has none, so such a window
+            // would quietly fall back to the placeholder row instead of the real embedding.
+            LLAMA_LOG_WARN("%s: gemma4: this window starts at source block %u and every block consumes a "
+                           "per-layer token embedding, which needs the batch's token ids. A pipeline stage "
+                           "fed hidden states has no token ids and will fall back to the placeholder row. "
+                           "Give this window the token ids, or keep it as the first stage.\n",
+                           __func__, hparams.il_offset);
+        }
     }
 
     model.output_norm = create_tensor(ctx_output, tn(LLM_TENSOR_OUTPUT_NORM, "weight"), {n_embd}, 0);

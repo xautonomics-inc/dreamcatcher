@@ -881,17 +881,31 @@ ggml_cgraph * llm_build_context::build_gemma4_mtp() {
     return gf;
 }
 
+// A per-layer embedding tensor is laid out [n_embd_per_layer, SOURCE block count, n_tokens].
+// A layer-library window owns blocks [il_offset, il_offset + n_layer) of that, so cut its own
+// slice out before anything indexes it by the window-local block number. A monolithic model
+// (il_offset 0, n_layer == source count) gets the tensor back untouched. [meta#91]
+static ggml_tensor * gemma4_window_slice(ggml_context * ctx0, ggml_tensor * t, int il_offset, int n_layer) {
+    if (il_offset == 0 && t->ne[1] == n_layer) {
+        return t;
+    }
+    GGML_ASSERT(il_offset + n_layer <= t->ne[1]);
+    return ggml_cont(ctx0, ggml_view_3d(ctx0, t, t->ne[0], n_layer, t->ne[2],
+                t->nb[1], t->nb[2], (size_t) il_offset * t->nb[1]));
+}
+
 static ggml_tensor * gemma4_project_per_layer_inputs(ggml_context * ctx0, const llama_model & model, const llm_build_cb & cb,
-        int n_embd, int n_embd_per_layer, int n_layer, int n_tokens,
+        int n_embd, int n_embd_per_layer, int n_layer, int n_layer_src, int il_offset, int n_tokens,
         ggml_tensor * inputs_embeds, ggml_tensor * inp_per_layer) {
     const float per_layer_input_scale      = 1.0f / sqrtf(2.0f);
 
     ggml_tensor * per_layer_proj = ggml_mul_mat(ctx0, model.per_layer_model_proj, inputs_embeds);
     cb(per_layer_proj, "per_layer_proj", -1);
-    per_layer_proj               = ggml_reshape_3d(ctx0, per_layer_proj, n_embd_per_layer, n_layer, n_tokens);
+    per_layer_proj               = ggml_reshape_3d(ctx0, per_layer_proj, n_embd_per_layer, n_layer_src, n_tokens);
     per_layer_proj               = llm_build_context::llm_build_norm(ctx0, per_layer_proj, model.hparams,
-            model.per_layer_proj_norm, nullptr, LLM_NORM_RMS, cb, -1, 1.0f*n_embd);  // [n_embd_per_layer, n_layer, n_tokens]
+            model.per_layer_proj_norm, nullptr, LLM_NORM_RMS, cb, -1, 1.0f*n_embd);  // [n_embd_per_layer, n_layer_src, n_tokens]
     cb(per_layer_proj, "per_layer_proj_normed", -1);
+    per_layer_proj               = gemma4_window_slice(ctx0, per_layer_proj, il_offset, n_layer);
 
     inp_per_layer = ggml_add(ctx0, per_layer_proj, inp_per_layer);
     inp_per_layer = ggml_scale(ctx0, inp_per_layer, per_layer_input_scale);
@@ -944,11 +958,16 @@ ggml_cgraph * llm_build_context::build_gemma4() {
     ggml_cgraph * gf = new_graph_custom();
 
     ggml_tensor * inp_per_layer = nullptr;
+    // the per-layer embedding tensors are stored whole (one slice per SOURCE block); this
+    // window owns [il_offset, il_offset + n_layer) of them [meta#91]
+    const int n_layer_src = (int) hparams.n_layer_source();
+    const int il_offset   = (int) hparams.il_offset;
     if (model.tok_embd_per_layer) {
         if (batch.token) {
             inp_per_layer = ggml_get_rows(ctx0, model.tok_embd_per_layer, lctx.inp_tokens);
             ggml_build_forward_expand(gf, inp_per_layer);
-            inp_per_layer = ggml_reshape_3d(ctx0, inp_per_layer, hparams.n_embd_per_layer, n_layer, n_tokens);
+            inp_per_layer = ggml_reshape_3d(ctx0, inp_per_layer, hparams.n_embd_per_layer, n_layer_src, n_tokens);
+            inp_per_layer = gemma4_window_slice(ctx0, inp_per_layer, il_offset, n_layer);
             inp_per_layer = ggml_scale(ctx0, inp_per_layer, sqrtf((float) hparams.n_embd_per_layer));
             cb(inp_per_layer, "inp_per_layer_selected", -1);
         } else {
@@ -961,12 +980,13 @@ ggml_cgraph * llm_build_context::build_gemma4() {
             inp_per_layer = ggml_cast(ctx0, padding, GGML_TYPE_F32);
             ggml_build_forward_expand(gf, inp_per_layer);
 
-            // Reshape to [n_embd_per_layer, n_layer, 1]
-            inp_per_layer = ggml_reshape_3d(ctx0, inp_per_layer, hparams.n_embd_per_layer, n_layer, 1);
+            // Reshape to [n_embd_per_layer, n_layer_src, 1], then keep this window's blocks
+            inp_per_layer = ggml_reshape_3d(ctx0, inp_per_layer, hparams.n_embd_per_layer, n_layer_src, 1);
+            inp_per_layer = gemma4_window_slice(ctx0, inp_per_layer, il_offset, n_layer);
             cb(inp_per_layer, "inp_per_layer_vision", -1);
         }
         inp_per_layer = gemma4_project_per_layer_inputs(ctx0, model, cb, n_embd,
-                model.hparams.n_embd_per_layer, n_layer, n_tokens, inpL, inp_per_layer);
+                model.hparams.n_embd_per_layer, n_layer, n_layer_src, il_offset, n_tokens, inpL, inp_per_layer);
 
     }
 
