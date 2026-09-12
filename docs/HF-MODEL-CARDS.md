@@ -19,9 +19,9 @@ See [KNOWN-ISSUES.md](KNOWN-ISSUES.md) for the known-bad cases.
 
 | Architecture | head/tail split | Backends |
 |---|---|---|
-| `deepseek4` | mechanism verified; library windows currently fail (see backends) | CUDA monolith **verified** on `20c308ca` (UD-Q4_K_XL; library-vs-monolith full-model CUDA forward pass byte-identical, md5-equal hidden states; 1328/1328 tensor hashes). CUDA library form: **unusable** — any `--model-dir --layers` window fails (`dsv4_validate_comp_plan: CSA delta row outside the batch/state ring` — the state-ring plan is not window-aware) and the ring tail segfaults after load; `llama-server` cannot read a library (`meta#90`). Vulkan (any vendor): not measured for this arch |
+| `deepseek4` | mechanism verified; library windows currently fail (see backends) | CUDA monolith **verified** on `20c308ca` (UD-Q4_K_XL; library-vs-monolith full-model CUDA forward pass byte-identical, md5-equal hidden states; 1328/1328 tensor hashes). CUDA library form: **unusable** — any `--model-dir --layers` window fails (`dsv4_validate_comp_plan: CSA delta row outside the batch/state ring` — the state-ring plan is not window-aware) and the ring tail segfaults after load; `llama-server` cannot read a library (`meta#90`). Vulkan NVIDIA (coopmat1): **degenerate** on `20c308ca` (`importimportimport…`) while CUDA is coherent on the same tree; MXFP4 is accepted natively on Vulkan (no fallback, same buffer sizes as CUDA), so not the quant — re-measure pending: shares the hyper-connection mixer with qwen4exp, the `meta#88` MULTI_ADD fix (MR !39) is the candidate cause. Vulkan RDNA3/RDNA4: not measured for this arch |
 | `qwen4exp` | verified (pre-publish); CUDA ring not token-exact on `20c308ca` (see backends) | CUDA **verified** on `20c308ca`: monolith coherent 23.2 tok/s (`llama-server`), library ring coherent 17.4 tok/s, full-model forward pass byte-identical mono-vs-library (1224/1224 hashes); the ring is **not token-exact** — the tail drops `per_layer_token_embd` for a non-zero window (`meta#91`). Vulkan: **fixed on `fork-base` (MULTI_ADD full-chunk-range bind, `meta#88`)** — NVIDIA coopmat1 verified coherent, agrees with CUDA within rounding; RDNA3 re-measure pending |
-| `glm5next` | verified | CUDA **verified** on `20c308ca`: library head+tail ring generates coherently, 7.5 tok/s greedy (UD-IQ4_XS, 1383/1383 hashes vs monolith); single-process A/B blocked by a new bug (any GLM load under `STAGE_EMIT=hidden` with `nextn_predict_layers>0` aborts, `GGML_ASSERT(lctx.logits != nullptr)`). `--role server` times out awaiting a return edge (`meta#90`). Vulkan (any vendor): not measured for this arch |
+| `glm5next` | verified | CUDA **verified** on `20c308ca`: library head+tail ring generates coherently, 7.5 tok/s greedy (UD-IQ4_XS, 1383/1383 hashes vs monolith). The hidden-emit A/B abort (`GGML_ASSERT(lctx.logits != nullptr)`, `meta#93`) is **fixed on `fork-base`** (MR !40, unified logits predicate + truth-table test) — with it, GLM-5.3 library-vs-monolith hidden state is **byte-identical (md5-equal)** and generation is unchanged. `--role server` still times out awaiting a return edge (`meta#90`). Vulkan NVIDIA (coopmat1): **measured coherent** on `20c308ca` (UD-IQ4_XS, 1.9 tok/s tg with experts on CPU). Vulkan RDNA3/RDNA4: not measured for this arch |
 | `gemma4` | self-consistent (both stages agree) | CPU verified (Q4_K embedding); CUDA batched prefill known-bad (`meta#81`); Q6_K embedding known-bad (`meta#80`); Vulkan: measured on this model at the lane-9 checkpoint (pre-`20c308ca`) — RDNA4 and RDNA3 (RADV) FA sweep clean and token-exact on chat-formatted prompts, bare greedy prompt can differ from CPU by rounding (`meta#85`); NVIDIA (coopmat1): CPU-exact; Intel ANV: self-consistent, not CPU-exact; AMD RDNA3.5 (8060S APU): verified for the expert-server path with GLM-5.3-Flash experts |
 
 ### Card wording (drop-in, per architecture)
@@ -39,7 +39,9 @@ RTX 5060 Ti x4 coopmat1.
 > **unsupported**: any `--layers` window fails the CSA state-ring plan
 > validation and the ring tail segfaults, so the library has no generation
 > path (`meta#92`); no single-process server reads a library (`meta#90`).
-> Vulkan: not measured for this architecture.
+> Vulkan NVIDIA (coopmat1): degenerate on `20c308ca` — re-measure pending
+> after the `meta#88` MULTI_ADD fix (MR !39). Other Vulkan vendors: not
+> measured for this architecture.
 
 > **qwen4exp — CUDA verified** (monolith coherent 23.2 tok/s; library head/tail
 > ring coherent 17.4 tok/s, **not token-exact** — the tail drops
@@ -50,11 +52,13 @@ RTX 5060 Ti x4 coopmat1.
 > pending. RDNA4 / Intel ANV: not measured for this architecture.
 
 > **glm5next — CUDA verified** (library head/tail ring coherent, greedy,
-> 7.5 tok/s, experts on CPU; library ≡ monolith 1383/1383 hashes). No
-> single-process server for a library (`meta#90`); mono-vs-library runtime A/B
-> is blocked by an unrelated abort (`meta#93`). Vulkan: not measured for this
-> architecture on the published tree (the RDNA3.5 APU proof was the
-> expert-server path with GLM-5.3-Flash experts, not a local Vulkan run).
+> 7.5 tok/s, experts on CPU; library ≡ monolith 1383/1383 hashes; with the
+> `meta#93` fix on `fork-base`, library-vs-monolith hidden state is
+> byte-identical). No single-process server for a library (`meta#90`).
+> Vulkan NVIDIA (coopmat1): **measured coherent** on `20c308ca` (1.9 tok/s tg,
+> experts on CPU). Other Vulkan vendors: not measured for this architecture
+> (the RDNA3.5 APU proof was the expert-server path with GLM-5.3-Flash
+> experts, not a local Vulkan run).
 
 Common to all three: a layer library is loaded only by `llama-stage-runner`
 (`--model-dir`); serving one needs a head+tail ring and, on Vulkan hosts with
@@ -77,8 +81,13 @@ conditional on the quant variant and the backend.
   `20c308ca` the UD-Q4_K_XL library ≡ monolith: 1328/1328 tensor hashes and a
   byte-identical full 43-layer forward pass (md5-equal hidden states), which
   closes the former "pending numeric check" for the single-process pass.
-  `llama-server` cannot read a library (`meta#90`). Vulkan (any vendor): not
-  measured for this architecture on the published tree.
+  `llama-server` cannot read a library (`meta#90`). Vulkan NVIDIA (coopmat1):
+  **degenerate** on `20c308ca` (`importimportimport…`) while CUDA is coherent
+  on the same tree; MXFP4 is accepted natively on Vulkan (no fallback, same
+  buffer sizes as CUDA), so the quant is not the cause. Re-measure pending:
+  deepseek4 shares the hyper-connection mixer with qwen4exp, making the
+  `meta#88` MULTI_ADD bug the candidate and MR !39 the candidate fix. Vulkan
+  RDNA3/RDNA4: not measured for this architecture on the published tree.
 
 ### `qwen4exp`
 - **head/tail split:** verified (mechanism); the CUDA ring run on `20c308ca`
@@ -101,14 +110,20 @@ conditional on the quant variant and the backend.
 - **head/tail split:** verified — on `20c308ca` the library head+tail ring
   generates coherently (greedy, 7.5 tok/s, experts on CPU across 4 GPUs).
 - **backends:** CUDA **verified** as above; library ≡ monolith 1383/1383
-  tensor hashes. A runtime mono-vs-library A/B is blocked by an unrelated
-  abort: any GLM load under `STAGE_EMIT=hidden` with `nextn_predict_layers>0`
-  trips `GGML_ASSERT(lctx.logits != nullptr)` (`meta#93`). `--role server`
-  with `ci/smoke-serve.sh` times out awaiting a return edge nothing sends
-  (`meta#90`). Vulkan (any vendor): not measured for this architecture on the
-  published tree (the RDNA3.5 APU proof was the expert-server path serving
-  GLM-5.3-Flash experts to a CUDA head, not a local Vulkan run; the
-  RDNA3/RDNA4 sweeps on record were Gemma-4 12B and Qwen3 8B).
+  tensor hashes. The hidden-emit A/B that was blocked by an abort (any GLM
+  load under `STAGE_EMIT=hidden` with `nextn_predict_layers>0` tripping
+  `GGML_ASSERT(lctx.logits != nullptr)`) is **fixed on `fork-base`** — two
+  disagreeing "do we have logits?" predicates (a stale `nextn_predict_layers`
+  proxy vs the real `has_mtp` context flag) were unified into one policy with
+  a truth-table test (`meta#93`, MR !40); with it, GLM-5.3 library-vs-monolith
+  hidden state is **byte-identical (md5-equal)** and generation is unchanged.
+  `--role server` still times out awaiting a return edge nothing sends
+  (`meta#90`). Vulkan NVIDIA (coopmat1): **measured coherent** on `20c308ca`
+  (UD-IQ4_XS, 1.9 tok/s tg with experts on CPU). Other Vulkan vendors: not
+  measured for this architecture on the published tree (the RDNA3.5 APU proof
+  was the expert-server path serving GLM-5.3-Flash experts to a CUDA head, not
+  a local Vulkan run; the RDNA3/RDNA4 sweeps on record were Gemma-4 12B and
+  Qwen3 8B).
 
 ### `gemma4`
 - **head/tail split:** the two-stage loopback is self-consistent (head and tail

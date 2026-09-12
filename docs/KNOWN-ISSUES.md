@@ -201,3 +201,30 @@ from a dequantize-then-reference-multiply comparison by ~7x the quantization noi
 CPU at decode (`-cmoe` / `-ot exps=CPU`), the exact layout many mixed CPU/GPU
 deployments use. Regression test added; kernel fix pending. **Status.** Open
 (kernel fix in progress).
+
+## `meta#93` — NextN models abort under hidden-emit: two disagreeing "do we have logits?" predicates — fixed
+
+**Symptom (fixed).** Any GLM-family (NextN) load with `STAGE_EMIT=hidden` and
+`nextn_predict_layers>0` aborted at load on `GGML_ASSERT(lctx.logits !=
+nullptr)`, blocking the library-vs-monolith hidden-state A/B.
+
+**Root cause and fix.** The allocation decision used a stale
+`nextn_predict_layers` proxy while the extraction path consulted the real
+`has_mtp` context flag; on some configurations the proxy said "no logits" and
+the buffer was never allocated. Unified into a single policy with a
+truth-table test. Landed on `fork-base` (project 29 MR !40). **Payoff.**
+GLM-5.3 library-vs-monolith hidden state is byte-identical (md5-equal) and
+generation is unchanged. **Status.** Fixed on `fork-base`. Related:
+`meta#90` (no single-process server for a library — still open).
+
+## `meta#95` — deepseek4 on Vulkan NVIDIA (coopmat1): degenerate output on the published tree
+
+**What was measured.** On `20c308ca`, DSv4-Flash-Vision-Exp UD-Q4_K_XL via
+Vulkan (4x RTX 5060 Ti, coopmat1) emits degenerate output
+(`importimportimport…`) while the CUDA path on the same tree and build is
+coherent. Not the quant: MXFP4 is accepted natively on Vulkan (no fallback,
+same buffer sizes as CUDA). **Leading hypothesis.** deepseek4 shares the
+hyper-connection mixer with qwen4exp; this is most likely the same `MULTI_ADD`
+descriptor-range bug `meta#88` fixed (MR !39) — re-measurement on the fixed
+build is running; if it comes back coherent this entry closes as a duplicate.
+**Status.** Open (re-measure pending).
