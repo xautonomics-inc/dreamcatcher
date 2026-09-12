@@ -1,6 +1,7 @@
 #include "../llama-build-context.h"
 #include "../llama-model.h"
 #include "../llama-context.h"
+#include "llm_stage.h"
 
 ggml_cgraph * llm_build_context::build_glm4_moe() {
     ggml_cgraph * gf = new_graph_custom();
@@ -33,14 +34,20 @@ ggml_cgraph * llm_build_context::build_glm4_moe() {
 
         struct ggml_tensor * KQ_mask = build_inp_KQ_mask();
 
-        // output token IDs (for last layer cropping)
-        struct ggml_tensor * inp_out_ids = (n_tokens > 1 && !lctx.cparams.mtp) ? build_inp_out_ids() : nullptr;
-
-        float kq_scale = 1.0f/sqrtf(float(n_embd_head));
-
         // Only process up to last layer (skip final NextN layer)
         // Final layer tensors are loaded but not processed in forward pass
         const int n_transformer_layers = n_layer - hparams.nextn_predict_layers;
+
+        // --- multi-stage pipeline: a head stage emits the post-window residual, not logits ---
+        const llama_stage_cfg sc = llama_stage_get_cfg(n_transformer_layers);
+        const bool stage_emit    = sc.active && sc.emit_hidden &&
+                                   llama_stage_consumes_last(sc, n_transformer_layers);
+
+        // output token IDs (for last layer cropping); an emitting stage keeps every row
+        struct ggml_tensor * inp_out_ids = (n_tokens > 1 && !lctx.cparams.mtp && !stage_emit) ? build_inp_out_ids() : nullptr;
+
+        float kq_scale = 1.0f/sqrtf(float(n_embd_head));
+
         for (int il = 0; il < n_transformer_layers; ++il) {
             struct ggml_tensor * inpSA = inpL;
 
@@ -138,9 +145,17 @@ ggml_cgraph * llm_build_context::build_glm4_moe() {
         }
         cur = inpL;
 
-        // lm head
-        cur = build_output(lctx, ctx0, cur, model.output, model.output_norm, cb);
-        cb(cur, "result_output", -1);
+        if (stage_emit) {
+            // STAGE EMIT: export the post-window residual hidden state (all rows) for the
+            // next stage; skip output_norm + lm_head. Named "result_norm" so the existing
+            // embeddings extraction (POOLING_NONE -> lctx.embd) picks it up. NOTE: in emit
+            // mode llama_get_embeddings_ith therefore returns the PRE-norm residual, by design.
+            cb(cur, "result_norm", -1);
+        } else {
+            // lm head
+            cur = build_output(lctx, ctx0, cur, model.output, model.output_norm, cb);
+            cb(cur, "result_output", -1);
+        }
     }
 
     ggml_build_forward_expand(gf, cur);

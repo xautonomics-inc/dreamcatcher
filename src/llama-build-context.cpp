@@ -121,6 +121,10 @@ void llm_build_context::init() {
         lctx.inp_embd_enc      = nullptr;
         lctx.inp_KQ_mask_cross = nullptr;
         lctx.inp_dsa_sink      = nullptr;
+        lctx.inp_kpool_cells     = nullptr;
+        lctx.inp_kpool_bias      = nullptr;
+        lctx.inp_kpool_tail      = nullptr;
+        lctx.inp_kpool_ape_slots = nullptr;
         lctx.inp_mtp_carry     = nullptr;
         lctx.inp_qsa.clear();
         lctx.dflash.inputs.target_features = nullptr;
@@ -880,6 +884,13 @@ ggml_tensor * llm_build_context::llm_build_inp_embd(
          const llm_build_cb & cb) {
     const int64_t n_embd = hparams.n_embd;
 
+    // An injected row is a residual-stream row, not a token embedding. On a
+    // hyper-connection architecture that stream is a bundle of hc parallel streams, so
+    // the input tensor is hc * n_embd wide and the caller hands over the whole bundle.
+    // Every other architecture keeps the historical n_embd width.
+    const bool    hc_bundle   = hparams.dsv4_hc_mult > 1;
+    const int64_t n_embd_inpL = hc_bundle ? (int64_t) hparams.n_embd_hc_bundle() : n_embd;
+
     struct ggml_tensor * inpL;
 
     if (batch.token) {
@@ -889,13 +900,15 @@ ggml_tensor * llm_build_context::llm_build_inp_embd(
 
         inpL = ggml_get_rows(ctx, tok_embd, lctx.inp_tokens);
     } else {
-       lctx.inp_embd = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_embd, batch.n_tokens);
+       lctx.inp_embd = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, n_embd_inpL, batch.n_tokens);
         inpL = lctx.inp_embd;
         ggml_set_input(lctx.inp_embd);
     }
 
-    // For Granite architecture
-    if (hparams.f_embedding_scale != 0.0f) {
+    // For Granite architecture.
+    // Never applied to an injected hyper-connection bundle: the embedding scale belongs to
+    // the token-embedding lookup, which the emitting stage already performed.
+    if (hparams.f_embedding_scale != 0.0f && !(hc_bundle && batch.token == nullptr)) {
         inpL = ggml_scale(ctx, inpL, hparams.f_embedding_scale);
     }
 
@@ -3018,6 +3031,10 @@ ggml_cgraph * llm_build_context::llama_build_graph(
         case LLM_ARCH_BAILINGMOE3:
             {
                 result = llm.build_bailingmoe3();
+            } break;
+        case LLM_ARCH_GLM5NEXT:
+            {
+                result = llm.build_glm5next();
             } break;
         case LLM_ARCH_MINIMAX_M2:
             {

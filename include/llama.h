@@ -670,6 +670,11 @@ extern "C" {
     LLAMA_API const char * llama_vocab_get_text(const struct llama_vocab * vocab, llama_token token);
     LLAMA_API int32_t llama_n_ctx_train(const struct llama_model * model);
     LLAMA_API int32_t llama_model_n_embd     (const struct llama_model * model);
+    // Width of one row of the model's inter-block residual stream: the number of floats
+    // per token that llama_batch.embd accepts, and that a pipeline stage emitting hidden
+    // state produces per row. Equals n_embd for ordinary architectures; for
+    // hyper-connection architectures it is hyper_connection.count * n_embd, because the
+    // residual stream between blocks is a bundle of that many parallel streams.
     LLAMA_API int32_t llama_model_n_embd_inp(const struct llama_model* model);
 
     LLAMA_API int32_t llama_n_layer    (const struct llama_model * model);
