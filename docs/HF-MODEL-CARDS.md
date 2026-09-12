@@ -29,12 +29,12 @@ See [KNOWN-ISSUES.md](KNOWN-ISSUES.md) for the known-bad cases.
 The shared line this section used to publish ("backends: CUDA verified, Vulkan
 verified — AMD RDNA4 and RDNA3 …") restated one arch's sweep results as all
 archs' and has been retired; see `meta#88` for how it got falsified. Use the
-per-arch lines below — all measured on the published tree `20c308ca`
-(nvidia = CUDA sm_120; amd = RX 7900 XT x4 RADV; NVIDIA Vulkan = 4x 5060 Ti
-coopmat1).
+per-arch lines below — all measured on the published tree `20c308ca`. Hardware:
+CUDA: RTX 5060 Ti sm_120; Vulkan RDNA3: RX 7900 XT x4 RADV; Vulkan NVIDIA:
+RTX 5060 Ti x4 coopmat1.
 
 > **deepseek4 — quant verified.** CUDA monolith verified (production serving);
-> the UD-Q4_K_XS library is exact vs its monolith (1328/1328 tensor hashes,
+> the UD-Q4_K_XL library is exact vs its monolith (1328/1328 tensor hashes,
 > full 43-layer forward pass byte-identical). Library windows are currently
 > **unsupported**: any `--layers` window fails the CSA state-ring plan
 > validation and the ring tail segfaults, so the library has no generation
