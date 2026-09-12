@@ -1,6 +1,7 @@
 #include "../llama-build-context.h"
 #include "../llama-model.h"
 #include "../llama-context.h"
+#include "llm_stage.h"
 
 #include <vector>
 
@@ -1319,7 +1320,10 @@ ggml_cgraph * llm_build_context::build_deepseek2() {
     }
 
     int n_active_layers = hparams.n_layer - hparams.nextn_predict_layers;
-    for (int il = 0; il < n_active_layers; ++il) {
+    // --- multi-stage pipeline: run only the layer window [il_start, il_end) ---
+    const llama_stage_cfg sc = llama_stage_get_cfg(n_active_layers);
+    const bool consumes_last = llama_stage_consumes_last(sc, n_active_layers);
+    for (int il = sc.il_start; il < sc.il_end; ++il) {
         struct ggml_tensor * inpSA = inpL;
 
         bool is_tp_layer = tp_mode && model.layers[il].wo && model.layers[il].wo->extra;
@@ -1334,8 +1338,8 @@ ggml_cgraph * llm_build_context::build_deepseek2() {
                                                   use_f32_attn_precision, is_lite, pp_opt);
         }
 
-        if (il == n_active_layers - 1 && !lctx.cparams.mtp) {
-            // skip computing output for unused tokens
+        if (il == n_active_layers - 1 && consumes_last && !sc.emit_hidden && !lctx.cparams.mtp) {
+            // skip computing output for unused tokens (only the tail reduces; emit stages keep all rows)
             struct ggml_tensor * inp_out_ids = build_inp_out_ids();
             n_tokens = n_outputs;
             cur   = ggml_get_rows(ctx0,   cur, inp_out_ids);
@@ -1424,6 +1428,16 @@ ggml_cgraph * llm_build_context::build_deepseek2() {
 
         // input for next layer
         inpL = cur;
+    }
+
+    if (sc.active && sc.emit_hidden) {
+        // STAGE EMIT: export the post-window residual hidden state (all rows) for the
+        // next stage; skip output_norm + lm_head. Named "result_norm" so the existing
+        // embeddings extraction (POOLING_NONE -> lctx.embd) picks it up. NOTE: in emit
+        // mode llama_get_embeddings_ith therefore returns the PRE-norm residual, by design.
+        cb(inpL, "result_norm", -1);
+        ggml_build_forward_expand(gf, inpL);
+        return gf;
     }
 
     cur = build_output(lctx, ctx0, inpL, model.output, model.output_norm, cb);
