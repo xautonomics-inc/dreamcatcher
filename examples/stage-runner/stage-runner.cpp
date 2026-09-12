@@ -231,8 +231,11 @@ static int stage_eval_cb(struct ggml_tensor * t, bool ask, void * ud) {
     const size_t nb = ggml_nbytes(t);
     std::vector<char> buf(nb);
     ggml_backend_tensor_get(t, buf.data(), 0, nb);
-    static bool mkd = false; if (!mkd) { mkdir("/work/dump", 0777); mkd = true; }
-    std::string fn = "/work/dump/";
+    // STAGE_DUMP_DIR overrides the container-era default, so an activation A/B can be captured
+    // wherever the run actually has write access. [meta#91]
+    static const char * dump_dir = []{ const char * d = getenv("STAGE_DUMP_DIR"); return (d && d[0]) ? d : "/work/dump"; }();
+    static bool mkd = false; if (!mkd) { mkdir(dump_dir, 0777); mkd = true; }
+    std::string fn = std::string(dump_dir) + "/";
     for (const char * c = t->name; *c; ++c) fn += (*c=='/'||*c==' '||*c=='(' ||*c==')') ? '_' : *c;
     fn += ".bin";
     FILE * f = fopen(fn.c_str(), "wb");
@@ -463,6 +466,13 @@ static bool run_hidden(model_bundle & b, const hidden_blob & in, bool emit, hidd
         return false;
     }
     if (emit) { out.resize(n, b.n_embd_io); out.seq = in.seq; out.pos = in.pos; }
+    // A TAIL samples the LAST row of each sequence and throws the rest away. Asking for logits
+    // on every row made the final lm_head a n_rows-wide matmul where the monolithic server runs
+    // a one-row one - a different kernel, so different rounding, so a different argmax on a near
+    // tie. Ask for exactly the rows we read. (An EMIT stage keeps all rows: its "outputs" are the
+    // hidden states the next stage consumes.) [meta#91]
+    std::map<int32_t, int> last_row_of_seq;
+    if (!emit) { for (int i = 0; i < n; ++i) last_row_of_seq[in.seq[i]] = i; }
     for (int off = 0; off < n; off += chunk) {
         const int m = (n - off < chunk) ? (n - off) : chunk;
         llama_batch batch = llama_batch_init(m, b.n_embd_io, 1);
@@ -470,7 +480,8 @@ static bool run_hidden(model_bundle & b, const hidden_blob & in, bool emit, hidd
         for (int i = 0; i < m; ++i) {
             memcpy(batch.embd + (size_t) i * b.n_embd_io, in.data.data() + (size_t) (off + i) * b.n_embd_io, b.n_embd_io * sizeof(float));
             batch.pos[i] = in.pos[off + i];
-            batch.n_seq_id[i] = 1; batch.seq_id[i][0] = in.seq[off + i]; batch.logits[i] = 1;
+            batch.n_seq_id[i] = 1; batch.seq_id[i][0] = in.seq[off + i];
+            batch.logits[i] = emit ? 1 : (last_row_of_seq[in.seq[off + i]] == off + i ? 1 : 0);
         }
         auto _t0 = std::chrono::steady_clock::now();
         bool ok = llama_decode(b.ctx, batch) == 0;
@@ -497,8 +508,14 @@ static int argmax_ith(model_bundle & b, int i) {
 // unused so a -Werror=unused-function build still compiles in this v1.
 __attribute__((unused))
 static void print_piece(model_bundle & b, int tok, int slot) {
+    // STAGE_PRINT_IDS also emits the token ID on its own line. A piece can be empty or a bare
+    // newline, so a piece-only transcript cannot be compared line-by-line against a monolithic
+    // run - the id line is what an A/B actually diffs. [meta#91]
+    static const bool with_ids = getenv("STAGE_PRINT_IDS") != nullptr;
+    if (with_ids) { printf("[id s%d]%d\n", slot, tok); }
     char buf[256]; int n = llama_token_to_piece_vocab(b.vocab, tok, buf, sizeof(buf), 0, true);
-    if (n > 0) { printf("[s%d]%.*s\n", slot, n, buf); fflush(stdout); }
+    if (n > 0) { printf("[s%d]%.*s\n", slot, n, buf); }
+    fflush(stdout);
 }
 
 // DROPPED for v1: run_middle (replica) / run_router (hub) roles.
