@@ -714,6 +714,11 @@ llama_model_loader::llama_model_loader(const std::string & fname, int ncmoe, boo
 
         llama_model_loader_slice_block_arrays(meta, source_blk_count, source_blk_start, n_blk);
 
+        // remember which slice of the source model this is, for every per-layer quantity
+        // that is indexed absolutely rather than window-locally [meta#91]
+        window_il_offset   = source_blk_start;
+        window_n_layer_src = source_blk_count;
+
         // inject the summed window-shape values as internal overrides (an explicit
         // user override for the same key wins)
         for (int s = 0; s < 3; ++s) {
