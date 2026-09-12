@@ -58,7 +58,12 @@ discovered by name, shape KVs come from the GGUF headers).
 ## 2. Loader: `llama_model_load_from_parts()` (libllama)
 
 ```c
-struct llama_model_part { const char * path; int32_t blk_base; };
+struct llama_model_part {
+    const char * path;
+    int32_t blk_base;
+    int32_t source_blk_start;
+    int32_t source_blk_count;
+};
 struct llama_model * llama_model_load_from_parts(const struct llama_model_part *, size_t, struct llama_model_params);
 ```
 
@@ -66,22 +71,26 @@ Backend-agnostic (pure loader level, one mmap/file handle per part, no data copi
 twice, monolithic path untouched). Each file's `blk.J` tensors are remapped to
 `blk.(blk_base+J)`; `{arch}.block_count`, `{arch}.leading_dense_block_count` and
 `{arch}.nextn_predict_layers` are re-derived as the SUM of the per-file values and
-injected as internal KV overrides (an explicit user `--override-kv` wins). So a
-window's KV cache is sized by the window's block_count, never the full model —
-exactly like today's monolithic slices. Gaps or out-of-window blk indices abort
-the load with a clear error.
+injected as internal KV overrides (an explicit user `--override-kv` wins).
+Metadata arrays with `source_blk_count` elements are sliced from
+`source_blk_start` to the assembled window length. So a window's KV cache and
+per-layer hyperparameters both describe the selected blocks, exactly like today's
+monolithic slices. Gaps, invalid metadata windows, or out-of-window block indices
+abort the load with a clear error.
 
 Debug: `LLAMA_DUMP_TENSOR_HASH=1` logs a FNV-1a-64 hash of every tensor's
 in-memory bytes after load (stage-runner also disables repack "extra" bufts under
 this env so hashes are byte-comparable across load paths).
 
-## 3. Stage binary: launch parameters (planned wiring)
+## 3. Stage binary: launch parameters
 
-NOT WIRED YET in this branch: `stage-runner.cpp` does not accept these flags.
-This branch ships the slicer (§1) and the libllama assembly API (§2); the
-stage-binary plumbing below is the planned surface on top of it, so the
-parameter design is recorded here and stage launches keep using `-m` slices
-until it lands.
+WIRED in `stage-runner.cpp` (port of the mainline driver's assembly block):
+`--model-dir` / `--layers` / `--stage-parts` select and assemble the part files
+exactly as designed below; stage launches may use `--model-dir` in place of
+`-m` slices. Deviations in the ik v1 runner (see its header comment): no
+`--pipeline` (depth==slots, non-pipelined v1) and no `gen` role, so the
+equivalence harness below runs in FILE mode (`--prompt … --last`) or as the
+loader-level tensor-hash check instead; `STAGE_EMIT=hidden` file emit is kept.
 
 ```
 --model-dir DIR       layer library directory (alternative to -m; mutually exclusive)
@@ -154,4 +163,3 @@ a loader-level harness (`check54`: `llama_model_load_from_parts` over explicit
   `n_layer=5`, 48 tensors;
 - gap in the window (blk 0,1,3): load aborts — `invalid assembly: no tensors
   for blk.2 (window block_count=3)`.
-
