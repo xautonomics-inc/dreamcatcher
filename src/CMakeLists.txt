@@ -45,6 +45,8 @@ add_library(llama
             llama-dflash.cpp
             llama-dsv4.cpp
             llama-vocab.cpp
+            llama-experts-remote.h
+            llama-experts-remote.cpp
             llama-grammar.cpp
             llama-sampling.cpp
             llama-mmap.cpp

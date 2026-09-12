@@ -2,6 +2,7 @@
 #include "llama-impl.h"
 #include "llama-mmap.h"
 #include "llama-model.h"
+#include "llama-experts-remote.h"
 #include "ggml.h"
 
 
@@ -493,8 +494,56 @@ ggml_context * create_tensors_helper::get_context_for_tensor(ggml_context * ctx,
     return ctx;
 }
 
+// Expert-tensor disaggregation: "blk.<N>.<stem>" -> N, or -1 when the tensor is
+// not per-layer. Kept here rather than in llama-experts-remote.cpp so the
+// feature owns no knowledge of this tree's tensor-naming scheme.
+static int er_layer_of_tensor_name(const std::string & name) {
+    if (name.compare(0, 4, "blk.") != 0) {
+        return -1;
+    }
+    size_t i = 4;
+    int il = 0;
+    while (i < name.size() && name[i] >= '0' && name[i] <= '9') {
+        il = il * 10 + (name[i] - '0');
+        if (il > 4096) {
+            return -1;
+        }
+        ++i;
+    }
+    if (i == 4 || i >= name.size() || name[i] != '.') {
+        return -1;
+    }
+    return il;
+}
+
+// True for the routed-expert weight tensors an expert-server owns:
+// ffn_{gate,up,down}_exps.weight and the fused ffn_gate_up_exps.weight.
+static bool er_is_routed_expert_tensor(const std::string & name) {
+    static const std::string suffix = "_exps.weight";
+    return name.size() > suffix.size() &&
+           name.compare(name.size() - suffix.size(), suffix.size(), suffix) == 0;
+}
+
 ggml_tensor * create_tensors_helper::create_tensor(ggml_context * ctx, const std::string & name, const std::vector<int64_t> & ne,
         int flags, ggml_context ** actual_context) {
+    // Expert-tensor disaggregation: a layer whose routed experts are served by a
+    // remote expert-server must not load - or even allocate - its exps tensors
+    // here. Applied centrally, because every architecture in this tree reaches
+    // the loader through this one function; the source lineage hooks the
+    // equivalent create_tensor lambda and keys off tn.bid, which this helper
+    // does not carry, so the layer id comes out of the tensor name instead.
+    //
+    // A useful side effect: this tree only merges separate up/gate expert
+    // tensors into a fused one when flags == 0, so a covered layer never takes
+    // the merge path and ffn_up_gate_exps stays null on the remote path.
+    if (!(flags & llama_model_loader::TENSOR_SKIP)) {
+        const auto & ercfg = llama_experts_remote_get_cfg();
+        if (ercfg.enabled && !ercfg.keep_exps && er_is_routed_expert_tensor(name) &&
+                ercfg.endpoint_for(er_layer_of_tensor_name(name)) >= 0) {
+            flags |= llama_model_loader::TENSOR_SKIP;
+        }
+    }
+
     ctx = get_context_for_tensor(ctx, name);
     if (actual_context) *actual_context = ctx;
     auto tensor = ml.create_tensor(ctx, name, ne, flags);
