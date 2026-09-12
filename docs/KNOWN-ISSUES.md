@@ -163,8 +163,7 @@ The library itself is exact: 1224/1224 tensor hashes match the monolith it was
 sliced from and the full 48-block hidden state is byte-identical. The same build
 reproduces the **identical** degenerate output on NVIDIA Vulkan (4x RTX 5060 Ti,
 coopmat1 path) while the CUDA path on the same box is coherent (23.2 tok/s), so
-this is not an AMD-specific fault. Raw logs: `amd:` and `nvidia:`
-`/fast/build/p29-public/verify/`.
+this is not an AMD-specific fault. Raw logs are attached to `meta#88`.
 
 **How the docs came to claim otherwise.** The "qwen4exp: Vulkan verified — RDNA3"
 row (README, `docs/HF-MODEL-CARDS.md`) was extrapolated from the lane-9 RDNA3
@@ -180,7 +179,7 @@ placement hypothesis is refuted. Flash attention on and off both reproduce, so t
 meta#85 reduction path is not the culprit either. The identical output across
 vendors points at a qwen4exp-specific fault in the Vulkan backend itself (op
 coverage or graph construction for the SSM/gated-delta path), not a device quirk
-in either driver. Discriminators still worth running on the AMD host: disable
+in either driver. Discriminators still worth running on an RDNA3 host: disable
 integer-dot product; force SSM tensors to CPU via `-ot`; single-GPU `--device` to
 exclude the cross-card tensor-split mapping (device order differs from HIP order);
 op-level localization against the CPU reference with `GGML_VULKAN_CHECK_RESULTS`.
