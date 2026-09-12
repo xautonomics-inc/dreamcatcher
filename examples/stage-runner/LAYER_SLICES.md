@@ -52,8 +52,12 @@ Slice-of-slice sources work; `abs_index` is then relative to that source.
 }
 ```
 
-The manifest is for ops/verification only — the loader does NOT read it (files are
-discovered by name, shape KVs come from the GGUF headers).
+The runner requires `manifest.json` and parses `source.block_count` as a positive
+32-bit integer for slicing per-layer metadata arrays. Copy the original manifest
+with any partial window of the library. File order and JSON formatting do not
+affect this lookup. Missing or invalid source counts are refused before model
+loading: part GGUF shape counts (0 or 1) and the highest locally present block
+index cannot establish the full source size.
 
 ## 2. Loader: `llama_model_load_from_parts()` (libllama)
 

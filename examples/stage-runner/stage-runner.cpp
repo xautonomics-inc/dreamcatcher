@@ -27,6 +27,7 @@
 //  env: STAGE_ACTIVE=1, STAGE_IL_START, STAGE_IL_END, STAGE_EMIT(hidden|logits)
 
 #include "llama.h"
+#include "layer-manifest.h"
 #include "ggml.h"
 #include "ggml-backend.h"
 // NOTE: the mainline driver included "../../src/llama-ext.h" for the custom
@@ -262,7 +263,7 @@ static int g_fit_margin = 0;  // --fit-margin MiB: VRAM auto-fit reserves per GP
 //   parts-output.gguf       output_norm.weight (+ output.weight if untied)
 //   parts-nextn-NNNNN.gguf  one NextN/MTP block (abs index NNNNN), tensors blk.0.*
 //   parts-other.gguf        any other non-blk tensors (rare; e.g. rope_freqs)
-//   manifest.json           provenance + per-tensor hashes (not needed at load time)
+//   manifest.json           source.block_count + provenance + per-tensor hashes
 // assemble_layer_dir() composes the file list for window [A,B) and the blk_base
 // remap each file gets, mirroring what a monolithic slice_gguf.py A B slice holds.
 struct asm_spec {
@@ -271,6 +272,7 @@ struct asm_spec {
     int32_t source_blk_start;
     int32_t source_blk_count;
 };
+
 static bool assemble_layer_dir(const std::string & dir, int win_a, int win_b, const std::string & parts_spec,
                                std::vector<asm_spec> & out) {
     std::map<int, std::string> layers, nextn;   // abs index -> filename
@@ -287,10 +289,22 @@ static bool assemble_layer_dir(const std::string & dir, int win_a, int win_b, co
     }
     closedir(d);
     if (layers.empty() && nextn.empty()) { fprintf(stderr, "stage: no blk-*.gguf in %s\n", dir.c_str()); return false; }
-    int n_total = -1;
-    if (!layers.empty()) n_total = layers.rbegin()->first;
-    if (!nextn.empty())  n_total = std::max(n_total, nextn.rbegin()->first);
-    n_total += 1;
+    int32_t source_blk_count = 0;
+    try {
+        source_blk_count = stage_read_source_block_count(dir);
+    } catch (const std::exception & e) {
+        fprintf(stderr, "stage: library %s: %s; refusing assembly\n", dir.c_str(), e.what());
+        return false;
+    }
+    const int highest_present = std::max(
+        layers.empty() ? -1 : layers.rbegin()->first,
+        nextn.empty() ? -1 : nextn.rbegin()->first);
+    if (highest_present >= source_blk_count) {
+        fprintf(stderr, "stage: library %s has blk.%d beyond source block_count=%d\n",
+                dir.c_str(), highest_present, source_blk_count);
+        return false;
+    }
+    const int n_total = source_blk_count;
     if (win_a < 0) win_a = 0;
     if (win_b < 0) win_b = n_total;   // default: full model
     if (win_a >= win_b || win_b > n_total) {
