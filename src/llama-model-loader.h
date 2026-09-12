@@ -107,6 +107,16 @@ struct llama_model_loader {
     llama_expert_tensor_index expert_tensor_index;
     llama_expert_tensor_index ple_tensor_index;
 
+    // ---- layer-library window (llama_model_load_from_parts) --------------------
+    // The assembled model carries the SOURCE model's blocks
+    // [window_il_offset, window_il_offset + n_layer). A monolithic file is simply the
+    // [0, block_count) window, which is what the defaults say. Anything the SOURCE
+    // model indexes by ABSOLUTE block number - a per-layer token-embedding table, an
+    // "every k-th block" pattern - has to be built from these, never from the
+    // window-local layer index. [meta#91]
+    int32_t window_il_offset   = 0;
+    int32_t window_n_layer_src = 0;   // 0 = monolithic (not an assembled window)
+
     llama_model_loader(const std::string & fname, int ncmoe, bool use_mmap, bool check_tensors, bool repack_tensors, bool use_thp,
             bool merge_qkv, bool merge_up_gate_exps, bool defer_experts,
             const llama_model_kv_override * param_overrides_p,

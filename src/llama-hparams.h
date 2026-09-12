@@ -29,6 +29,12 @@ struct llama_hparams {
     uint32_t n_embd_out = 0;
     uint32_t n_layer;
     int32_t n_layer_kv_from_start = -1; // if non-negative, the first n_layer_kv_from_start layers have KV cache
+    // Layer-library window: this instance holds the SOURCE model's blocks
+    // [il_offset, il_offset + n_layer). A monolithic model is the [0, n_layer) window,
+    // so the defaults are the identity and nothing changes for it. Read them through
+    // il_abs() / n_layer_source(). [meta#91]
+    uint32_t il_offset   = 0;
+    uint32_t n_layer_src = 0;   // 0 = unset; use n_layer_source()
     uint32_t n_rot;
     uint32_t n_rot_swa;
     uint32_t n_swa = 0; // sliding window attention (SWA)
@@ -413,6 +419,23 @@ struct llama_hparams {
     bool is_ple(uint32_t il) const {
         return il < n_layer ? ple_layer_arr[il] : false;
     }
+
+    // ---- layer-library window helpers [meta#91] ----
+    // il_abs maps a window-local block index to the source model's block number;
+    // n_layer_source is the source model's block_count. Every per-layer quantity the
+    // source model indexes absolutely (per-layer token embeddings, "every k-th block"
+    // patterns) must go through these, or a window that does not start at block 0
+    // silently reads the wrong slice.
+    uint32_t il_abs(uint32_t il)  const { return il_offset + il; }
+    uint32_t n_layer_source()     const { return n_layer_src ? n_layer_src : n_layer; }
+    bool     is_layer_window()    const { return il_offset > 0 || n_layer_source() != n_layer; }
+
+    // The architecture's token embedding has a PER-LAYER part: gemma4's
+    // per_layer_token_embd (every block consumes its own slice) or qwen4exp's PLE
+    // n-gram table (only the blocks listed in ple.layers consume it). Such a table is
+    // indexed by the SOURCE block number AND needs the batch's token ids, so a window
+    // that owns one of those blocks needs both its own slice and the ids.
+    bool has_per_layer_token_embd() const { return n_embd_per_layer > 0 || ple_n_heads > 0; }
 
     // the layer runs Qwen sparse attention over pooled blocks; deepseek4 fills the same
     // ratio array for its CSA/HCA layers and reads the ratio value directly instead

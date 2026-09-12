@@ -148,6 +148,11 @@ void llm_load_hparams(
 
     ml.get_key(LLM_KV_BLOCK_COUNT,       hparams.n_layer);
 
+    // A layer-library window knows which slice of the source model it is; a monolithic
+    // file is the whole model. Set before any per-layer derivation below reads it. [meta#91]
+    hparams.il_offset   = ml.window_il_offset   > 0 ? (uint32_t) ml.window_il_offset   : 0u;
+    hparams.n_layer_src = ml.window_n_layer_src > 0 ? (uint32_t) ml.window_n_layer_src : hparams.n_layer;
+
     // get general kv
     ml.get_key(LLM_KV_GENERAL_NAME, model.name, false);
 
@@ -574,7 +579,10 @@ void llm_load_hparams(
 
                     if (!ml.get_key_or_arr(LLM_KV_ATTENTION_SLIDING_WINDOW_PATTERN, hparams.swa_layers, hparams.n_layer, false)) {
                         for (uint32_t i = 0; i < hparams.n_layer; ++i) {
-                            hparams.swa_layers[i] = ((i + 1) % 4 != 0);
+                            // an "every k-th block" pattern is a property of the SOURCE model's block number; a layer-
+                            // library window that does not start on the period would otherwise give every one of its
+                            // blocks the wrong kind of attention. il_abs() is the identity for a monolithic model. [meta#91]
+                            hparams.swa_layers[i] = ((hparams.il_abs(i) + 1) % 4 != 0);
                         }
                     }
 
@@ -599,8 +607,9 @@ void llm_load_hparams(
                 ml.get_key(LLM_KV_SSM_GROUP_COUNT,    hparams.ssm_n_group);
 
                 // Upstream convention: every 4th layer is full attention, others are recurrent.
+                // Indexed by the SOURCE block number so a layer-library window keeps the phase. [meta#91]
                 for (uint32_t i = 0; i < hparams.n_layer; ++i) {
-                    hparams.recurrent_layer_arr[i] = ((i + 1) % 4 != 0);
+                    hparams.recurrent_layer_arr[i] = ((hparams.il_abs(i) + 1) % 4 != 0);
                 }
 
                 switch (hparams.n_layer) {
@@ -647,7 +656,11 @@ void llm_load_hparams(
                     uint32_t full_attn_interval = 4;
                     ml.get_key(LLM_KV_FULL_ATTENTION_INTERVAL, full_attn_interval, false);
                     for (uint32_t i = 0; i < hparams.n_layer; ++i) {
-                        hparams.recurrent_layer_arr[i] = ((i + 1) % full_attn_interval != 0);
+                        // the linear/full attention pattern is a property of the SOURCE model's
+                        // block number. A window that starts at a block which is not a multiple of
+                        // the interval would otherwise give every one of its blocks the wrong kind
+                        // of attention. [meta#91]
+                        hparams.recurrent_layer_arr[i] = ((hparams.il_abs(i) + 1) % full_attn_interval != 0);
                     }
                     // the MTP tail is a full-attention (QSA) layer regardless of the interval pattern
                     for (uint32_t i = hparams.n_layer - hparams.nextn_predict_layers; i < hparams.n_layer; ++i) {
@@ -751,7 +764,8 @@ void llm_load_hparams(
                     const uint32_t n_main_layers = hparams.n_layer - hparams.nextn_predict_layers;
                     for (uint32_t i = 0; i < hparams.n_layer; ++i) {
                         if (i < n_main_layers) {
-                            hparams.recurrent_layer_arr[i] = ((i + 1) % full_attn_interval != 0);
+                            // SOURCE block number: a window off the period would flip every layer's kind [meta#91]
+                            hparams.recurrent_layer_arr[i] = ((hparams.il_abs(i) + 1) % full_attn_interval != 0);
                         } else {
                             hparams.recurrent_layer_arr[i] = false;
                         }
@@ -795,7 +809,8 @@ void llm_load_hparams(
                     const uint32_t n_main_layers = hparams.n_layer - hparams.nextn_predict_layers;
                     for (uint32_t i = 0; i < hparams.n_layer; ++i) {
                         if (i < n_main_layers) {
-                            hparams.recurrent_layer_arr[i] = ((i + 1) % full_attn_interval != 0);
+                            // SOURCE block number: a window off the period would flip every layer's kind [meta#91]
+                            hparams.recurrent_layer_arr[i] = ((hparams.il_abs(i) + 1) % full_attn_interval != 0);
                         } else {
                             hparams.recurrent_layer_arr[i] = false;
                         }
@@ -2314,12 +2329,13 @@ void llm_load_hparams(
 
                 if (uint32_t swa_period; ml.get_key_or_arr(LLM_KV_ATTENTION_SLIDING_WINDOW_PATTERN, swa_period, false) && swa_period > 0) {
                     for (int il = 0; il < hparams.n_layer; ++il) {
-                        hparams.swa_layers[il] = (il % swa_period < swa_period - 1);
+                        // SOURCE block number, so a layer-library window keeps the phase [meta#91]
+                        hparams.swa_layers[il] = (hparams.il_abs(il) % swa_period < swa_period - 1);
                     }
                 } else if (!ml.get_key_or_arr(LLM_KV_ATTENTION_SLIDING_WINDOW_PATTERN, hparams.swa_layers, hparams.n_layer)) {
                     LLAMA_LOG_WARN("================================ No attention.sliding_window_pattern key found! Assuming a period of 4\n");
                     for (int il = 0; il < hparams.n_layer; ++il) {
-                        hparams.swa_layers[il] = (il % 4 < 3);
+                        hparams.swa_layers[il] = (hparams.il_abs(il) % 4 < 3);   // SOURCE block number [meta#91]
                     }
                 }
 
