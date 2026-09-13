@@ -28,7 +28,7 @@ Below are the seven core technical capabilities built into Dreamcatcher, each de
 ---
 
 ### 1. Multi-Host Stage-Runner Rings
-- **What It Does:** Partitions a model's transformer layers across multiple sequential host processes (`head`, `relay`, and `tail` roles) linked in a pipeline ring. Intermediate activations flow forward between stages via low-latency TCP sockets over standard network interfaces.
+- **What It Does:** Partitions a model's transformer layers across multiple sequential host processes (`head`, `relay`, and `tail` roles) linked in a pipeline ring. Intermediate activations flow forward between stages via low-latency TCP sockets (`TCP_NODELAY`) over direct node-to-node links on InfiniBand/RDMA-class network adapters (such as Intel E810 or NVIDIA Mellanox ConnectX).
 - **Why It Matters:** Enables frontier-scale language models (30 GB to 150+ GB) to execute across separate physical workstations and servers without requiring proprietary multi-GPU interconnects (like NVLink) or complex MPI clusters.
 - **Proof & Documentation:** [`docs/BRING-UP.md`](BRING-UP.md) §1 ("Architecture & Pipeline Topology").
 
@@ -83,7 +83,7 @@ When deploying Dreamcatcher in production environments, eight foundational opera
 2. **Feasibility vs. Runtime Proof:** Arithmetic VRAM allocation estimates from the planner confirm feasibility, but runtime stability is established only after surviving prompt prefill.
 3. **Dynamic Layer Windows:** The layer slice assigned to each node is a process launch flag (`--layers <start>,<end>`), decoupled from immutable weight files.
 4. **Persistent Hardware Identification:** Accelerators are pinned by persistent hardware UUIDs (`CUDA_VISIBLE_DEVICES=GPU-<uuid>`), never by volatile ordinal device indexes.
-5. **Direct Node-to-Node Interconnect:** Inter-stage activation transport relies on low-latency, direct node-to-node network connections. InfiniBand-capable (IB-capable) network adapters such as Intel E810 or Mellanox ConnectX are necessary to achieve expected pipeline throughput.
+5. **Direct Node-to-Node Interconnect:** Inter-stage activation transport relies on low-latency, direct node-to-node network connections over TCP (`TCP_NODELAY`). Network adapters in the InfiniBand/RDMA hardware class, such as Intel E810 or NVIDIA Mellanox ConnectX, are necessary to reach expected pipeline throughput (hardware class requirement; transport operates via TCP rather than an RDMA/verbs stack).
 6. **Exclusive xAutonomics HF Distribution:** Only model files and layer libraries downloaded directly from our official Hugging Face repository (`xautonomics`) are supported. Standard or third-party monolithic GGUF distributions are not compatible.
 7. **`LAYR.GGUF` File Naming Convention:** Model files in the Hugging Face repository follow the standardized `LAYR.GGUF` naming pattern (e.g. `*.LAYR.GGUF`) instead of including the word `layers` in the filenames.
 8. **Internal Project Lineage:** Capabilities in this fork were grafted back from an internal `llama.cpp` / `ik_llama.cpp` project to establish a public, verified baseline for disaggregated inference.

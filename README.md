@@ -24,11 +24,11 @@ Status per architecture and backend, measured on this tree: [docs/HF-MODEL-CARDS
 
 > [!IMPORTANT]
 > **Cluster Interconnect Requirements**:  
-> Dreamcatcher relies on low-latency, direct node-to-node network connections between pipeline stages. An InfiniBand-capable (IB-capable) class of high-speed network adapters—such as **Intel E810** (100GbE / RoCEv2) or **Mellanox ConnectX** (ConnectX-5/6/7)—is necessary to achieve expected pipeline performance and eliminate transport bottlenecks.
+> Dreamcatcher relies on low-latency, direct node-to-node network connections between pipeline stages. Network adapters in the InfiniBand/RDMA hardware class—such as **Intel E810** (100GbE / RoCEv2) or **NVIDIA Mellanox ConnectX** (ConnectX-5/6/7)—are necessary to achieve expected pipeline performance and eliminate transport bottlenecks. Note that transport in this tree operates over low-latency TCP sockets (`TCP_NODELAY`) rather than an RDMA/verbs stack; these adapters are required as a hardware class to deliver necessary throughput and microsecond-scale wire latencies.
 
 > [!IMPORTANT]
 > **Supported Models & Repository Naming**:  
-> **Only model files downloaded directly from our own Hugging Face repository (`xautonomics`) are supported.** Standard upstream or third-party monolithic GGUFs are not compatible with per-layer multi-host ring serving. Additionally, all per-layer model files in the HF repository follow the standardized **`LAYR.GGUF`** naming convention (e.g. `*.LAYR.GGUF`), rather than embedding the word `layers` in the filenames.
+> **Only model files downloaded directly from our own Hugging Face repository ([huggingface.co/xautonomics](https://huggingface.co/xautonomics)) are supported.** Standard upstream or third-party monolithic GGUFs are not compatible with per-layer multi-host ring serving. Additionally, all per-layer model files in the HF repository follow the standardized **`LAYR.GGUF`** naming convention (e.g. `*.LAYR.GGUF`), rather than embedding the word `layers` in the filenames.
 
 ---
 
@@ -127,6 +127,9 @@ See [the lane 11 documentation](docs/LANES-9-11.md#lane-11-gslot-runtime) for de
 https://github.com/ikawrakow/ik_llama.cpp/blob/main/docs/build.md
 
 ### Run
+
+> [!NOTE]
+> **Upstream Standalone Reference**: The single-file GGUF instructions below reflect upstream `ik_llama.cpp` single-host usage for reference. For distributed multi-host Dreamcatcher ring serving, refer to [docs/BRING-UP.md](docs/BRING-UP.md); multi-host execution strictly requires layer-partitioned model packages downloaded directly from [huggingface.co/xautonomics](https://huggingface.co/xautonomics).
 
 Download `.gguf` model files (e.g. [bartowski/Qwen_Qwen3-0.6B-IQ4_NL.gguf](https://huggingface.co/bartowski/Qwen_Qwen3-0.6B-GGUF/blob/main/Qwen_Qwen3-0.6B-IQ4_NL.gguf)) to your favorite directory (e.g. `/my_local_files/gguf`).
 

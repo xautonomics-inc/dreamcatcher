@@ -8,9 +8,9 @@ slice of the same window.
 
 > [!IMPORTANT]
 > **Hugging Face Repository Exclusivity & `LAYR.GGUF` Naming**:  
-> - **Exclusively Supported Source**: Only per-layer library files downloaded from our official Hugging Face repository (`xautonomics`) are supported. Standard third-party GGUFs cannot be assembled into stage windows without verified manifests and block layouts.
+> - **Exclusively Supported Source**: Only per-layer library files downloaded from our official Hugging Face repository ([huggingface.co/xautonomics](https://huggingface.co/xautonomics)) are supported. Standard third-party GGUFs cannot be assembled into stage windows without verified manifests and block layouts.
 > - **File Naming**: In our official Hugging Face repository, per-layer slice files are standardized with the **`LAYR.GGUF`** naming convention (e.g., `*.LAYR.GGUF`), rather than embedding the word `layers` in the filenames.
-> - **Interconnect**: Multi-stage distributed rings require low-latency direct node-to-node interconnects. InfiniBand-capable network adapters (such as Intel E810 or Mellanox ConnectX) are necessary for expected performance.
+> - **Interconnect**: Multi-stage distributed rings require low-latency direct node-to-node interconnects over TCP (`TCP_NODELAY`). InfiniBand/RDMA-class network adapters (such as Intel E810 or NVIDIA Mellanox ConnectX) are necessary as a hardware class for expected performance.
 > - **Lineage**: Capabilities in this fork were grafted back from an internal `llama.cpp` / `ik_llama.cpp` project.
 
 ## 1. Slicer: `slice_gguf_layers.py`
