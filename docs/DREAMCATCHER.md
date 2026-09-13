@@ -21,7 +21,7 @@
 
 ## 2. Core Capabilities Added to `ik_llama.cpp`
 
-Upstream `llama.cpp` and `ik_llama.cpp` focus primarily on single-host or single-vendor acceleration. Dreamcatcher extends this foundation into an enterprise-ready distributed inference engine designed for mixed-hardware environments.
+Upstream `llama.cpp` and `ik_llama.cpp` focus primarily on single-host or single-vendor acceleration. Dreamcatcher extends this foundation into an enterprise-ready distributed inference engine designed for mixed-hardware environments, grafting back distributed execution, per-layer sliced serving, expert disaggregation, global slot arbitration, and Vulkan performance enhancements originally developed in an internal `llama.cpp` / `ik_llama.cpp` project.
 
 Below are the seven core technical capabilities built into Dreamcatcher, each detailing what it does, why it matters, and the authoritative documentation proving its implementation.
 
@@ -77,9 +77,13 @@ Below are the seven core technical capabilities built into Dreamcatcher, each de
 
 ## 3. Architecture & Operational Invariants
 
-When deploying Dreamcatcher in production environments, four foundational operational rules govern cluster bring-up:
+When deploying Dreamcatcher in production environments, eight foundational operational rules govern cluster bring-up:
 
 1. **Liveness Requires a Completion:** An HTTP 200 response on `/health` is an availability check, not a proof of generation. Liveness must always be validated with an end-to-end token completion stream.
 2. **Feasibility vs. Runtime Proof:** Arithmetic VRAM allocation estimates from the planner confirm feasibility, but runtime stability is established only after surviving prompt prefill.
 3. **Dynamic Layer Windows:** The layer slice assigned to each node is a process launch flag (`--layers <start>,<end>`), decoupled from immutable weight files.
 4. **Persistent Hardware Identification:** Accelerators are pinned by persistent hardware UUIDs (`CUDA_VISIBLE_DEVICES=GPU-<uuid>`), never by volatile ordinal device indexes.
+5. **Direct Node-to-Node Interconnect:** Inter-stage activation transport relies on low-latency, direct node-to-node network connections. InfiniBand-capable (IB-capable) network adapters such as Intel E810 or Mellanox ConnectX are necessary to achieve expected pipeline throughput.
+6. **Exclusive xAutonomics HF Distribution:** Only model files and layer libraries downloaded directly from our official Hugging Face repository (`xautonomics`) are supported. Standard or third-party monolithic GGUF distributions are not compatible.
+7. **`LAYR.GGUF` File Naming Convention:** Model files in the Hugging Face repository follow the standardized `LAYR.GGUF` naming pattern (e.g. `*.LAYR.GGUF`) instead of including the word `layers` in the filenames.
+8. **Internal Project Lineage:** Capabilities in this fork were grafted back from an internal `llama.cpp` / `ik_llama.cpp` project to establish a public, verified baseline for disaggregated inference.

@@ -6,6 +6,13 @@ ONE-TIME per-layer slicing; any stage window `[A,B)` is then assembled at LOAD T
 by the stage binary from the per-layer files — equivalent to loading a monolithic
 slice of the same window.
 
+> [!IMPORTANT]
+> **Hugging Face Repository Exclusivity & `LAYR.GGUF` Naming**:  
+> - **Exclusively Supported Source**: Only per-layer library files downloaded from our official Hugging Face repository (`xautonomics`) are supported. Standard third-party GGUFs cannot be assembled into stage windows without verified manifests and block layouts.
+> - **File Naming**: In our official Hugging Face repository, per-layer slice files are standardized with the **`LAYR.GGUF`** naming convention (e.g., `*.LAYR.GGUF`), rather than embedding the word `layers` in the filenames.
+> - **Interconnect**: Multi-stage distributed rings require low-latency direct node-to-node interconnects. InfiniBand-capable network adapters (such as Intel E810 or Mellanox ConnectX) are necessary for expected performance.
+> - **Lineage**: Capabilities in this fork were grafted back from an internal `llama.cpp` / `ik_llama.cpp` project.
+
 ## 1. Slicer: `slice_gguf_layers.py`
 
 ```
