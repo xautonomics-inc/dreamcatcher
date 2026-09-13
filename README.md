@@ -24,7 +24,7 @@ Status per architecture and backend, measured on this tree: [docs/HF-MODEL-CARDS
 
 > [!IMPORTANT]
 > **Cluster Interconnect Requirements**:  
-> Dreamcatcher relies on low-latency, direct node-to-node network connections between pipeline stages. InfiniBand/RDMA-class adapters such as Intel E810 or NVIDIA Mellanox ConnectX are necessary to achieve expected performance. Note that the transport in this tree is TCP (`TCP_NODELAY`); there is no RDMA/verbs transport path.
+> Dreamcatcher relies on low-latency, direct node-to-node network connections between pipeline stages. InfiniBand/RDMA-class adapters such as Intel E810 or NVIDIA Mellanox ConnectX are necessary to achieve expected performance. Stage-runner rings and the expert server exchange activations over TCP (`TCP_NODELAY`). The RPC backend (`ggml-rpc`) also has an optional RDMA (RoCE) transport tier, built when `libibverbs` is found (`GGML_RPC_RDMA`).
 
 > [!IMPORTANT]
 > **Supported Models & Repository Naming**:  
