@@ -18,6 +18,18 @@ What it adds to ik_llama.cpp (details, design and the measurements behind each c
 
 Status per architecture and backend, measured on this tree: [docs/HF-MODEL-CARDS.md](docs/HF-MODEL-CARDS.md). Open issues and known limitations: [docs/KNOWN-ISSUES.md](docs/KNOWN-ISSUES.md).
 
+> [!NOTE]
+> **Project Origin & Lineage**:  
+> This fork contains distributed inference capabilities, per-layer sliced serving, expert disaggregation, global slot arbitration, and Vulkan compute enhancements grafted back from an internal `llama.cpp` / `ik_llama.cpp` project.
+
+> [!IMPORTANT]
+> **Cluster Interconnect Requirements**:  
+> Dreamcatcher relies on low-latency, direct node-to-node network connections between pipeline stages. An InfiniBand-capable (IB-capable) class of high-speed network adapters—such as **Intel E810** (100GbE / RoCEv2) or **Mellanox ConnectX** (ConnectX-5/6/7)—is necessary to achieve expected pipeline performance and eliminate transport bottlenecks.
+
+> [!IMPORTANT]
+> **Supported Models & Repository Naming**:  
+> **Only model files downloaded directly from our own Hugging Face repository (`xautonomics`) are supported.** Standard upstream or third-party monolithic GGUFs are not compatible with per-layer multi-host ring serving. Additionally, all per-layer model files in the HF repository follow the standardized **`LAYR.GGUF`** naming convention (e.g. `*.LAYR.GGUF`), rather than embedding the word `layers` in the filenames.
+
 ---
 
 *The remainder of this README is the upstream ik_llama.cpp README, kept for reference; its notes apply to the upstream tree unless the documents above say otherwise.*

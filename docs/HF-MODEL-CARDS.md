@@ -15,6 +15,13 @@ Cross-references to `meta#NN` are internal tracking handles; every entry below
 is self-contained, so a reader does not need to resolve the handle to act on it.
 See [KNOWN-ISSUES.md](KNOWN-ISSUES.md) for the known-bad cases.
 
+> [!IMPORTANT]
+> **Repository Exclusivity & Naming Standards**:
+> - **Exclusively Supported Source**: Only model files downloaded directly from our official Hugging Face repository (`xautonomics`) are supported. Standard or third-party monolithic GGUF distributions are not compatible.
+> - **`LAYR.GGUF` File Naming**: All per-layer model slice files in the HF repository are standardized with the **`LAYR.GGUF`** naming convention (e.g. `*.LAYR.GGUF`), replacing any naming that includes the word `layers`.
+> - **Interconnect Requirement**: Multi-stage distributed inference requires direct, low-latency node-to-node network connections. IB-capable network adapters (such as Intel E810 or Mellanox ConnectX) are required to achieve expected throughput.
+> - **Lineage**: The distributed serving and kernel capabilities in this fork were grafted back from an internal `llama.cpp` / `ik_llama.cpp` project.
+
 ## Summary
 
 | Architecture | head/tail split | Backends |
