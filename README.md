@@ -20,15 +20,15 @@ Status per architecture and backend, measured on this tree: [docs/HF-MODEL-CARDS
 
 > [!NOTE]
 > **Project Origin & Lineage**:  
-> This fork contains distributed inference capabilities, per-layer sliced serving, expert disaggregation, global slot arbitration, and Vulkan compute enhancements grafted back from an internal `llama.cpp` / `ik_llama.cpp` project.
+> This fork contains features grafted back from an internal `llama.cpp` / `ik_llama.cpp` project.
 
 > [!IMPORTANT]
 > **Cluster Interconnect Requirements**:  
-> Dreamcatcher relies on low-latency, direct node-to-node network connections between pipeline stages. Network adapters in the InfiniBand/RDMA hardware class—such as **Intel E810** (100GbE / RoCEv2) or **NVIDIA Mellanox ConnectX** (ConnectX-5/6/7)—are necessary to achieve expected pipeline performance and eliminate transport bottlenecks. Note that transport in this tree operates over low-latency TCP sockets (`TCP_NODELAY`) rather than an RDMA/verbs stack; these adapters are required as a hardware class to deliver necessary throughput and microsecond-scale wire latencies.
+> Dreamcatcher relies on low-latency, direct node-to-node network connections between pipeline stages. InfiniBand/RDMA-class adapters such as Intel E810 or NVIDIA Mellanox ConnectX are necessary to achieve expected performance. Note that the transport in this tree is TCP (`TCP_NODELAY`); there is no RDMA/verbs transport path.
 
 > [!IMPORTANT]
 > **Supported Models & Repository Naming**:  
-> **Only model files downloaded directly from our own Hugging Face repository ([huggingface.co/xautonomics](https://huggingface.co/xautonomics)) are supported.** Standard upstream or third-party monolithic GGUFs are not compatible with per-layer multi-host ring serving. Additionally, all per-layer model files in the HF repository follow the standardized **`LAYR.GGUF`** naming convention (e.g. `*.LAYR.GGUF`), rather than embedding the word `layers` in the filenames.
+> Only model files downloaded from [huggingface.co/xautonomics](https://huggingface.co/xautonomics) are supported. Other GGUFs, including libraries you slice yourself, may load but are unsupported. Repositories on Hugging Face are named `xautonomics/<model>-<quant>.LAYR.GGUF`; `--model-dir` loads the layer files exactly as downloaded (`blk-NNNNN.gguf`, `parts-*.gguf`), so do not rename the files inside the repository.
 
 ---
 
@@ -129,7 +129,7 @@ https://github.com/ikawrakow/ik_llama.cpp/blob/main/docs/build.md
 ### Run
 
 > [!NOTE]
-> **Upstream Standalone Reference**: The single-file GGUF instructions below reflect upstream `ik_llama.cpp` single-host usage for reference. For distributed multi-host Dreamcatcher ring serving, refer to [docs/BRING-UP.md](docs/BRING-UP.md); multi-host execution strictly requires layer-partitioned model packages downloaded directly from [huggingface.co/xautonomics](https://huggingface.co/xautonomics).
+> **Upstream Standalone Reference**: The single-file GGUF instructions below reflect upstream `ik_llama.cpp` single-host usage for reference. Only model files downloaded from [huggingface.co/xautonomics](https://huggingface.co/xautonomics) are supported; other GGUFs, including libraries you slice yourself, may load but are unsupported.
 
 Download `.gguf` model files (e.g. [bartowski/Qwen_Qwen3-0.6B-IQ4_NL.gguf](https://huggingface.co/bartowski/Qwen_Qwen3-0.6B-GGUF/blob/main/Qwen_Qwen3-0.6B-IQ4_NL.gguf)) to your favorite directory (e.g. `/my_local_files/gguf`).
 

@@ -12,19 +12,11 @@ It covers:
 Multi-stage is for models that do not fit one box. **If the library fits one box, do
 not build a pipeline at all** — serve it in a single process (section 0).
 
-> [!NOTE]
-> **Lineage & Supported Model Repositories**:
-> - Distributed execution and per-layer sliced serving features in Dreamcatcher were grafted back from an internal `llama.cpp` / `ik_llama.cpp` project.
-> - **Only model files downloaded directly from our official Hugging Face repository ([huggingface.co/xautonomics](https://huggingface.co/xautonomics)) are supported.**
-> - Files in our HF repository are standardized with the **`LAYR.GGUF`** naming convention (e.g. `*.LAYR.GGUF`), replacing any naming with the word `layers`.
-
-> [!IMPORTANT]
-> **Interconnect Requirements**:
-> Running multi-stage pipeline inference across separate hosts relies on low-latency, direct node-to-node network connections over TCP (`TCP_NODELAY`). Network adapters in the InfiniBand/RDMA hardware class—such as **Intel E810** (100GbE / RoCEv2) or **NVIDIA Mellanox ConnectX** (ConnectX-5/6/7)—are necessary to achieve expected pipeline throughput and prevent activation handoff bottlenecks. Note that transport operates over TCP sockets rather than an RDMA/verbs stack.
-
 ---
 
 ## 0. Single-Process Serving: `llama-server --model-dir` (start here)
+
+For cluster interconnect requirements, supported model repositories, and project lineage, see the notes in [README.md](../README.md).
 
 A layer library is a whole model stored as one file per block. `llama-server` and
 `llama-cli` take `--model-dir DIR` as an alternative model source to `-m`: the parts
