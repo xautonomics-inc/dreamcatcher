@@ -82,7 +82,7 @@ def generate_results_markdown(xml_path: Path) -> str:
     else:
         overall_status = "GREEN (ALL PASSED)"
 
-    model_used = os.environ.get("BDD_MODEL", "synthetic-cpu-4b")
+    model_used = os.environ.get("BDD_MODEL", "unbound")
     runner_env = os.environ.get("BDD_RUNNER", "Local Fleet Runner")
 
     md = f"""# Dreamcatcher BDD Acceptance Test Results
