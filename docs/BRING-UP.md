@@ -16,6 +16,8 @@ not build a pipeline at all** — serve it in a single process (section 0).
 
 ## 0. Single-Process Serving: `llama-server --model-dir` (start here)
 
+For cluster interconnect requirements, supported model repositories, and project lineage, see the notes in [README.md](../README.md).
+
 A layer library is a whole model stored as one file per block. `llama-server` and
 `llama-cli` take `--model-dir DIR` as an alternative model source to `-m`: the parts
 are enumerated and assembled at load time via `llama_model_load_from_parts()`, in the
@@ -325,7 +327,7 @@ Once loopback execution is verified, transition to multi-node distributed infere
 ### Topology
 - **Host A (Head Stage)**: IP `10.0.0.10`, carries layers `[0, 24)`.
 - **Host B (Tail Stage)**: IP `10.0.0.11`, carries layers `[24, 48)`.
-- Interconnect: Dedicated 10GbE+ network interface.
+- Interconnect: Dedicated low-latency direct node-to-node interconnect with InfiniBand/RDMA-class network adapters (Intel E810 or NVIDIA Mellanox ConnectX) running low-latency TCP (`TCP_NODELAY`).
 
 ```
        Host A (10.0.0.10)                        Host B (10.0.0.11)

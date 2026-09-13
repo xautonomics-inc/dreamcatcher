@@ -6,6 +6,9 @@ ONE-TIME per-layer slicing; any stage window `[A,B)` is then assembled at LOAD T
 by the stage binary from the per-layer files — equivalent to loading a monolithic
 slice of the same window.
 
+> [!NOTE]
+> Only model files downloaded from [huggingface.co/xautonomics](https://huggingface.co/xautonomics) are supported. Other GGUFs, including libraries you slice yourself, may load but are unsupported.
+
 ## 1. Slicer: `slice_gguf_layers.py`
 
 ```
@@ -22,6 +25,8 @@ Reads the source GGUF (multi-file globs supported, like `slice_gguf.py`) and wri
 | `parts-output.gguf`      | `output_norm.weight` (+ `output.weight` if untied)      | all 0 |
 | `parts-other.gguf`       | any other non-blk tensors (rare, e.g. `rope_freqs`) — WARNED; `slice_gguf.py` silently drops these | all 0 |
 | `manifest.json`          | provenance, per-file/per-tensor sizes + blake2b-128 hashes | — |
+
+Do not rename these files after download or slicing. The runtime loader expects exact filenames (`blk-NNNNN.gguf`, `parts-*.gguf`, `manifest.json`) when assembling a stage window.
 
 Every file keeps the FULL source KV (tokenizer included, `GGUF.*`/`split.*` dropped)
 so each file is self-describing and any of them can serve as the assembly's metadata

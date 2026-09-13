@@ -28,7 +28,7 @@ Below are the seven core technical capabilities built into Dreamcatcher, each de
 ---
 
 ### 1. Multi-Host Stage-Runner Rings
-- **What It Does:** Partitions a model's transformer layers across multiple sequential host processes (`head`, `relay`, and `tail` roles) linked in a pipeline ring. Intermediate activations flow forward between stages via low-latency TCP sockets over standard network interfaces.
+- **What It Does:** Partitions a model's transformer layers across multiple sequential host processes (`head`, `relay`, and `tail` roles) linked in a pipeline ring. Intermediate activations flow forward between stages via low-latency TCP sockets (`TCP_NODELAY`) over direct node-to-node links on InfiniBand/RDMA-class network adapters (such as Intel E810 or NVIDIA Mellanox ConnectX).
 - **Why It Matters:** Enables frontier-scale language models (30 GB to 150+ GB) to execute across separate physical workstations and servers without requiring proprietary multi-GPU interconnects (like NVLink) or complex MPI clusters.
 - **Proof & Documentation:** [`docs/BRING-UP.md`](BRING-UP.md) §1 ("Architecture & Pipeline Topology").
 
@@ -77,9 +77,11 @@ Below are the seven core technical capabilities built into Dreamcatcher, each de
 
 ## 3. Architecture & Operational Invariants
 
-When deploying Dreamcatcher in production environments, four foundational operational rules govern cluster bring-up:
+When deploying Dreamcatcher in production environments, six foundational operational rules govern cluster bring-up:
 
 1. **Liveness Requires a Completion:** An HTTP 200 response on `/health` is an availability check, not a proof of generation. Liveness must always be validated with an end-to-end token completion stream.
 2. **Feasibility vs. Runtime Proof:** Arithmetic VRAM allocation estimates from the planner confirm feasibility, but runtime stability is established only after surviving prompt prefill.
 3. **Dynamic Layer Windows:** The layer slice assigned to each node is a process launch flag (`--layers <start>,<end>`), decoupled from immutable weight files.
 4. **Persistent Hardware Identification:** Accelerators are pinned by persistent hardware UUIDs (`CUDA_VISIBLE_DEVICES=GPU-<uuid>`), never by volatile ordinal device indexes.
+5. **Direct Node-to-Node Interconnect:** Inter-stage activation transport relies on low-latency, direct node-to-node network connections. InfiniBand/RDMA-class network adapters such as Intel E810 or NVIDIA Mellanox ConnectX are necessary to achieve expected performance. Note that the transport in this tree is TCP (`TCP_NODELAY`); there is no RDMA/verbs transport path.
+6. **Supported Models:** Only model files downloaded from [huggingface.co/xautonomics](https://huggingface.co/xautonomics) are supported. Other GGUFs, including libraries you slice yourself, may load but are unsupported.
