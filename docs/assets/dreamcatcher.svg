@@ -1,0 +1,297 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 820" width="100%" height="100%">
+  <defs>
+    <!-- Background subtle gradient -->
+    <linearGradient id="bgGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#f8fafc"/>
+      <stop offset="100%" stop-color="#f1f5f9"/>
+    </linearGradient>
+
+    <!-- Outer Hoop gradient (Willow Ring) -->
+    <linearGradient id="ringGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0284c7"/>
+      <stop offset="50%" stop-color="#8b5cf6"/>
+      <stop offset="100%" stop-color="#10b981"/>
+    </linearGradient>
+
+    <!-- Web chord gradient -->
+    <linearGradient id="webGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#38bdf8" stop-opacity="0.75"/>
+      <stop offset="100%" stop-color="#c084fc" stop-opacity="0.75"/>
+    </linearGradient>
+
+    <!-- Feather gradients -->
+    <linearGradient id="featherGrad1" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#0284c7" stop-opacity="0.12"/>
+      <stop offset="100%" stop-color="#0284c7" stop-opacity="0.02"/>
+    </linearGradient>
+
+    <linearGradient id="featherGrad2" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#8b5cf6" stop-opacity="0.12"/>
+      <stop offset="100%" stop-color="#8b5cf6" stop-opacity="0.02"/>
+    </linearGradient>
+
+    <linearGradient id="featherGrad3" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#0d9488" stop-opacity="0.12"/>
+      <stop offset="100%" stop-color="#0d9488" stop-opacity="0.02"/>
+    </linearGradient>
+
+    <!-- Glow Filter -->
+    <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="3" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over"/>
+    </filter>
+
+    <!-- Arrow markers -->
+    <marker id="arrow" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 8 5 L 0 9 z" fill="#0284c7" />
+    </marker>
+    <marker id="arrow-purple" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 8 5 L 0 9 z" fill="#8b5cf6" />
+    </marker>
+    <marker id="arrow-teal" viewBox="0 0 10 10" refX="6" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M 0 1 L 8 5 L 0 9 z" fill="#0d9488" />
+    </marker>
+
+    <style>
+      .text-title { font-weight: 700; fill: #0f172a; }
+      .text-sub { font-size: 13px; fill: #475569; font-weight: 500; }
+      .text-node { font-size: 13px; font-weight: 700; fill: #0f172a; text-anchor: middle; }
+      .text-node-sub { font-size: 11px; fill: #475569; text-anchor: middle; }
+      .text-knot-tag { font-size: 11px; font-weight: 700; text-anchor: middle; }
+      .text-feather-title { font-size: 12px; font-weight: 700; fill: #ffffff; text-anchor: middle; }
+      .text-feather-heading { font-size: 12px; font-weight: 700; fill: #0f172a; }
+      .text-feather-body { font-size: 11px; fill: #475569; }
+      .box-bg { fill: #ffffff; stroke: #cbd5e1; stroke-width: 1.5; }
+      .feather-card { fill: #ffffff; stroke: #cbd5e1; stroke-width: 1.5; rx: 8px; }
+      .ring-circle { fill: none; stroke: url(#ringGrad); stroke-width: 7; }
+      .web-line { stroke: url(#webGrad); stroke-width: 1.5; stroke-dasharray: 4 2; }
+      .cord-line { stroke: #94a3b8; stroke-width: 1.75; stroke-dasharray: 3 2; }
+      .bead { fill: #f59e0b; stroke: #b45309; stroke-width: 1; }
+      .knot-ring { fill: #ffffff; stroke-width: 3; }
+
+      @media (prefers-color-scheme: dark) {
+        .text-title { fill: #f8fafc; }
+        .text-sub { fill: #94a3b8; }
+        .text-node { fill: #f1f5f9; }
+        .text-node-sub { fill: #94a3b8; }
+        .text-feather-heading { fill: #f1f5f9; }
+        .text-feather-body { fill: #94a3b8; }
+        .box-bg { fill: #1e293b; stroke: #334155; }
+        .feather-card { fill: #1e293b; stroke: #334155; }
+        .knot-ring { fill: #1e293b; }
+        .cord-line { stroke: #64748b; }
+        .bead { fill: #fbbf24; stroke: #d97706; }
+      }
+    </style>
+  </defs>
+
+  <!-- Title & Architectural Header -->
+  <g transform="translate(550, 42)" text-anchor="middle">
+    <text class="text-title" style="font-size: 22px; letter-spacing: 0.05em;">DREAMCATCHER ARCHITECTURE</text>
+    <text y="24" class="text-sub">Ring Pipeline (3 GPU-Attention Knots) with Disaggregated APU/CPU Expert Offload Feathers</text>
+  </g>
+
+  <!-- ==================== THE HOOP & WEBBING ==================== -->
+  <!-- Center of Hoop: (550, 245), Radius: 165 -->
+  <g id="hoop-and-web">
+    <!-- Willow Hoop Ring -->
+    <circle cx="550" cy="245" r="165" class="ring-circle" />
+
+    <!-- Web Strands connecting Knots and Center -->
+    <!-- Knot 1: Head (385, 175) -> Knot 2: Relay (715, 175) -->
+    <line x1="385" y1="175" x2="715" y2="175" class="web-line" />
+    <!-- Knot 1: Head (385, 175) -> Knot 3: Tail (550, 410) -->
+    <line x1="385" y1="175" x2="550" y2="410" class="web-line" />
+    <!-- Knot 2: Relay (715, 175) -> Knot 3: Tail (550, 410) -->
+    <line x1="715" y1="175" x2="550" y2="410" class="web-line" />
+
+    <!-- Inner woven web chords forming star geometry -->
+    <polygon points="550,110 680,290 420,290" fill="none" class="web-line" stroke-opacity="0.6"/>
+    <polygon points="550,380 420,200 680,200" fill="none" class="web-line" stroke-opacity="0.6"/>
+
+    <!-- Concentric Web Aperture Rings -->
+    <circle cx="550" cy="245" r="80" fill="none" stroke="#0ea5e9" stroke-width="1.2" stroke-dasharray="3 3" stroke-opacity="0.5"/>
+
+    <!-- Central Aperture: Global Slot Router (gslot-runtime) -->
+    <circle cx="550" cy="245" r="44" class="box-bg" stroke="#0284c7" stroke-width="2"/>
+    <circle cx="550" cy="245" r="6" fill="#38bdf8" filter="url(#glow)"/>
+    <text x="550" y="240" class="text-node" style="font-size: 11.5px;">GLOBAL</text>
+    <text x="550" y="255" class="text-node-sub" style="font-size: 10.5px; font-weight: 700; fill: #0284c7;">SLOT ROUTER</text>
+    <text x="550" y="267" class="text-node-sub" style="font-size: 9.5px;">gslot lease arbiter</text>
+
+    <!-- Web Intersect Beads -->
+    <circle cx="467" cy="205" r="4" class="bead"/>
+    <circle cx="633" cy="205" r="4" class="bead"/>
+    <circle cx="485" cy="310" r="4" class="bead"/>
+    <circle cx="615" cy="310" r="4" class="bead"/>
+    <circle cx="550" cy="140" r="4" class="bead"/>
+
+    <!-- Activation Stream Direction Indicators around the Hoop -->
+    <!-- Ingress Arrow into Head (left) -->
+    <path d="M 230,130 Q 280,140 315,160" fill="none" stroke="#10b981" stroke-width="2.5" marker-end="url(#arrow)"/>
+    <text x="235" y="118" class="text-knot-tag" style="fill: #10b981;">Token Ingress</text>
+
+    <!-- Head to Relay (Top Arc) -->
+    <path d="M 460,95 Q 550,75 640,95" fill="none" stroke="#0284c7" stroke-width="2.5" marker-end="url(#arrow)"/>
+    <text x="550" y="70" class="text-node-sub" style="font-weight: 600; fill: #0284c7;">Hidden Activation Ring (TCP Socket Fabric)</text>
+
+    <!-- Relay to Tail (Right Arc) -->
+    <path d="M 725,270 Q 700,340 645,385" fill="none" stroke="#8b5cf6" stroke-width="2.5" marker-end="url(#arrow-purple)"/>
+
+    <!-- Tail Output (Bottom Egress) -->
+    <path d="M 550,445 L 550,475" fill="none" stroke="#0d9488" stroke-width="2.5" marker-end="url(#arrow-teal)"/>
+    <text x="550" y="495" class="text-knot-tag" style="fill: #0d9488;">Verified Token Egress (Logits Tail)</text>
+  </g>
+
+  <!-- ==================== THREE GPU-ATTENTION KNOT NODES ==================== -->
+
+  <!-- KNOT 1: HEAD STAGE (Left Side of Circle: x=340, y=175) -->
+  <g transform="translate(290, 175)">
+    <rect x="-110" y="-45" width="220" height="90" rx="10" class="box-bg" stroke="#0284c7" stroke-width="2.5"/>
+    <circle cx="-90" cy="-24" r="7" fill="#0284c7" class="knot-ring" stroke="#0284c7"/>
+    <text x="5" y="-22" class="text-node">HEAD STAGE KNOT</text>
+    <text x="5" y="-5" class="text-knot-tag" style="fill: #0284c7;">NVIDIA CUDA · GPU-Attention</text>
+    <text x="5" y="12" class="text-node-sub">Dense Embeddings &amp; Early Layers</text>
+    <text x="5" y="27" class="text-node-sub">High-VRAM Host · Ingress Dispatch</text>
+  </g>
+
+  <!-- KNOT 2: RELAY STAGE (Right Side of Circle: x=760, y=175) -->
+  <g transform="translate(810, 175)">
+    <rect x="-110" y="-45" width="220" height="90" rx="10" class="box-bg" stroke="#8b5cf6" stroke-width="2.5"/>
+    <circle cx="-90" cy="-24" r="7" fill="#8b5cf6" class="knot-ring" stroke="#8b5cf6"/>
+    <text x="5" y="-22" class="text-node">RELAY STAGE KNOT</text>
+    <text x="5" y="-5" class="text-knot-tag" style="fill: #8b5cf6;">AMD RADV · GPU-Attention</text>
+    <text x="5" y="12" class="text-node-sub">Intermediate Slices &amp; Vulkan FA</text>
+    <text x="5" y="27" class="text-node-sub">Radeon RDNA3/4 · Vulkan FA</text>
+  </g>
+
+  <!-- KNOT 3: TAIL STAGE (Bottom of Circle: x=550, y=410) -->
+  <g transform="translate(550, 410)">
+    <!-- Connected to circle at (550, 410) -->
+    <circle cx="0" cy="0" r="9" fill="#0d9488" stroke="#ffffff" stroke-width="2"/>
+  </g>
+  <!-- Tail stage box slightly offset to give room to circle and cords -->
+  <g transform="translate(550, 380)">
+    <rect x="-110" y="-38" width="220" height="76" rx="10" class="box-bg" stroke="#0d9488" stroke-width="2.5"/>
+    <text x="0" y="-16" class="text-node">TAIL STAGE KNOT</text>
+    <text x="0" y="2" class="text-knot-tag" style="fill: #0d9488;">Intel ANV · GPU-Attention</text>
+    <text x="0" y="18" class="text-node-sub">Final Norm, Self-Consistent Prefill &amp; Logits</text>
+  </g>
+
+  <!-- ==================== FEATHER CORDS & BEADS ==================== -->
+  <!-- Cord 1: Left - From Head Stage (x=290, y=220) down to Feather 1 (x=240, y=550) -->
+  <path d="M 290,220 C 270,320 240,430 240,545" class="cord-line"/>
+  <circle cx="275" cy="320" r="5" class="bead"/>
+  <circle cx="255" cy="420" r="4.5" class="bead"/>
+  <circle cx="243" cy="510" r="4" class="bead"/>
+
+  <!-- Cord 2: Center - From Hoop bottom (x=550, y=420) down to Feather 2 (x=550, y=550) -->
+  <path d="M 550,420 L 550,545" class="cord-line"/>
+  <circle cx="550" cy="460" r="5" class="bead"/>
+  <circle cx="550" cy="505" r="4.5" class="bead"/>
+  <circle cx="550" cy="530" r="4" class="bead"/>
+
+  <!-- Cord 3: Right - From Relay Stage (x=810, y=220) down to Feather 3 (x=860, y=550) -->
+  <path d="M 810,220 C 830,320 860,430 860,545" class="cord-line"/>
+  <circle cx="825" cy="320" r="5" class="bead"/>
+  <circle cx="845" cy="420" r="4.5" class="bead"/>
+  <circle cx="857" cy="510" r="4" class="bead"/>
+
+  <!-- ==================== THREE REMOTE-EXPERT FEATHER NODES ==================== -->
+
+  <!-- FEATHER 1 (LEFT): CPU Remote Expert Offload -->
+  <g transform="translate(110, 545)">
+    <!-- Feather spine & tip -->
+    <path d="M 130,0 L 130,205" stroke="#0284c7" stroke-width="2" stroke-linecap="round"/>
+    <path d="M 130,205 C 130,220 120,230 130,238 C 140,230 130,220 130,205" fill="url(#featherGrad1)"/>
+
+    <!-- Feather Card Box -->
+    <rect x="0" y="0" width="260" height="200" class="feather-card" stroke="#0284c7" stroke-width="2"/>
+
+    <!-- Feather Header Ribbon -->
+    <rect x="0" y="0" width="260" height="30" rx="8" fill="#0284c7"/>
+    <rect x="0" y="20" width="260" height="10" fill="#0284c7"/>
+    <text x="130" y="20" class="text-feather-title">FEATHER: REMOTE EXPERT 1</text>
+
+    <!-- Feather Content Details -->
+    <g transform="translate(18, 48)">
+      <text y="0" class="text-feather-heading" style="fill: #0284c7;">CPU / AVX-512 Offload</text>
+      <text y="18" class="text-feather-body">· Process: <tspan font-weight="600">llama-expert-server</tspan></text>
+      <text y="36" class="text-feather-body">· Target: Dense MoE Experts 00 – 15</text>
+      <text y="54" class="text-feather-body">· Compute: Fused Host CPU GEMM</text>
+      <text y="72" class="text-feather-body">· Transport: Low-Latency TCP Sockets</text>
+      <text y="90" class="text-feather-body">· Memory: Host DDR5 RAM Offload</text>
+      <text y="108" class="text-feather-body">· Routing: Dynamic Top-K Activation</text>
+
+      <rect x="0" y="122" width="224" height="20" rx="4" fill="#0284c7" fill-opacity="0.1"/>
+      <text x="112" y="136" text-anchor="middle" font-size="10.5px" font-weight="600" fill="#0284c7">Decoupled Activation Routing</text>
+    </g>
+  </g>
+
+  <!-- FEATHER 2 (CENTER): APU Unified Memory Expert Offload -->
+  <g transform="translate(420, 545)">
+    <!-- Feather spine & tip -->
+    <path d="M 130,0 L 130,205" stroke="#8b5cf6" stroke-width="2" stroke-linecap="round"/>
+    <path d="M 130,205 C 130,220 120,230 130,238 C 140,230 130,220 130,205" fill="url(#featherGrad2)"/>
+
+    <!-- Feather Card Box -->
+    <rect x="0" y="0" width="260" height="200" class="feather-card" stroke="#8b5cf6" stroke-width="2"/>
+
+    <!-- Feather Header Ribbon -->
+    <rect x="0" y="0" width="260" height="30" rx="8" fill="#8b5cf6"/>
+    <rect x="0" y="20" width="260" height="10" fill="#8b5cf6"/>
+    <text x="130" y="20" class="text-feather-title">FEATHER: REMOTE EXPERT 2</text>
+
+    <!-- Feather Content Details -->
+    <g transform="translate(18, 48)">
+      <text y="0" class="text-feather-heading" style="fill: #8b5cf6;">APU / Unified Memory Offload</text>
+      <text y="18" class="text-feather-body">· Process: <tspan font-weight="600">llama-expert-server</tspan></text>
+      <text y="36" class="text-feather-body">· Target: Routed MoE Experts 16 – 31</text>
+      <text y="54" class="text-feather-body">· Compute: APU Compute Kernels</text>
+      <text y="72" class="text-feather-body">· Transport: Asynchronous Wave Handoff</text>
+      <text y="90" class="text-feather-body">· Memory: Shared System/VRAM Pool</text>
+      <text y="108" class="text-feather-body">· Gate: gslot Monitored Leases</text>
+
+      <rect x="0" y="122" width="224" height="20" rx="4" fill="#8b5cf6" fill-opacity="0.1"/>
+      <text x="112" y="136" text-anchor="middle" font-size="10.5px" font-weight="600" fill="#8b5cf6">Zero-Copy Memory Bandwidth</text>
+    </g>
+  </g>
+
+  <!-- FEATHER 3 (RIGHT): Memory Pool & Shared MoE Offload -->
+  <g transform="translate(730, 545)">
+    <!-- Feather spine & tip -->
+    <path d="M 130,0 L 130,205" stroke="#0d9488" stroke-width="2" stroke-linecap="round"/>
+    <path d="M 130,205 C 130,220 120,230 130,238 C 140,230 130,220 130,205" fill="url(#featherGrad3)"/>
+
+    <!-- Feather Card Box -->
+    <rect x="0" y="0" width="260" height="200" class="feather-card" stroke="#0d9488" stroke-width="2"/>
+
+    <!-- Feather Header Ribbon -->
+    <rect x="0" y="0" width="260" height="30" rx="8" fill="#0d9488"/>
+    <rect x="0" y="20" width="260" height="10" fill="#0d9488"/>
+    <text x="130" y="20" class="text-feather-title">FEATHER: REMOTE EXPERT 3</text>
+
+    <!-- Feather Content Details -->
+    <g transform="translate(18, 48)">
+      <text y="0" class="text-feather-heading" style="fill: #0d9488;">CPU / Shared Experts Offload</text>
+      <text y="18" class="text-feather-body">· Process: <tspan font-weight="600">llama-expert-server</tspan></text>
+      <text y="36" class="text-feather-body">· Target: Routed MoE Experts 32 – 63</text>
+      <text y="54" class="text-feather-body">· Compute: Multi-Threaded FFN Gemm</text>
+      <text y="72" class="text-feather-body">· Slicing: --model-dir Layer Windows</text>
+      <text y="90" class="text-feather-body">· Quantization: IQ2_KS / IQ4_KS / FP16</text>
+      <text y="108" class="text-feather-body">· Integration: Fused Activation Handoff</text>
+
+      <rect x="0" y="122" width="224" height="20" rx="4" fill="#0d9488" fill-opacity="0.1"/>
+      <text x="112" y="136" text-anchor="middle" font-size="10.5px" font-weight="600" fill="#0d9488">Wide-Capacity MoE Parameter Pool</text>
+    </g>
+  </g>
+
+  <!-- ==================== BOTTOM ARCHITECTURAL LEGEND ==================== -->
+  <g transform="translate(550, 792)" text-anchor="middle">
+    <text class="text-sub" style="font-size: 12px;">
+      <tspan font-weight="700" fill="#0284c7">HOOP (3 KNOT NODES):</tspan> GPU-Attention Pipeline (NVIDIA CUDA · AMD RADV · Intel ANV) &#160;·&#160;
+      <tspan font-weight="700" fill="#8b5cf6">WEB:</tspan> Socket Fabric &amp; gslot Arbiter &#160;·&#160;
+      <tspan font-weight="700" fill="#0d9488">FEATHERS (3 EXPERT NODES):</tspan> Disaggregated APU/CPU MoE Offload
+    </text>
+  </g>
+</svg>
