@@ -25,10 +25,19 @@ if str(LAYER_DIST_PATH) not in sys.path:
     sys.path.insert(0, str(LAYER_DIST_PATH))
 
 
+KNOWN_ISSUES = {
+    "meta-80": "meta#80: Gemma-4 Q6_K token embeddings can produce degenerate repetition",
+    "meta-97": "meta#97: stage rings cannot transport token IDs to a later per-layer embedding window",
+    "meta-100": "meta#100: --model-dir server reports empty model_name",
+}
+
+
 def pytest_bdd_apply_tag(tag: str, function: Any) -> bool | None:
-    """Treat @known-issue tags as expected failures (xfail)."""
+    """Treat a @known-issue scenario's @meta-N tag as an expected failure."""
     if tag == "known-issue":
-        marker = pytest.mark.xfail(reason="Known issue tracked upstream in meta tracker", strict=False)
+        return True
+    if tag in KNOWN_ISSUES:
+        marker = pytest.mark.xfail(reason=KNOWN_ISSUES[tag], strict=False)
         marker(function)
         return True
     return None

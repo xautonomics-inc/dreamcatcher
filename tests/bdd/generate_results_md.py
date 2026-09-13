@@ -26,7 +26,8 @@ def generate_results_markdown(xml_path: Path) -> str:
     if not xml_path.exists():
         sys.exit(f"Error: JUnit XML report not found at {xml_path}. Run tests/bdd/run-local.sh first.")
 
-    commit = get_git_commit()
+    binary_commit = os.environ.get("BDD_BINARY_COMMIT", get_git_commit())
+    github_commit = os.environ.get("BDD_GITHUB_COMMIT", binary_commit)
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
 
     tree = ET.parse(xml_path)
@@ -79,6 +80,8 @@ def generate_results_markdown(xml_path: Path) -> str:
         overall_status = "PARTIAL / PREREQUISITES_PENDING"
     elif skipped == total:
         overall_status = "SKIPPED (NO PREREQUISITES)"
+    elif xfailed > 0:
+        overall_status = "GREEN (PASS + KNOWN ISSUES)"
     else:
         overall_status = "GREEN (ALL PASSED)"
 
@@ -87,11 +90,12 @@ def generate_results_markdown(xml_path: Path) -> str:
 
     md = f"""# Dreamcatcher BDD Acceptance Test Results
 
-**Run Date:** `{timestamp}`  
-**Commit:** [`{commit}`](https://github.com/xautonomics-inc/dreamcatcher/commit/{commit})  
-**Environment:** `{runner_env}`  
-**Model:** `{model_used}`  
-**Status:** **{overall_status}**  
+**Run Date:** `{timestamp}`<br>
+**Test Definition:** [`{github_commit}`](https://github.com/xautonomics-inc/dreamcatcher/commit/{github_commit})<br>
+**Binary Source Commit:** `{binary_commit}`<br>
+**Environment:** `{runner_env}`<br>
+**Model:** `{model_used}`<br>
+**Status:** **{overall_status}**
 
 ---
 

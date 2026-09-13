@@ -55,7 +55,7 @@ Execute all scenarios using the local runner script:
 The script:
 1. Sources any external environment bindings without leaking fleet paths into git.
 2. Sets `PYTHONPATH` to include the repository root, `tools/layer-distribution`, and dependencies.
-3. Executes `pytest` across all feature files, capturing exit codes without masking.
+3. Executes `pytest` across all feature files, or the path selected by `BDD_TEST_TARGET`, capturing exit codes without masking.
 4. Generates `tests/bdd/report.xml` and formats it into `tests/bdd/RESULTS.md`.
 5. Exits with the true pytest exit code.
 
@@ -93,11 +93,15 @@ Scenario steps support the following environment overrides:
 | `BDD_HOST` | Host address for server binding | `127.0.0.1` |
 | `BDD_PORT` | Port for server binding | `8080` |
 | `BDD_MODEL` | Human-readable model identifier | `unbound` |
+| `BDD_TEST_TARGET` | Pytest file or directory to execute | Entire `tests/bdd` suite |
+| `BDD_BINARY_COMMIT` | Exact source commit used to build the tested binaries | Current checkout |
+| `BDD_GITHUB_COMMIT` | Equivalent Dreamcatcher commit for the public report link | Binary commit |
 
 ---
 
 ## 5. Known Issues Tracking
 
-Scenarios representing known upstream issues are tagged with `@known-issue` and their meta issue identifier. The test runner automatically applies `pytest.mark.xfail` so that expected defects are reported truthfully without breaking CI:
+Scenarios representing tracked issues are tagged with `@known-issue` and their meta issue identifier. The test runner automatically applies `pytest.mark.xfail` so that expected defects are reported truthfully without breaking CI:
 - **`@known-issue @meta-80`**: Gemma-4 Q6_K `token_embd.weight` degenerate token repetition.
 - **`@known-issue @meta-97`**: Multi-stage pipeline rings unsupported with per-layer input embeddings in non-zero stage windows.
+- **`@known-issue @meta-100`**: A server loaded with `--model-dir` reports an empty `model_name`, so the conversation header and assistant badge show no model name.
