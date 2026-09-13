@@ -101,7 +101,7 @@ Scenario steps support the following environment overrides:
 
 ## 5. Known Issues Tracking
 
-Scenarios representing known upstream issues are tagged with `@known-issue` and their meta issue identifier. The test runner automatically applies `pytest.mark.xfail` so that expected defects are reported truthfully without breaking CI:
+Scenarios representing tracked issues are tagged with `@known-issue` and their meta issue identifier. The test runner automatically applies `pytest.mark.xfail` so that expected defects are reported truthfully without breaking CI:
 - **`@known-issue @meta-80`**: Gemma-4 Q6_K `token_embd.weight` degenerate token repetition.
 - **`@known-issue @meta-97`**: Multi-stage pipeline rings unsupported with per-layer input embeddings in non-zero stage windows.
-- **`@known-issue @meta-100`**: A server loaded with `--model-dir` does not expose its active model name in the initial WebUI.
+- **`@known-issue @meta-100`**: A server loaded with `--model-dir` reports an empty `model_name`, so the conversation header and assistant badge show no model name.

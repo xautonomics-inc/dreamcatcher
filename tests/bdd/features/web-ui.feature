@@ -16,7 +16,10 @@ Feature: llama-server Built-In Web User Interface
   @model-info @verification @known-issue @meta-100
   Scenario: Active model name is displayed in the Web UI
     When I navigate to "http://<host>:<port>/" using a headless browser
-    Then the server properties should be loaded from "/props"
+    And I enter prompt "Hello world" into the chat textarea
+    And I click the send message button
+    Then an assistant response message should appear in the conversation
+    And the server properties should be loaded from "/props"
     And the UI should display the active model name matching the library manifest
 
   @chat-completion @e2e

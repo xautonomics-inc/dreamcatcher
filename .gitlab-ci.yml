@@ -30,7 +30,7 @@ bdd-web-ui:
     - mkdir -p "$CI_PROJECT_DIR/.bdd-model"
     - curl --fail --location --output "$CI_PROJECT_DIR/.bdd-model/stories260K.gguf" "https://huggingface.co/ggml-org/tiny-llamas/resolve/def3e2dd70df35ecbf6403ea347de4c5977220c1/stories260K.gguf"
     - echo "047bf46455a544931cff6fef14d7910154c56afbc23ab1c5e56a72e69912c04b  $CI_PROJECT_DIR/.bdd-model/stories260K.gguf" | sha256sum --check --strict
-    - .bdd-venv/bin/python examples/stage-runner/slice_gguf_layers.py "$CI_PROJECT_DIR/.bdd-model/stories260K.gguf" "$CI_PROJECT_DIR/.bdd-model/library"
+    - PYTHONPATH="$CI_PROJECT_DIR/gguf-py" .bdd-venv/bin/python examples/stage-runner/slice_gguf_layers.py "$CI_PROJECT_DIR/.bdd-model/stories260K.gguf" "$CI_PROJECT_DIR/.bdd-model/library"
     - build-bdd/bin/llama-server --model-dir "$CI_PROJECT_DIR/.bdd-model/library" --host 127.0.0.1 --port 18080 --ctx-size 512 >tests/bdd/server.log 2>&1 &
     - echo $! > "$CI_PROJECT_DIR/.bdd-server.pid"
     - for attempt in $(seq 1 60); do curl --fail --silent http://127.0.0.1:18080/health >/dev/null && break; test "$attempt" -lt 60 || { cat tests/bdd/server.log; exit 1; }; sleep 1; done
