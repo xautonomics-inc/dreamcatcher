@@ -54,7 +54,7 @@ Feature: Route MoE expert computation to an expert server
   Scenario: Reject overlapping multi-endpoint coverage
     When the client starts with two remote endpoints that both claim layer 15
     Then configuration parsing should abort before model execution
-    And the diagnostic should name layer 15 and both endpoints
+    And the diagnostic should identify overlapping layer coverage
 
   @reconnect @fault-tolerance
   Scenario: Retry a transient expert-server connection failure
