@@ -94,6 +94,8 @@ Scenario steps support the following environment overrides:
 | `BDD_PORT` | Port for server binding | `8080` |
 | `BDD_MODEL` | Human-readable model identifier | `unbound` |
 | `BDD_TEST_TARGET` | Pytest file or directory to execute | Entire `tests/bdd` suite |
+| `BDD_BINARY_COMMIT` | Exact source commit used to build the tested binaries | Current checkout |
+| `BDD_GITHUB_COMMIT` | Equivalent Dreamcatcher commit for the public report link | Binary commit |
 
 ---
 
