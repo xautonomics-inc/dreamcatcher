@@ -38,9 +38,10 @@
     <style>
       .text-title { font-weight: 700; fill: #0f172a; }
       .text-sub { font-size: 13px; fill: #475569; font-weight: 500; }
-      .text-node { font-size: 12px; font-weight: 600; fill: #0f172a; text-anchor: middle; }
-      .text-node-sub { font-size: 10px; fill: #64748b; text-anchor: middle; }
-      .text-layer { font-size: 10.5px; font-weight: 500; fill: #1e293b; }
+      .text-node { font-size: 12.5px; font-weight: 600; fill: #0f172a; text-anchor: middle; }
+      .text-node-sub { font-size: 11px; fill: #64748b; text-anchor: middle; }
+      .text-layer { font-size: 11.5px; font-weight: 600; fill: #1e293b; }
+      .text-layer-sub { font-size: 11px; fill: #64748b; }
       .box-bg { fill: #ffffff; stroke: #cbd5e1; stroke-width: 1.5; }
       .layer-rect { fill: #f8fafc; stroke: #cbd5e1; stroke-width: 1; rx: 4px; }
       .ring-circle { fill: none; stroke: url(#ringGrad); stroke-width: 6; }
@@ -54,6 +55,7 @@
         .text-node { fill: #f1f5f9; }
         .text-node-sub { fill: #94a3b8; }
         .text-layer { fill: #e2e8f0; }
+        .text-layer-sub { fill: #94a3b8; }
         .box-bg { fill: #1e293b; stroke: #334155; }
         .layer-rect { fill: #0f172a; stroke: #334155; }
         .cord-line { stroke: #64748b; }
@@ -95,10 +97,10 @@
 
     <!-- Inner Web Ring & Center Hub -->
     <circle cx="550" cy="290" r="85" fill="none" stroke="#0ea5e9" stroke-width="1.5" stroke-dasharray="3 3" stroke-opacity="0.7"/>
-    <circle cx="550" cy="290" r="38" class="box-bg" stroke="#0284c7" stroke-width="2"/>
+    <circle cx="550" cy="290" r="42" class="box-bg" stroke="#0284c7" stroke-width="2"/>
     <circle cx="550" cy="290" r="6" fill="#38bdf8" filter="url(#glow)"/>
-    <text x="550" y="287" class="text-node" style="font-size: 10px;">GLOBAL</text>
-    <text x="550" y="299" class="text-node-sub" style="font-size: 9px; font-weight: 600;">SLOT ROUTER</text>
+    <text x="550" y="286" class="text-node" style="font-size: 11.5px;">GLOBAL</text>
+    <text x="550" y="300" class="text-node-sub" style="font-size: 10.5px; font-weight: 600;">SLOT ROUTER</text>
 
     <!-- Web Beads on intersections -->
     <circle cx="550" cy="195" r="4" class="bead"/>
@@ -201,7 +203,7 @@
       <rect x="0" y="0" width="200" height="34" class="layer-rect"/>
       <path d="M 0,0 L 5,0 L 5,34 L 0,34 Z" fill="#0284c7"/>
       <text x="14" y="15" class="text-layer" font-weight="600">Layers 00 – 07</text>
-      <text x="14" y="28" class="text-node-sub">Self-Attention · Q/K/V Projections</text>
+      <text x="14" y="28" class="text-layer-sub">Self-Attention · Q/K/V Projections</text>
     </g>
 
     <!-- Layer 08-15 -->
@@ -209,7 +211,7 @@
       <rect x="0" y="0" width="200" height="34" class="layer-rect"/>
       <path d="M 0,0 L 5,0 L 5,34 L 0,34 Z" fill="#06b6d4"/>
       <text x="14" y="15" class="text-layer" font-weight="600">Layers 08 – 15</text>
-      <text x="14" y="28" class="text-node-sub">Gated Delta Net (GDN) / SwiGLU</text>
+      <text x="14" y="28" class="text-layer-sub">Gated Delta Net (GDN) / SwiGLU</text>
     </g>
 
     <!-- Layer 16-23 -->
@@ -217,7 +219,7 @@
       <rect x="0" y="0" width="200" height="34" class="layer-rect"/>
       <path d="M 0,0 L 5,0 L 5,34 L 0,34 Z" fill="#0ea5e9"/>
       <text x="14" y="15" class="text-layer" font-weight="600">Layers 16 – 23</text>
-      <text x="14" y="28" class="text-node-sub">Multi-Head Latent Attention (MLA)</text>
+      <text x="14" y="28" class="text-layer-sub">Multi-Head Latent Attention (MLA)</text>
     </g>
 
     <!-- Layer 24-31 -->
@@ -225,7 +227,7 @@
       <rect x="0" y="0" width="200" height="34" class="layer-rect"/>
       <path d="M 0,0 L 5,0 L 5,34 L 0,34 Z" fill="#10b981"/>
       <text x="14" y="15" class="text-layer" font-weight="600">Layers 24 – 31</text>
-      <text x="14" y="28" class="text-node-sub">Cross-Layer Attention &amp; Norm</text>
+      <text x="14" y="28" class="text-layer-sub">Cross-Layer Attention &amp; Norm</text>
     </g>
 
     <!-- Feather Footer / Downward Stream -->
@@ -247,7 +249,7 @@
       <rect x="0" y="0" width="200" height="34" class="layer-rect"/>
       <path d="M 0,0 L 5,0 L 5,34 L 0,34 Z" fill="#8b5cf6"/>
       <text x="14" y="15" class="text-layer" font-weight="600">MoE Stage: Top-K Router</text>
-      <text x="14" y="28" class="text-node-sub">Dynamic Softmax Expert Gating</text>
+      <text x="14" y="28" class="text-layer-sub">Dynamic Softmax Expert Gating</text>
     </g>
 
     <!-- Expert Block 2 -->
@@ -255,7 +257,7 @@
       <rect x="0" y="0" width="200" height="34" class="layer-rect"/>
       <path d="M 0,0 L 5,0 L 5,34 L 0,34 Z" fill="#a855f7"/>
       <text x="14" y="15" class="text-layer" font-weight="600">Active Experts 00 – 15</text>
-      <text x="14" y="28" class="text-node-sub">Fused CPU GEMM / AVX-512</text>
+      <text x="14" y="28" class="text-layer-sub">Fused CPU GEMM / AVX-512</text>
     </g>
 
     <!-- Expert Block 3 -->
@@ -263,7 +265,7 @@
       <rect x="0" y="0" width="200" height="34" class="layer-rect"/>
       <path d="M 0,0 L 5,0 L 5,34 L 0,34 Z" fill="#c084fc"/>
       <text x="14" y="15" class="text-layer" font-weight="600">Active Experts 16 – 47</text>
-      <text x="14" y="28" class="text-node-sub">Vulkan SPIR-V Compute Kernels</text>
+      <text x="14" y="28" class="text-layer-sub">Vulkan SPIR-V Compute Kernels</text>
     </g>
 
     <!-- Expert Block 4 -->
@@ -271,7 +273,7 @@
       <rect x="0" y="0" width="200" height="34" class="layer-rect"/>
       <path d="M 0,0 L 5,0 L 5,34 L 0,34 Z" fill="#e879f9"/>
       <text x="14" y="15" class="text-layer" font-weight="600">Shared / Dense Fallback</text>
-      <text x="14" y="28" class="text-node-sub">DeepSeek / Qwen Hybrid FFN</text>
+      <text x="14" y="28" class="text-layer-sub">DeepSeek / Qwen Hybrid FFN</text>
     </g>
 
     <!-- Feather Footer / Downward Stream -->
@@ -293,7 +295,7 @@
       <rect x="0" y="0" width="200" height="34" class="layer-rect"/>
       <path d="M 0,0 L 5,0 L 5,34 L 0,34 Z" fill="#0f766e"/>
       <text x="14" y="15" class="text-layer" font-weight="600">--model-dir Slices</text>
-      <text x="14" y="28" class="text-node-sub">Per-Layer Sharded GGUF Weights</text>
+      <text x="14" y="28" class="text-layer-sub">Per-Layer Sharded GGUF Weights</text>
     </g>
 
     <!-- Lib Block 2 -->
@@ -301,7 +303,7 @@
       <rect x="0" y="0" width="200" height="34" class="layer-rect"/>
       <path d="M 0,0 L 5,0 L 5,34 L 0,34 Z" fill="#14b8a6"/>
       <text x="14" y="15" class="text-layer" font-weight="600">IQK / Trellis Quantization</text>
-      <text x="14" y="28" class="text-node-sub">IQ2_KS, IQ4_KS, Row-Interleaved</text>
+      <text x="14" y="28" class="text-layer-sub">IQ2_KS, IQ4_KS, Row-Interleaved</text>
     </g>
 
     <!-- Lib Block 3 -->
@@ -309,7 +311,7 @@
       <rect x="0" y="0" width="200" height="34" class="layer-rect"/>
       <path d="M 0,0 L 5,0 L 5,34 L 0,34 Z" fill="#2dd4bf"/>
       <text x="14" y="15" class="text-layer" font-weight="600">RMSNorm &amp; Logits Tail</text>
-      <text x="14" y="28" class="text-node-sub">Temperature · Top-P · Samplers</text>
+      <text x="14" y="28" class="text-layer-sub">Temperature · Top-P · Samplers</text>
     </g>
 
     <!-- Lib Block 4 -->
@@ -317,7 +319,7 @@
       <rect x="0" y="0" width="200" height="34" class="layer-rect"/>
       <path d="M 0,0 L 5,0 L 5,34 L 0,34 Z" fill="#38bdf8"/>
       <text x="14" y="15" class="text-layer" font-weight="600">Byte-Exact Parity Check</text>
-      <text x="14" y="28" class="text-node-sub">Token-for-Token FP16 Equivalence</text>
+      <text x="14" y="28" class="text-layer-sub">Token-for-Token FP16 Equivalence</text>
     </g>
 
     <!-- Feather Footer / Downward Stream -->
@@ -326,7 +328,7 @@
 
   <!-- ==================== LEGEND & ARCHITECTURAL METAPHOR ==================== -->
   <g transform="translate(550, 835)" text-anchor="middle">
-    <text class="text-sub" style="font-size: 11px;">
+    <text class="text-sub" style="font-size: 11.5px;">
       <tspan font-weight="700" fill="#0284c7">HOOP:</tspan> Multi-Host Compute Ring &#160;·&#160;
       <tspan font-weight="700" fill="#8b5cf6">WEB:</tspan> Low-Latency Socket &amp; Tensor Fabric &#160;·&#160;
       <tspan font-weight="700" fill="#10b981">FEATHERS:</tspan> Partitioned Model Layers &amp; MoE Experts
