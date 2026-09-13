@@ -1,6 +1,6 @@
 # Dreamcatcher BDD Acceptance Scenario Suite
 
-This directory contains Behavior-Driven Development (BDD) acceptance scenarios, executable step definitions, and test fixtures for Dreamcatcher's user-facing interfaces, distribution engine, stage-runner pipeline rings, and built-in WebUI.
+This directory contains Behavior-Driven Development (BDD) acceptance scenarios, executable step definitions, and test fixtures for Dreamcatcher's user-facing interfaces, distribution engine, stage-runner pipeline rings, remote expert serving, compute arbitration, release checks, and built-in WebUI.
 
 ---
 
@@ -21,12 +21,18 @@ This directory contains Behavior-Driven Development (BDD) acceptance scenarios, 
 tests/bdd/
 ├── features/               # Executable Gherkin feature files
 │   ├── layer-library.feature  # Slicing, Blake2b-128 hashing, distribution planner
+│   ├── expert-server.feature  # Remote MoE handshake, parity, routing, failures
+│   ├── gslot-runtime.feature  # Compute leases, handoff, contention, fail-open
+│   ├── release-checks.feature # Serve smoke, coherence, checksums, manifest test
 │   ├── serve-library.feature  # llama-server --model-dir serving and windowing
 │   ├── stage-ring.feature     # Multi-host pipeline rings and handoffs
 │   └── web-ui.feature         # llama-server built-in WebUI via headless Playwright
 ├── steps/                  # Python step definitions (pytest-bdd)
 │   ├── common_steps.py        # Shared library and HTTP steps
+│   ├── expert_server_steps.py # Real expert-server and expert-check processes
+│   ├── gslot_runtime_steps.py # Real gslot daemon and C++ client-header probe
 │   ├── layer_library_steps.py # Slicer and distribution planner steps
+│   ├── release_checks_steps.py # Real release scripts and manifest test binary
 │   ├── serve_library_steps.py # Live llama-server process checks
 │   ├── stage_ring_steps.py    # Live stage-runner ring steps
 │   └── web_ui_steps.py        # Playwright headless browser E2E steps
@@ -73,6 +79,15 @@ Scenario steps support the following environment overrides:
 | :--- | :--- | :--- |
 | `LLAMA_SERVER_BIN` | Absolute path to built `llama-server` | `build/bin/llama-server` |
 | `LLAMA_STAGE_RUNNER_BIN` | Absolute path to built `llama-stage-runner` | `build/bin/llama-stage-runner` |
+| `LLAMA_EXPERT_SERVER_BIN` | Absolute path to built `llama-expert-server` | `build/bin/llama-expert-server`, then `PATH` |
+| `LLAMA_EXPERT_CHECK_BIN` | Absolute path to built `llama-expert-check` | `build/bin/llama-expert-check`, then `PATH` |
+| `BDD_MOE_MODEL` | Path to a real MoE GGUF used by expert-server scenarios | Unbound; scenarios skip |
+| `BDD_MOE_LAYERS` | Number of model layers; current scenarios require at least 32 | Unbound; scenarios skip |
+| `BDD_EXPERT_PROMPT` | Deterministic prompt used for local/remote parity | `The capital of France is` |
+| `BDD_EXPERT_TOKENS` | Number of generated tokens compared for parity | `12` |
+| `BDD_EXPERT_TIMEOUT` | Timeout in seconds for each expert-check process | `900` |
+| `BDD_SERVER_URL` | Owned live `llama-server` used by serve smoke checks | Unbound; scenarios skip |
+| `BDD_REASONING_ONLY_URL` | Owned fixture endpoint for reasoning-only smoke behavior | Unbound; scenario skips |
 | `BDD_LIB_DIR` | Directory of pre-sliced layer library | Auto-generated synthetic library |
 | `BDD_MONOLITH_PATH` | Path to source monolithic GGUF model | Auto-generated synthetic model |
 | `BDD_HOST` | Host address for server binding | `127.0.0.1` |
