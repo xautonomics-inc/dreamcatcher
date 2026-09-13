@@ -79,6 +79,8 @@ def generate_results_markdown(xml_path: Path) -> str:
         overall_status = "PARTIAL / PREREQUISITES_PENDING"
     elif skipped == total:
         overall_status = "SKIPPED (NO PREREQUISITES)"
+    elif xfailed > 0:
+        overall_status = "GREEN (PASS + KNOWN ISSUES)"
     else:
         overall_status = "GREEN (ALL PASSED)"
 

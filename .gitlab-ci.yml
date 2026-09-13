@@ -1,0 +1,61 @@
+workflow:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "api" && $BDD_MANUAL_RUN == "1"'
+    - if: '$CI_PIPELINE_SOURCE == "web" && $BDD_MANUAL_RUN == "1"'
+    - when: never
+
+stages:
+  - bdd
+
+bdd-web-ui:
+  stage: bdd
+  image: mcr.microsoft.com/playwright:v1.50.0-jammy
+  timeout: 30m
+  variables:
+    DEBIAN_FRONTEND: noninteractive
+    PIP_CACHE_DIR: "$CI_PROJECT_DIR/.cache/pip"
+    PLAYWRIGHT_BROWSERS_PATH: /ms-playwright
+  cache:
+    key: bdd-python-v1
+    paths:
+      - .cache/pip
+  before_script:
+    - apt-get update
+    - apt-get install --yes --no-install-recommends cmake curl g++ ninja-build python3-venv
+    - python3 -m venv .bdd-venv
+    - .bdd-venv/bin/pip install --disable-pip-version-check pytest==8.3.5 pytest-bdd==8.1.0 playwright==1.50.0 pytest-playwright==0.7.0 requests==2.32.3 numpy==2.2.3 gguf==0.19.0
+  script:
+    - cmake -S . -B build-bdd -G Ninja -DGGML_NATIVE=OFF -DGGML_IQK_FLASH_ATTENTION=ON -DGGML_IQK_FA_ALL_QUANTS=OFF -DLLAMA_BUILD_TESTS=OFF -DLLAMA_BUILD_EXAMPLES=ON -DLLAMA_BUILD_SERVER=ON -DLLAMA_CURL=OFF
+    - cmake --build build-bdd --target llama-server --parallel "$(nproc)"
+    - mkdir -p "$CI_PROJECT_DIR/.bdd-model"
+    - curl --fail --location --output "$CI_PROJECT_DIR/.bdd-model/stories260K.gguf" "https://huggingface.co/ggml-org/tiny-llamas/resolve/def3e2dd70df35ecbf6403ea347de4c5977220c1/stories260K.gguf"
+    - echo "047bf46455a544931cff6fef14d7910154c56afbc23ab1c5e56a72e69912c04b  $CI_PROJECT_DIR/.bdd-model/stories260K.gguf" | sha256sum --check --strict
+    - .bdd-venv/bin/python examples/stage-runner/slice_gguf_layers.py "$CI_PROJECT_DIR/.bdd-model/stories260K.gguf" "$CI_PROJECT_DIR/.bdd-model/library"
+    - build-bdd/bin/llama-server --model-dir "$CI_PROJECT_DIR/.bdd-model/library" --host 127.0.0.1 --port 18080 --ctx-size 512 >tests/bdd/server.log 2>&1 &
+    - echo $! > "$CI_PROJECT_DIR/.bdd-server.pid"
+    - for attempt in $(seq 1 60); do curl --fail --silent http://127.0.0.1:18080/health >/dev/null && break; test "$attempt" -lt 60 || { cat tests/bdd/server.log; exit 1; }; sleep 1; done
+    - |
+      cat > /tmp/dreamcatcher-bdd.env <<EOF
+      export PATH="$CI_PROJECT_DIR/.bdd-venv/bin:\$PATH"
+      export PYTHONPATH="$CI_PROJECT_DIR"
+      export LLAMA_SERVER_BIN="$CI_PROJECT_DIR/build-bdd/bin/llama-server"
+      export BDD_HOST="127.0.0.1"
+      export BDD_PORT="18080"
+      export BDD_LIB_DIR="$CI_PROJECT_DIR/.bdd-model/library"
+      export BDD_MODEL="ggml-org/tiny-llamas/stories260K.gguf@def3e2dd70df35ecbf6403ea347de4c5977220c1"
+      export BDD_RUNNER="GitLab Docker Runner (CPU, Playwright Chromium)"
+      export BDD_TEST_TARGET="$CI_PROJECT_DIR/tests/bdd/test_web_ui.py"
+      export PLAYWRIGHT_BROWSERS_PATH="/ms-playwright"
+      EOF
+    - tests/bdd/run-local.sh /tmp/dreamcatcher-bdd.env
+  after_script:
+    - test ! -f "$CI_PROJECT_DIR/.bdd-server.pid" || kill "$(cat "$CI_PROJECT_DIR/.bdd-server.pid")" 2>/dev/null || true
+  artifacts:
+    when: always
+    expire_in: 30 days
+    paths:
+      - tests/bdd/report.xml
+      - tests/bdd/RESULTS.md
+      - tests/bdd/server.log
+    reports:
+      junit: tests/bdd/report.xml
