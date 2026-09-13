@@ -45,6 +45,8 @@ bdd-web-ui:
       export BDD_MODEL="ggml-org/tiny-llamas/stories260K.gguf@def3e2dd70df35ecbf6403ea347de4c5977220c1"
       export BDD_RUNNER="GitLab Docker Runner (CPU, Playwright Chromium)"
       export BDD_TEST_TARGET="$CI_PROJECT_DIR/tests/bdd/test_web_ui.py"
+      export BDD_BINARY_COMMIT="$CI_COMMIT_SHA"
+      export BDD_GITHUB_COMMIT="${BDD_GITHUB_COMMIT:?Set BDD_GITHUB_COMMIT to the equivalent Dreamcatcher commit}"
       export PLAYWRIGHT_BROWSERS_PATH="/ms-playwright"
       EOF
     - tests/bdd/run-local.sh /tmp/dreamcatcher-bdd.env
