@@ -178,8 +178,13 @@ def step_settings_modal_visible(bdd_context):
 def step_sampling_controls_configurable(bdd_context):
     modal = getattr(bdd_context, "settings_modal", None)
     assert modal is not None, "Settings modal not captured"
-    general_tab = modal.get_by_text("General", exact=True).filter(visible=True).first
-    general_tab.click()
+    general_tabs = modal.get_by_text("General", exact=True)
+    visible_general_tab = next(
+        (general_tabs.nth(index) for index in range(general_tabs.count()) if general_tabs.nth(index).is_visible()),
+        None,
+    )
+    assert visible_general_tab is not None, "Visible General settings tab not found"
+    visible_general_tab.click()
     temperature_row = modal.locator(
         "label", has_text=re.compile(r"^\s*temperature", re.IGNORECASE)
     ).first
