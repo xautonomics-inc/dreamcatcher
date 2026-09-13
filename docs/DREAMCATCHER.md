@@ -13,9 +13,9 @@
 
 ## 1. System Topology & Visual Metaphor
 
-![Dreamcatcher Architecture](assets/dreamcatcher.svg)
+![Dreamcatcher architecture: a hoop of three attention knot nodes with a global slot scheduler, and three expert feathers](assets/dreamcatcher.png)
 
-*Figure 1: The Dreamcatcher architecture. An outer hoop of three GPU-attention knot nodes (Head on NVIDIA CUDA, Relay on AMD RADV, and Tail on Intel ANV) forms the pipeline ring; inner woven socket strands coordinate activations through a central slot arbiter; and three hanging feather nodes represent disaggregated remote-expert servers providing APU and CPU expert offload.*
+*Figure 1: The Dreamcatcher architecture. The hoop is a ring pipeline of three attention knot nodes — a Head node (embeddings, dense layers and attention on a CUDA GPU), a Relay node (attention on Vulkan/RADV) and a Tail node (attention and the MTP head on Vulkan/ANV) — woven together by the global slot router (labelled Global Slot Scheduler in the figure), which arbitrates request slots across the ring. The feathers are the expert paths hanging from each knot: a remote expert server on an APU, direct expert offload to the CPU, and a remote expert server on a CPU or integrated GPU. A detailed vector version of the same architecture is in [assets/dreamcatcher.svg](assets/dreamcatcher.svg).*
 
 ---
 
