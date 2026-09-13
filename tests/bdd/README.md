@@ -77,7 +77,7 @@ Scenario steps support the following environment overrides:
 | `BDD_MONOLITH_PATH` | Path to source monolithic GGUF model | Auto-generated synthetic model |
 | `BDD_HOST` | Host address for server binding | `127.0.0.1` |
 | `BDD_PORT` | Port for server binding | `8080` |
-| `BDD_MODEL` | Human-readable model identifier | `synthetic-cpu-4b` |
+| `BDD_MODEL` | Human-readable model identifier | `unbound` |
 
 ---
 
