@@ -2,15 +2,13 @@
 
 from __future__ import annotations
 
-import json
-import os
+import re
 import socket
-from pathlib import Path
-from typing import Any
 
 import pytest
 import requests
-from pytest_bdd import given, when, then, parsers
+from playwright.sync_api import Error as PlaywrightError
+from pytest_bdd import given, parsers, then, when
 
 
 def is_server_listening(host: str, port: int) -> bool:
@@ -54,7 +52,7 @@ def step_navigate_headless_browser(bdd_context, browser_context, url):
         response = browser_context.goto(resolved_url, wait_until="domcontentloaded", timeout=10000)
         assert response is not None, f"No response from {resolved_url}"
         assert response.status == 200, f"Expected HTTP 200 from {resolved_url}, got {response.status}"
-    except Exception as exc:
+    except PlaywrightError as exc:
         pytest.fail(f"Headless browser navigation to {resolved_url} failed: {exc}")
     bdd_context.browser_page = browser_context
 
@@ -63,10 +61,12 @@ def step_navigate_headless_browser(bdd_context, browser_context, url):
 def step_verify_browser_brand(bdd_context):
     page = bdd_context.browser_page
     assert page is not None
-    page.wait_for_selector("div.text-2xl, title", timeout=5000)
     title = page.title()
-    brand_headers = page.locator("div.text-2xl:has-text('ik_llama.cpp'), div.text-2xl:has-text('llama.cpp')")
-    has_brand = "ik_llama.cpp" in title or "llama.cpp" in title or brand_headers.count() > 0
+    brand_headers = page.get_by_text("ik_llama.cpp", exact=True)
+    has_visible_brand = any(
+        brand_headers.nth(index).is_visible() for index in range(brand_headers.count())
+    )
+    has_brand = "ik_llama.cpp" in title or "llama.cpp" in title or has_visible_brand
     assert has_brand, f"Brand 'ik_llama.cpp' or 'llama.cpp' not found. Title: {title}"
 
 
@@ -168,7 +168,7 @@ def step_open_settings(bdd_context):
 def step_settings_modal_visible(bdd_context):
     page = bdd_context.browser_page
     assert page is not None
-    modal = page.locator("dialog[open], div.modal-open").first
+    modal = page.locator("dialog.modal-open, dialog[open]").first
     modal.wait_for(state="visible", timeout=5000)
     assert modal.is_visible(), "Settings modal dialog was not opened"
     bdd_context.settings_modal = modal
@@ -178,5 +178,14 @@ def step_settings_modal_visible(bdd_context):
 def step_sampling_controls_configurable(bdd_context):
     modal = getattr(bdd_context, "settings_modal", None)
     assert modal is not None, "Settings modal not captured"
-    temp_ctrl = modal.locator("input[name='temperature'], input[type='range'], label:has-text('temperature'), label:has-text('Temperature')").first
-    assert temp_ctrl.count() > 0 and temp_ctrl.is_visible(), "Temperature sampler control not found in settings modal"
+    general_tab = modal.get_by_text("General", exact=True).filter(visible=True).first
+    general_tab.click()
+    temperature_row = modal.locator(
+        "label", has_text=re.compile(r"^\s*temperature", re.IGNORECASE)
+    ).first
+    temperature_control = temperature_row.locator("input").first
+    temperature_control.wait_for(state="visible", timeout=5000)
+    original_value = temperature_control.input_value()
+    temperature_control.fill("0.7")
+    assert temperature_control.input_value() == "0.7"
+    temperature_control.fill(original_value)
