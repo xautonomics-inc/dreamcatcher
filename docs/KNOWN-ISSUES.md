@@ -308,3 +308,45 @@ build/bin/test-quant-matmul -v        # CPU only; prints NMSE(kernel vs dequant)
 batch — the routed experts of a `UD-IQ4_XS` model run with `-ot exps=CPU` at decode are
 the common case, on every backend build, since the CPU does that matmul. The Vulkan
 sweep entries for `iq4_xs` should be read as "reference disagrees", not "backend wrong".
+
+---
+
+## `meta#96` — DeepSeek-V4-Flash on NVIDIA Vulkan (`coopmat1`) produces degenerate token output
+
+On NVIDIA Vulkan (`coopmat1`), DeepSeek-V4-Flash (`deepseek4`, measured with the UD-Q4_K_XL monolith, one RTX 5060 Ti + CPU experts, `-fa on -ctk q8_0 -amb 512`) generates degenerate repetitive token output (RDNA3/ANV not measured; not quant-related). From the issue's exclusion list, the defect is not in MULTI_ADD (`meta#88`), not dim-0 GET_ROWS (a separate decline change that left output unchanged), not MXFP4, and not the quant. The CUDA backend on the same host produces coherent generation (CPU generation was not measured; only CPU hidden states were compared).
+
+**Measured configuration:**
+DeepSeek-V4-Flash UD-Q4_K_XL monolith run on NVIDIA Vulkan (`coopmat1`, one RTX 5060 Ti 16 GB) with experts offloaded to CPU via `-ot` (the `-ot` regex must include block 0 on 16 GB cards), `-fa on -ctk q8_0 -amb 512`.
+**Symptom:** Emits degenerate repetitive sequences (e.g. `\n\n\nimportimportimport\n##…`) at ~7.8 tokens/s instead of coherent completions.
+**Workaround:** Run DeepSeek-V4 on CUDA.
+
+---
+
+## `meta#100` — `llama-server --model-dir` leaves `model_name` and `model_path` empty (conversation header and assistant-message badge show no name)
+
+When `llama-server` is launched with `--model-dir <path>` instead of `-m <file>`, `params_base.model` is empty, so `/props` leaves `model_name` and `model_path` empty (`examples/server/server.cpp:1079-1082, 1116-1117`). In the WebUI, the conversation header and assistant-message badge show no name (`examples/server/webui/src/components/ChatScreen.tsx:261`). (Note: the WebUI start screen never shows a model name for any server). While model generation is unaffected, the OpenAI-compatible response `model` fallback (`examples/server/server.cpp:1162`) uses the same empty source and is unverified.
+
+**Expected behavior (from code reading, not yet reproduced):**
+```bash
+llama-server --model-dir /path/to/layer-library -ngl 99 --port 8080
+curl -s http://127.0.0.1:8080/props | jq '{model_name: .model_name, model_path: .model_path}'
+```
+**Expected symptom:** Expected to return empty strings `""` for both `model_name` and `model_path`. In the WebUI, the conversation header and assistant-message badge will have no model name displayed.
+**Status:** Generation is unaffected; the `model` field in OpenAI-compatible completions is unverified.
+
+---
+
+## `meta#102` — DeepSeek-V4 GGUFs with unsloth vision bias tensors fail to load ("wrong number of tensors")
+
+On 2026-09-04 (commit `e1efe867`), upstream Unsloth added 43 vision expert-routing bias tensors (`blk.N.exp_probs_b_vl.bias`) to `DeepSeek-V4-Flash-Vision-Exp-GGUF`, increasing total tensor count from 1328 to 1371. The fork model loader enforces strict tensor count validation (`src/llama-model-loader.cpp:1456-1458`). Because the fork loader does not construct these vision tensors, loading files containing them is expected from code reading to fail.
+
+**Expected behavior (from code reading, not yet reproduced):**
+```bash
+llama-cli -m DeepSeek-V4-Flash-Vision-Exp-UD-Q4_K_XL-00001-of-00005.gguf   # Unsloth rev >= e1efe867 (post-09-04)
+```
+**Expected symptom:** Expected from code reading (`src/llama-model-loader.cpp:1457`) to abort during model load with:
+```
+done_getting_tensors: wrong number of tensors; expected 1371, got 1328
+```
+(where expected is the tensor count in the file and got is the number of tensors created by the loader).
+**Supported distribution:** Use the xAutonomics DSv4 library (built from revision `37044a3c`, pre-09-04 1328-tensor layout).
