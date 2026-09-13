@@ -1,0 +1,70 @@
+@stage-ring @distributed-inference
+Feature: Multi-Host Stage-Runner Pipeline Rings
+  As a distributed systems engineer
+  I want to orchestrate pipelined inference rings across sequential stage runners
+  So that large language models exceeding single-host VRAM capacity execute reliably across compute stages
+
+  Background:
+    Given a valid partitioned model library exists at "<lib_dir>"
+    And the model contains 48 total transformer layers
+
+  @loopback @smoke
+  Scenario: Bring up a two-stage loopback ring on a single host
+    When I start a "tail" stage runner with arguments:
+      | flag          | value       |
+      | --role        | tail        |
+      | --model-dir   | <lib_dir>   |
+      | --layers      | 24,48       |
+      | --listen-host | 127.0.0.1   |
+      | --listen-port | <tail_port> |
+      | --next-host   | 127.0.0.1   |
+      | --next-port   | <head_port> |
+    And I start a "head" stage runner with arguments:
+      | flag          | value       |
+      | --role        | head        |
+      | --model-dir   | <lib_dir>   |
+      | --layers      | 0,24        |
+      | --listen-host | 127.0.0.1   |
+      | --listen-port | <head_port> |
+      | --next-host   | 127.0.0.1   |
+      | --next-port   | <tail_port> |
+      | --http-port   | <http_port> |
+    Then both stages should log successful TCP handshake
+    And the head stage should report "Ring topology verified: 2 stages connected"
+    When I submit a completion request to "http://127.0.0.1:<http_port>/v1/chat/completions" with prompt "Ping"
+    Then the head stage should transmit hidden activation tensors to the tail stage
+    And the tail stage should evaluate layers 24 through 47 and compute final logits
+    And the client should receive a valid completion stream
+
+  @three-stage @multi-host
+  Scenario: Bring up a three-stage heterogeneous pipeline ring
+    Given three networked compute stages "<host_head>", "<host_relay>", and "<host_tail>"
+    When I launch stage "tail" on "<host_tail>" covering layers 32 to 48 connecting to "<host_head>"
+    And I launch stage "relay" on "<host_relay>" covering layers 16 to 32 connecting to "<host_tail>"
+    And I launch stage "head" on "<host_head>" covering layers 0 to 16 connecting to "<host_relay>"
+    Then the ring topology "head -> relay -> tail -> head" should be established
+    And activation tensor handoffs should flow sequentially across stages without dropped waves
+
+  @per-layer-embedding @ple
+  Scenario: Detect tail-side per-layer-embedding warning when PLE blocks land in later window
+    Given a model architecture with per-layer input embeddings
+    When I launch a tail stage runner with layers "<tail_start>,<tail_end>" covering a PLE block
+    Then the tail stage log should emit an advisory warning regarding per-layer embedding slice placement:
+      """
+      warning: per-layer-embedding tensor in non-zero stage window
+      """
+    And the tail stage should continue execution using its own local per-layer slice
+
+  @error-handling @network-faults
+  Scenario: Handle unreachable downstream stage during ring bring-up
+    When I start a "head" stage runner pointing to unreachable downstream address "<bad_host>:<bad_port>"
+    Then the stage runner should retry connection up to the configured connection timeout
+    And if the downstream stage remains unreachable, the runner should exit with a descriptive connection failure error
+
+  @shutdown @teardown
+  Scenario: Clean shutdown and socket resource cleanup on ring termination
+    Given an active two-stage pipeline ring
+    When I send SIGTERM to the head stage runner process
+    Then the head stage should forward a termination wave to the tail stage
+    And both stages should close their TCP sockets without address binding leaks
+    And both processes should exit cleanly with return code 0
