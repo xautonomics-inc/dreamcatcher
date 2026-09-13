@@ -90,12 +90,12 @@ def generate_results_markdown(xml_path: Path) -> str:
 
     md = f"""# Dreamcatcher BDD Acceptance Test Results
 
-**Run Date:** `{timestamp}`  
+**Run Date:** `{timestamp}`<br>
 **Test Definition:** [`{github_commit}`](https://github.com/xautonomics-inc/dreamcatcher/commit/{github_commit})<br>
 **Binary Source Commit:** `{binary_commit}`<br>
-**Environment:** `{runner_env}`  
-**Model:** `{model_used}`  
-**Status:** **{overall_status}**  
+**Environment:** `{runner_env}`<br>
+**Model:** `{model_used}`<br>
+**Status:** **{overall_status}**
 
 ---
 

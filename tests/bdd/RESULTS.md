@@ -1,11 +1,11 @@
 # Dreamcatcher BDD Acceptance Test Results
 
-**Run Date:** `2026-09-13 18:12:57 UTC`  
+**Run Date:** `2026-09-13 18:12:57 UTC`<br>
 **Test Definition:** [`8ab4aba9d55b57c8de78702b52d6d67ad9b2e3a6`](https://github.com/xautonomics-inc/dreamcatcher/commit/8ab4aba9d55b57c8de78702b52d6d67ad9b2e3a6)<br>
 **Binary Source Commit:** `9dd757919f0c30cf6945603dce799ad46da5cdfb`<br>
-**Environment:** `GitLab Docker Runner (CPU, Playwright Chromium)`  
-**Model:** `ggml-org/tiny-llamas/stories260K.gguf@def3e2dd70df35ecbf6403ea347de4c5977220c1`  
-**Status:** **GREEN (PASS + KNOWN ISSUES)**  
+**Environment:** `GitLab Docker Runner (CPU, Playwright Chromium)`<br>
+**Model:** `ggml-org/tiny-llamas/stories260K.gguf@def3e2dd70df35ecbf6403ea347de4c5977220c1`<br>
+**Status:** **GREEN (PASS + KNOWN ISSUES)**
 
 ---
 
