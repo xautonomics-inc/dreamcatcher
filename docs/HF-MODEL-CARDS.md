@@ -22,7 +22,7 @@ See [KNOWN-ISSUES.md](KNOWN-ISSUES.md) for the known-bad cases.
 
 | Architecture | head/tail split | Backends |
 |---|---|---|
-| `deepseek4` | mechanism verified; library windows currently fail (see backends) | CUDA monolith **verified** on `20c308ca` (UD-Q4_K_XL; library-vs-monolith full-model CUDA forward pass byte-identical, md5-equal hidden states; 1328/1328 tensor hashes). CUDA library form: **unusable** — any `--model-dir --layers` window fails (`dsv4_validate_comp_plan: CSA delta row outside the batch/state ring` — the state-ring plan is not window-aware) and the ring tail segfaults after load; `llama-server` cannot read a library (`meta#90`). Vulkan (any vendor): not measured for this arch |
+| `deepseek4` | verified | CUDA monolith & library **verified** on UD-Q4_K_XL (revision `37044a3c`; 1328/1328 tensor hashes; full 43-layer forward pass byte-identical, md5-equal hidden states). Library windows fixed (`meta#92`): head+tail ring token-identical vs monolith (64/64) on CUDA; single-process library serving verified via `llama-server --model-dir` (`meta#90`). Vulkan: **known-bad, all vendors** — degenerate output on Vulkan backend (`meta#96`) |
 | `qwen4exp` | verified (pre-publish); CUDA ring not token-exact on `20c308ca` (see backends) | CUDA **verified** on `20c308ca`: monolith coherent 23.2 tok/s (`llama-server`), library ring coherent 17.4 tok/s, full-model forward pass byte-identical mono-vs-library (1224/1224 hashes); the ring is **not token-exact** — the tail drops `per_layer_token_embd` for a non-zero window (`meta#91`). Vulkan: **known-bad, all vendors** — UD-IQ4_XS degenerate on RDNA3 (RX 7900 XT x4, RADV) and on NVIDIA (coopmat1), flash-attention-independent, BF16-tensor hypothesis refuted; CPU on the same hosts coherent (`meta#88`) |
 | `glm5next` | verified | CUDA **verified** on `20c308ca`: library head+tail ring generates coherently, 7.5 tok/s greedy (UD-IQ4_XS, 1383/1383 hashes vs monolith); single-process A/B blocked by a new bug (any GLM load under `STAGE_EMIT=hidden` with `nextn_predict_layers>0` aborts, `GGML_ASSERT(lctx.logits != nullptr)`). `--role server` times out awaiting a return edge (`meta#90`). Vulkan (any vendor): not measured for this arch |
 | `gemma4` | self-consistent (both stages agree) | CPU verified (Q4_K embedding); CUDA batched prefill known-bad (`meta#81`); Q6_K embedding known-bad (`meta#80`); Vulkan: measured on this model at the lane-9 checkpoint (pre-`20c308ca`) — RDNA4 and RDNA3 (RADV) FA sweep clean and token-exact on chat-formatted prompts, bare greedy prompt can differ from CPU by rounding (`meta#85`); NVIDIA (coopmat1): CPU-exact; Intel ANV: self-consistent, not CPU-exact; AMD RDNA3.5 (8060S APU): verified for the expert-server path with GLM-5.3-Flash experts |
@@ -36,13 +36,12 @@ per-arch lines below — all measured on the published tree `20c308ca`. Hardware
 CUDA: RTX 5060 Ti sm_120; Vulkan RDNA3: RX 7900 XT x4 RADV; Vulkan NVIDIA:
 RTX 5060 Ti x4 coopmat1.
 
-> **deepseek4 — quant verified.** CUDA monolith verified (production serving);
-> the UD-Q4_K_XL library is exact vs its monolith (1328/1328 tensor hashes,
-> full 43-layer forward pass byte-identical). Library windows are currently
-> **unsupported**: any `--layers` window fails the CSA state-ring plan
-> validation and the ring tail segfaults, so the library has no generation
-> path (`meta#92`); no single-process server reads a library (`meta#90`).
-> Vulkan: not measured for this architecture.
+> **deepseek4 — CUDA verified.** Monolith and library verified on CUDA
+> (UD-Q4_K_XL, revision `37044a3c`; 1328/1328 tensor hashes, full 43-layer forward
+> pass byte-identical). Library windows fixed (`meta#92`): head/tail ring is
+> token-identical vs monolith (64/64) on CUDA; single-process library serving
+> verified via `llama-server --model-dir` (`meta#90`). **Vulkan known-bad, all
+> vendors:** degenerate output on the Vulkan backend (`meta#96`).
 
 > **qwen4exp — CUDA verified** (monolith coherent 23.2 tok/s; library head/tail
 > ring coherent 17.4 tok/s, **not token-exact** — the tail drops
@@ -60,10 +59,11 @@ RTX 5060 Ti x4 coopmat1.
 > architecture on the published tree (the RDNA3.5 APU proof was the
 > expert-server path with GLM-5.3-Flash experts, not a local Vulkan run).
 
-Common to all three: a layer library is loaded only by `llama-stage-runner`
-(`--model-dir`); serving one needs a head+tail ring and, on Vulkan hosts with
-big pinned tensors, `LLAMA_NO_HOST_OVERRIDES=1` (see `meta#89` for the recipe
-corrections).
+Common to all three: a layer library is loaded by `llama-server --model-dir`
+for single-process serving, or partitioned across `llama-stage-runner`
+(`--model-dir`) processes for a distributed ring. On Vulkan hosts with
+big pinned tensors, use `LLAMA_NO_HOST_OVERRIDES=1` (see `meta#89` for the
+recipe corrections).
 
 For `gemma4`, use the per-arch note below instead, because its support is
 conditional on the quant variant and the backend.
@@ -71,18 +71,15 @@ conditional on the quant variant and the backend.
 ## Per-architecture notes
 
 ### `deepseek4`
-- **head/tail split:** mechanism verified at the pre-publish checkpoint; on
-  the published tree `20c308ca` library windows **fail** — any `--model-dir
-  --layers` window aborts `dsv4_validate_comp_plan` ("csa delta row … outside
-  the batch/state ring": the CSA/HCA/LID state-ring plan is not
-  window-aware) and the ring tail segfaults after load, so there is currently
-  **no generation path for the library form** (`meta#92`).
-- **backends:** CUDA monolith **verified** — production serving, and on
-  `20c308ca` the UD-Q4_K_XL library ≡ monolith: 1328/1328 tensor hashes and a
-  byte-identical full 43-layer forward pass (md5-equal hidden states), which
-  closes the former "pending numeric check" for the single-process pass.
-  `llama-server` cannot read a library (`meta#90`). Vulkan (any vendor): not
-  measured for this architecture on the published tree.
+- **head/tail split:** verified — library windows fixed (`meta#92`: loader window
+  validation and compression ratios sliced for stage window). Head+tail ring is
+  token-identical (64/64) against the monolith on CUDA.
+- **backends:** CUDA monolith and library **verified** (production serving, and
+  UD-Q4_K_XL revision `37044a3c` library ≡ monolith: 1328/1328 tensor hashes and
+  byte-identical full 43-layer forward pass with md5-equal hidden states).
+  Single-process library serving verified via `llama-server --model-dir` (`meta#90`).
+  Vulkan: **known-bad on all vendors** — emits degenerate output on Vulkan backend
+  (`meta#96`).
 
 ### `qwen4exp`
 - **head/tail split:** verified (mechanism); the CUDA ring run on `20c308ca`
