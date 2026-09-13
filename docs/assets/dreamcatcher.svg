@@ -162,7 +162,7 @@
     <text x="5" y="-22" class="text-node">RELAY STAGE KNOT</text>
     <text x="5" y="-5" class="text-knot-tag" style="fill: #8b5cf6;">AMD RADV · GPU-Attention</text>
     <text x="5" y="12" class="text-node-sub">Intermediate Slices &amp; Vulkan FA</text>
-    <text x="5" y="27" class="text-node-sub">Radeon RDNA3/4 · Token-Exact</text>
+    <text x="5" y="27" class="text-node-sub">Radeon RDNA3/4 · Vulkan FA</text>
   </g>
 
   <!-- KNOT 3: TAIL STAGE (Bottom of Circle: x=550, y=410) -->
