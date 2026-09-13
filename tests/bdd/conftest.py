@@ -154,7 +154,10 @@ if str(BDD_DIR) not in sys.path:
     sys.path.insert(0, str(BDD_DIR))
 
 from steps.common_steps import *
+from steps.expert_server_steps import *
+from steps.gslot_runtime_steps import *
 from steps.layer_library_steps import *
+from steps.release_checks_steps import *
 from steps.serve_library_steps import *
 from steps.stage_ring_steps import *
 from steps.web_ui_steps import *
