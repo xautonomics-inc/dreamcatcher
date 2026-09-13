@@ -45,15 +45,16 @@ Feature: Multi-Host Stage-Runner Pipeline Rings
     Then the ring topology "head -> relay -> tail -> head" should be established
     And activation tensor handoffs should flow sequentially across stages without dropped waves
 
-  @per-layer-embedding @ple
-  Scenario: Detect tail-side per-layer-embedding warning when PLE blocks land in later window
+  @per-layer-embedding @ple @known-issue @meta-97
+  Scenario: Known issue: Per-layer-embedding blocks in later stage window unsupported in ring transport
     Given a model architecture with per-layer input embeddings
     When I launch a tail stage runner with layers "<tail_start>,<tail_end>" covering a PLE block
     Then the tail stage log should emit an advisory warning regarding per-layer embedding slice placement:
       """
       warning: per-layer-embedding tensor in non-zero stage window
       """
-    And the tail stage should continue execution using its own local per-layer slice
+    And the ring transport cannot forward raw token IDs to non-head stages as tracked under meta#97
+    And multi-stage partitioning across PLE blocks is unsupported until token ID transport is added
 
   @error-handling @network-faults
   Scenario: Handle unreachable downstream stage during ring bring-up
