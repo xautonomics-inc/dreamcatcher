@@ -1,3 +1,27 @@
+<p align="center">
+  <img src="docs/assets/dreamcatcher.png" width="420" alt="dreamcatcher: a hoop of three attention stages (head, relay, tail) woven together by a global slot scheduler, with expert layers hanging from each stage as feathers">
+</p>
+
+# dreamcatcher
+
+**dreamcatcher** is xAutonomics' fork of [ik_llama.cpp](https://github.com/ikawrakow/ik_llama.cpp) for running large mixture-of-experts models across a ring of mixed-architecture hosts. The name is the architecture: a hoop of attention stages — head, relay and tail on CUDA and Vulkan GPUs — woven together by a global slot scheduler, with the model's expert layers hanging from each stage as feathers: remote expert servers on APUs or CPUs, or direct expert offload to the CPU.
+
+What it adds to ik_llama.cpp (details, design and the measurements behind each claim in [docs/DREAMCATCHER.md](docs/DREAMCATCHER.md)):
+
+- **Multi-host stage-runner rings** — head/relay/tail stages exchanging hidden activations over TCP, so one model spans several machines ([docs/BRING-UP.md](docs/BRING-UP.md)).
+- **Per-layer model libraries** — a model sliced into per-layer GGUF parts with a manifest; any window of layers loads with `--model-dir`, and a planner assigns windows to hosts ([examples/stage-runner/LAYER_SLICES.md](examples/stage-runner/LAYER_SLICES.md)).
+- **Single-process library serving** — `llama-server --model-dir` serves a downloaded library like a monolithic GGUF, verified token-identical to the monolith.
+- **Expert disaggregation** — routed MoE experts served by a remote expert server on another host, or offloaded to the CPU ([docs/EXPERT-SERVER-PORT.md](docs/EXPERT-SERVER-PORT.md)).
+- **Global slot router runtime gate** — cross-process arbitration of compute slots for multi-tenant rings, fail-open by default ([docs/GSLOT-RUNTIME-PORT.md](docs/GSLOT-RUNTIME-PORT.md)).
+- **Refreshed Vulkan backend** — a graft of the 2026 mainline ggml-vulkan with ik's fused and K-quant kernels, and a measured device matrix ([docs/VULKAN-BACKEND.md](docs/VULKAN-BACKEND.md)).
+- **Release-integrity and serving checks** — manifest/tensor-hash verification, a serving smoke test that rejects degenerate output, and the verification record behind every "verified" cell ([docs/RELEASE-INTEGRITY.md](docs/RELEASE-INTEGRITY.md)).
+
+Status per architecture and backend, measured on this tree: [docs/HF-MODEL-CARDS.md](docs/HF-MODEL-CARDS.md). Open issues and known limitations: [docs/KNOWN-ISSUES.md](docs/KNOWN-ISSUES.md).
+
+---
+
+*The remainder of this README is the upstream ik_llama.cpp README, kept for reference; its notes apply to the upstream tree unless the documents above say otherwise.*
+
 # ik_llama.cpp: llama.cpp fork with better CPU performance
 
 [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](https://opensource.org/licenses/MIT)
