@@ -151,7 +151,7 @@ attention returns NaN for `q8_0` / `q4_0` K/V when there is no mask or when
 `max_bias > 0`; the iqk kernels' mask contract is 0 / -inf only (see the harness notes
 in `docs/VULKAN-BACKEND.md`). Neither combination is emitted by a graph.
 
-## `meta#88` — qwen4exp on Vulkan (any vendor): degenerate output on UD-IQ4_XS, flash-attention-independent
+## `meta#88` — qwen4exp on Vulkan (any vendor): degenerate output on UD-IQ4_XS, flash-attention-independent — report (fixed; fix write-up in the next entry)
 
 **What was reported.** On the published tree (`20c308ca`), RX 7900 XT x4 (RADV):
 Qwen3.8-Flash-Next UD-IQ4_XS via Vulkan full offload emits `**:** **:** ;**;**…`;
@@ -173,21 +173,27 @@ this matrix. Not a regression: an unsupported generalization, now falsified by t
 published-tree check. All per-arch backend rows now state the model + quant + host
 actually token-run on the published tree.
 
-**What it is.** Under triage, and broader than the title suggests. Forcing all 24
+**What it is.** Superseded by the next entry: the fault was a short `MULTI_ADD`
+`src0` descriptor range in the generic Vulkan dispatcher. The triage below is kept
+because it narrowed the space — but for the record, the reasoning here ("op coverage
+or graph construction for the SSM/gated-delta path") was wrong, as were the BF16
+placement and flash-attention hypotheses. Forcing all 24
 BF16 `indexer.k_proj` tensors to CPU on the NVIDIA run changes nothing — the BF16
 placement hypothesis is refuted. Flash attention on and off both reproduce, so the
 meta#85 reduction path is not the culprit either. The identical output across
-vendors points at a qwen4exp-specific fault in the Vulkan backend itself (op
-coverage or graph construction for the SSM/gated-delta path), not a device quirk
-in either driver. Discriminators still worth running on an RDNA3 host: disable
+vendors points at a fault in the Vulkan backend itself, not a device quirk
+in either driver — which is what it was. Discriminators still worth running on an RDNA3 host: disable
 integer-dot product; force SSM tensors to CPU via `-ot`; single-GPU `--device` to
 exclude the cross-card tensor-split mapping (device order differs from HIP order);
 op-level localization against the CPU reference with `GGML_VULKAN_CHECK_RESULTS`.
+The first of those discriminators has since been run and is recorded in the next
+entry; `test-backend-ops -o MULTI_ADD` is now the fast check.
 
-**Workaround.** Run this model where it is coherent on the published tree — CUDA
+**Workaround (pre-fix builds).** Run this model where it is coherent on the published tree — CUDA
 (monolith or ring) or CPU; the HIP result above is an out-of-fork data point, not
-a supported backend. **Status.** Open. Related: `meta#85` (different path, same
-device class).
+a supported backend. **Status.** Fixed on `fork-base` — see the next entry (NVIDIA
+coopmat1 verified; RDNA3 re-measure pending, the fix is device independent).
+Related: `meta#85` (different path, same device class).
 
 ---
 
