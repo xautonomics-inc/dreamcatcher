@@ -17,9 +17,9 @@ See [KNOWN-ISSUES.md](KNOWN-ISSUES.md) for the known-bad cases.
 
 > [!IMPORTANT]
 > **Repository Exclusivity & Naming Standards**:
-> - **Exclusively Supported Source**: Only model files downloaded directly from our official Hugging Face repository (`xautonomics`) are supported. Standard or third-party monolithic GGUF distributions are not compatible.
+> - **Exclusively Supported Source**: Only model files downloaded directly from our official Hugging Face repository ([huggingface.co/xautonomics](https://huggingface.co/xautonomics)) are supported. Standard or third-party monolithic GGUF distributions are not compatible.
 > - **`LAYR.GGUF` File Naming**: All per-layer model slice files in the HF repository are standardized with the **`LAYR.GGUF`** naming convention (e.g. `*.LAYR.GGUF`), replacing any naming that includes the word `layers`.
-> - **Interconnect Requirement**: Multi-stage distributed inference requires direct, low-latency node-to-node network connections. IB-capable network adapters (such as Intel E810 or Mellanox ConnectX) are required to achieve expected throughput.
+> - **Interconnect Requirement**: Multi-stage distributed inference requires direct, low-latency node-to-node network connections over TCP (`TCP_NODELAY`). InfiniBand/RDMA-class network adapters (such as Intel E810 or NVIDIA Mellanox ConnectX) are required as a hardware class to achieve expected throughput.
 > - **Lineage**: The distributed serving and kernel capabilities in this fork were grafted back from an internal `llama.cpp` / `ik_llama.cpp` project.
 
 ## Summary
