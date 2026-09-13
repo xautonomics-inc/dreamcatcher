@@ -4,10 +4,10 @@
 > *In Ojibwe tradition, a dreamcatcher (*asabikeshiinh*, "spider web charm") is formed from a hoop of bent willow, an intricate woven string web with a central aperture, and soft feathers suspended by cords with beads. The hoop symbolizes unity and the circle of life; the woven web catches turbulence and bad dreams; and the central hole allows good visions to glide gently down the feathers to the sleeper below.*  
 > 
 > *In **Dreamcatcher**, this sacred structure maps to multi-host pipeline inference:*  
-> - **The Hoop:** A closed **ring of interconnected compute hosts** partitioned into sequential pipeline stages.  
-> - **The Woven Web:** The **low-latency socket transport fabric** routing hidden activations and expert tensors between stages without central bottlenecks.  
-> - **The Central Hole:** The **global slot router runtime**, arbitrating token slots and request concurrency across the pipeline.  
-> - **The Feathers:** The **partitioned model layers and disaggregated MoE expert blocks** hanging from each node. Hidden activations circulate through the ring and glide smoothly down through the layer feathers, emitting verified token streams.
+> - **The Hoop:** A closed **ring pipeline of GPU-attention knot nodes** (Head on NVIDIA CUDA, Relay on AMD RADV, and Tail on Intel ANV) partitioned into sequential stages.  
+> - **The Woven Web:** The **low-latency TCP transport fabric** routing hidden activations and expert tensors between stages without central bottlenecks.  
+> - **The Central Hole:** The **global slot router runtime** (`gslot-runtime`), arbitrating token slots and request concurrency across the pipeline.  
+> - **The Feathers:** The **disaggregated remote-expert nodes** providing APU/CPU expert offload hanging from beaded cords. Activations circulate through the hoop's attention stages and route through expert feathers on demand, emitting verified token streams.
 
 ---
 
@@ -15,7 +15,7 @@
 
 ![Dreamcatcher Architecture](assets/dreamcatcher.svg)
 
-*Figure 1: The Dreamcatcher architecture. An outer hoop of interconnected compute hosts forms a pipeline ring; inner woven socket strands route activations and tensor requests through a central slot arbiter; and partitioned model layers and MoE expert blocks hang from each host node as feathers.*
+*Figure 1: The Dreamcatcher architecture. An outer hoop of three GPU-attention knot nodes (Head on NVIDIA CUDA, Relay on AMD RADV, and Tail on Intel ANV) forms the pipeline ring; inner woven socket strands coordinate activations through a central slot arbiter; and three hanging feather nodes represent disaggregated remote-expert servers providing APU and CPU expert offload.*
 
 ---
 
