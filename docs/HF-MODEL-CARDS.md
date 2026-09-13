@@ -15,6 +15,9 @@ Cross-references to `meta#NN` are internal tracking handles; every entry below
 is self-contained, so a reader does not need to resolve the handle to act on it.
 See [KNOWN-ISSUES.md](KNOWN-ISSUES.md) for the known-bad cases.
 
+> [!NOTE]
+> Only model files downloaded from [huggingface.co/xautonomics](https://huggingface.co/xautonomics) are supported. Other GGUFs, including libraries you slice yourself, may load but are unsupported.
+
 ## Summary
 
 | Architecture | head/tail split | Backends |
