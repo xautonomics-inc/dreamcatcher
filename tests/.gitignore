@@ -6,3 +6,9 @@ ggml-common.h
 !peg-parser
 !bdd
 !bdd/**
+bdd/report.xml
+bdd/**/__pycache__/
+bdd/__pycache__/
+*.pyc
+.pytest_cache/
+bdd/RESULTS.md
