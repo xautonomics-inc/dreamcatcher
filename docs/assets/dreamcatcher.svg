@@ -1,0 +1,335 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 860" width="100%" height="100%" style="background: transparent; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;">
+  <defs>
+    <!-- Gradients -->
+    <linearGradient id="ringGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0284c7"/>
+      <stop offset="50%" stop-color="#06b6d4"/>
+      <stop offset="100%" stop-color="#3b82f6"/>
+    </linearGradient>
+
+    <linearGradient id="webGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0ea5e9" stop-opacity="0.6"/>
+      <stop offset="100%" stop-color="#8b5cf6" stop-opacity="0.4"/>
+    </linearGradient>
+
+    <linearGradient id="featherGrad1" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#0284c7"/>
+      <stop offset="60%" stop-color="#06b6d4"/>
+      <stop offset="100%" stop-color="#10b981"/>
+    </linearGradient>
+
+    <linearGradient id="featherGrad2" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#6366f1"/>
+      <stop offset="60%" stop-color="#8b5cf6"/>
+      <stop offset="100%" stop-color="#d946ef"/>
+    </linearGradient>
+
+    <linearGradient id="featherGrad3" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#0f766e"/>
+      <stop offset="60%" stop-color="#14b8a6"/>
+      <stop offset="100%" stop-color="#06b6d4"/>
+    </linearGradient>
+
+    <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
+      <feGaussianBlur stdDeviation="3" result="blur" />
+      <feComposite in="SourceGraphic" in2="blur" operator="over"/>
+    </filter>
+
+    <style>
+      .text-title { font-weight: 700; fill: #0f172a; }
+      .text-sub { font-size: 13px; fill: #475569; font-weight: 500; }
+      .text-node { font-size: 12px; font-weight: 600; fill: #0f172a; text-anchor: middle; }
+      .text-node-sub { font-size: 10px; fill: #64748b; text-anchor: middle; }
+      .text-layer { font-size: 10.5px; font-weight: 500; fill: #1e293b; }
+      .box-bg { fill: #ffffff; stroke: #cbd5e1; stroke-width: 1.5; }
+      .layer-rect { fill: #f8fafc; stroke: #cbd5e1; stroke-width: 1; rx: 4px; }
+      .ring-circle { fill: none; stroke: url(#ringGrad); stroke-width: 6; }
+      .web-line { stroke: url(#webGrad); stroke-width: 1.5; stroke-dasharray: 4 2; }
+      .cord-line { stroke: #94a3b8; stroke-width: 1.5; stroke-dasharray: 2 2; }
+      .bead { fill: #f59e0b; stroke: #b45309; stroke-width: 1; }
+
+      @media (prefers-color-scheme: dark) {
+        .text-title { fill: #f8fafc; }
+        .text-sub { fill: #94a3b8; }
+        .text-node { fill: #f1f5f9; }
+        .text-node-sub { fill: #94a3b8; }
+        .text-layer { fill: #e2e8f0; }
+        .box-bg { fill: #1e293b; stroke: #334155; }
+        .layer-rect { fill: #0f172a; stroke: #334155; }
+        .cord-line { stroke: #64748b; }
+        .bead { fill: #fbbf24; stroke: #d97706; }
+      }
+    </style>
+  </defs>
+
+  <!-- Title & Concept Header -->
+  <g transform="translate(550, 45)" text-anchor="middle">
+    <text class="text-title" style="font-size: 24px; letter-spacing: 0.05em;">DREAMCATCHER ARCHITECTURE</text>
+    <text class="text-sub" y="24">Heterogeneous Pipeline Ring &amp; Layer-Feather Disaggregation</text>
+  </g>
+
+  <!-- ==================== THE RING & HOOP ==================== -->
+  <!-- Center of Ring: (550, 290), Radius: 190 -->
+  <g id="dreamcatcher-hoop">
+    <!-- Outer Decorative Hoop (The Ring) -->
+    <circle cx="550" cy="290" r="190" class="ring-circle" filter="url(#glow)"/>
+    <circle cx="550" cy="290" r="183" fill="none" stroke="#38bdf8" stroke-width="1" stroke-opacity="0.4"/>
+    <circle cx="550" cy="290" r="197" fill="none" stroke="#38bdf8" stroke-width="1" stroke-opacity="0.4"/>
+
+    <!-- The Woven Web: Sacred Geometry chords connecting compute hosts -->
+    <!-- 8 points on circle at R=190:
+         P0: (550, 100) - Top (0 deg)
+         P1: (684, 155) - 45 deg
+         P2: (740, 290) - 90 deg (Right)
+         P3: (684, 425) - 135 deg
+         P4: (550, 480) - 180 deg (Bottom)
+         P5: (416, 425) - 225 deg
+         P6: (360, 290) - 270 deg (Left)
+         P7: (416, 155) - 315 deg
+    -->
+    <!-- Primary web chords (skipping 3 nodes: star pattern) -->
+    <polygon points="550,100 684,425 360,290 684,155 550,480 416,155 740,290 416,425" fill="none" class="web-line"/>
+    <!-- Secondary inner web chords (skipping 2 nodes) -->
+    <polygon points="550,100 740,290 550,480 360,290" fill="none" class="web-line" stroke-opacity="0.5"/>
+    <polygon points="684,155 684,425 416,425 416,155" fill="none" class="web-line" stroke-opacity="0.5"/>
+
+    <!-- Inner Web Ring & Center Hub -->
+    <circle cx="550" cy="290" r="85" fill="none" stroke="#0ea5e9" stroke-width="1.5" stroke-dasharray="3 3" stroke-opacity="0.7"/>
+    <circle cx="550" cy="290" r="38" class="box-bg" stroke="#0284c7" stroke-width="2"/>
+    <circle cx="550" cy="290" r="6" fill="#38bdf8" filter="url(#glow)"/>
+    <text x="550" y="287" class="text-node" style="font-size: 10px;">GLOBAL</text>
+    <text x="550" y="299" class="text-node-sub" style="font-size: 9px; font-weight: 600;">SLOT ROUTER</text>
+
+    <!-- Web Beads on intersections -->
+    <circle cx="550" cy="195" r="4" class="bead"/>
+    <circle cx="625" cy="235" r="4" class="bead"/>
+    <circle cx="645" cy="290" r="4" class="bead"/>
+    <circle cx="625" cy="345" r="4" class="bead"/>
+    <circle cx="550" cy="385" r="4" class="bead"/>
+    <circle cx="475" cy="345" r="4" class="bead"/>
+    <circle cx="455" cy="290" r="4" class="bead"/>
+    <circle cx="475" cy="235" r="4" class="bead"/>
+
+    <!-- Token Stream Direction Arrows on the Ring -->
+    <!-- Top right arrow -->
+    <path d="M 640,140 Q 670,165 690,195" fill="none" stroke="#0284c7" stroke-width="2.5" marker-end="url(#arrow)"/>
+    <!-- Right bottom arrow -->
+    <path d="M 740,320 Q 735,360 710,395" fill="none" stroke="#0284c7" stroke-width="2.5"/>
+    <!-- Left bottom arrow -->
+    <path d="M 390,395 Q 365,360 360,320" fill="none" stroke="#0284c7" stroke-width="2.5"/>
+    <!-- Left top arrow -->
+    <path d="M 360,260 Q 365,220 390,185" fill="none" stroke="#0284c7" stroke-width="2.5"/>
+  </g>
+
+  <!-- ==================== RING HOST NODES ==================== -->
+  <!-- Node 1: Ingress / Head Stage (Top) -->
+  <g transform="translate(550, 100)">
+    <rect x="-85" y="-32" width="170" height="64" rx="8" class="box-bg" stroke="#0284c7" stroke-width="2"/>
+    <circle cx="-65" cy="0" r="5" fill="#10b981"/>
+    <text x="5" y="-8" class="text-node">HOST 1: HEAD STAGE</text>
+    <text x="5" y="8" class="text-node-sub">Dense Embeddings · Ingress</text>
+    <text x="5" y="21" class="text-node-sub" style="fill: #0284c7; font-weight: 600;">CUDA / High-VRAM GPU</text>
+  </g>
+
+  <!-- Node 2: Intermediate Transformer Relay (Top Right) -->
+  <g transform="translate(740, 240)">
+    <rect x="-80" y="-30" width="160" height="60" rx="8" class="box-bg" stroke="#06b6d4" stroke-width="2"/>
+    <circle cx="-60" cy="0" r="5" fill="#06b6d4"/>
+    <text x="5" y="-8" class="text-node">HOST 2: RELAY STAGE</text>
+    <text x="5" y="8" class="text-node-sub">Attention Slices · Vulkan</text>
+    <text x="5" y="20" class="text-node-sub" style="fill: #06b6d4; font-weight: 600;">Radeon RDNA3/4 (RADV)</text>
+  </g>
+
+  <!-- Node 3: Disaggregated MoE Node (Bottom Right) -->
+  <g transform="translate(710, 440)">
+    <rect x="-85" y="-30" width="170" height="60" rx="8" class="box-bg" stroke="#8b5cf6" stroke-width="2"/>
+    <circle cx="-65" cy="0" r="5" fill="#8b5cf6"/>
+    <text x="5" y="-8" class="text-node">HOST 3: EXPERT SERVER</text>
+    <text x="5" y="8" class="text-node-sub">Routed MoE Experts 0..31</text>
+    <text x="5" y="20" class="text-node-sub" style="fill: #8b5cf6; font-weight: 600;">Socket Fused MoE / CPU</text>
+  </g>
+
+  <!-- Node 4: Disaggregated MoE Node (Bottom Left) -->
+  <g transform="translate(390, 440)">
+    <rect x="-85" y="-30" width="170" height="60" rx="8" class="box-bg" stroke="#8b5cf6" stroke-width="2"/>
+    <circle cx="-65" cy="0" r="5" fill="#8b5cf6"/>
+    <text x="5" y="-8" class="text-node">HOST 4: EXPERT SERVER</text>
+    <text x="5" y="8" class="text-node-sub">Routed MoE Experts 32..63</text>
+    <text x="5" y="20" class="text-node-sub" style="fill: #8b5cf6; font-weight: 600;">Mixed VRAM / DDR5 Pool</text>
+  </g>
+
+  <!-- Node 5: Intermediate Stage (Top Left) -->
+  <g transform="translate(360, 240)">
+    <rect x="-80" y="-30" width="160" height="60" rx="8" class="box-bg" stroke="#0ea5e9" stroke-width="2"/>
+    <circle cx="-60" cy="0" r="5" fill="#0ea5e9"/>
+    <text x="5" y="-8" class="text-node">HOST 5: TAIL STAGE</text>
+    <text x="5" y="8" class="text-node-sub">Final Norm · Logits Gen</text>
+    <text x="5" y="20" class="text-node-sub" style="fill: #0ea5e9; font-weight: 600;">Intel Arc / SYCL / APU</text>
+  </g>
+
+  <!-- ==================== FEATHER CORDS & BEADS ==================== -->
+  <!-- Left Cord from Host 4 (x: 390, y: 470) to (340, 540) -->
+  <path d="M 390,470 C 370,490 350,510 340,540" class="cord-line"/>
+  <circle cx="365" cy="505" r="5" class="bead"/>
+  <circle cx="350" cy="525" r="4" class="bead"/>
+
+  <!-- Center Cord from Ring Bottom (x: 550, y: 480) to (550, 530) -->
+  <path d="M 550,480 L 550,530" class="cord-line"/>
+  <circle cx="550" cy="495" r="5" class="bead"/>
+  <circle cx="550" cy="515" r="4.5" class="bead"/>
+
+  <!-- Right Cord from Host 3 (x: 710, y: 470) to (760, 540) -->
+  <path d="M 710,470 C 730,490 750,510 760,540" class="cord-line"/>
+  <circle cx="735" cy="505" r="5" class="bead"/>
+  <circle cx="750" cy="525" r="4" class="bead"/>
+
+  <!-- ==================== THE FEATHERS (MODEL LAYERS) ==================== -->
+
+  <!-- FEATHER 1 (LEFT): Dense Attention & MLP Layers -->
+  <g transform="translate(230, 540)">
+    <!-- Feather Quill spine -->
+    <path d="M 110,0 L 110,260" stroke="#0ea5e9" stroke-width="2.5" stroke-linecap="round"/>
+    <path d="M 110,260 C 110,285 95,295 110,305 C 125,295 110,285 110,260" fill="url(#featherGrad1)"/>
+
+    <!-- Feather Header -->
+    <rect x="0" y="0" width="220" height="24" rx="4" fill="#0284c7" opacity="0.9"/>
+    <text x="110" y="16" fill="#ffffff" font-size="11" font-weight="700" text-anchor="middle">FEATHER A: DENSE LAYERS</text>
+
+    <!-- Layer Vanes (Quill bars) -->
+    <!-- Layer 00-07 -->
+    <g transform="translate(10, 32)">
+      <rect x="0" y="0" width="200" height="34" class="layer-rect"/>
+      <path d="M 0,0 L 5,0 L 5,34 L 0,34 Z" fill="#0284c7"/>
+      <text x="14" y="15" class="text-layer" font-weight="600">Layers 00 – 07</text>
+      <text x="14" y="28" class="text-node-sub">Self-Attention · Q/K/V Projections</text>
+    </g>
+
+    <!-- Layer 08-15 -->
+    <g transform="translate(10, 72)">
+      <rect x="0" y="0" width="200" height="34" class="layer-rect"/>
+      <path d="M 0,0 L 5,0 L 5,34 L 0,34 Z" fill="#06b6d4"/>
+      <text x="14" y="15" class="text-layer" font-weight="600">Layers 08 – 15</text>
+      <text x="14" y="28" class="text-node-sub">Gated Delta Net (GDN) / SwiGLU</text>
+    </g>
+
+    <!-- Layer 16-23 -->
+    <g transform="translate(10, 112)">
+      <rect x="0" y="0" width="200" height="34" class="layer-rect"/>
+      <path d="M 0,0 L 5,0 L 5,34 L 0,34 Z" fill="#0ea5e9"/>
+      <text x="14" y="15" class="text-layer" font-weight="600">Layers 16 – 23</text>
+      <text x="14" y="28" class="text-node-sub">Multi-Head Latent Attention (MLA)</text>
+    </g>
+
+    <!-- Layer 24-31 -->
+    <g transform="translate(10, 152)">
+      <rect x="0" y="0" width="200" height="34" class="layer-rect"/>
+      <path d="M 0,0 L 5,0 L 5,34 L 0,34 Z" fill="#10b981"/>
+      <text x="14" y="15" class="text-layer" font-weight="600">Layers 24 – 31</text>
+      <text x="14" y="28" class="text-node-sub">Cross-Layer Attention &amp; Norm</text>
+    </g>
+
+    <!-- Feather Footer / Downward Stream -->
+    <text x="110" y="210" class="text-node-sub" style="font-weight: 600; fill: #0284c7;">↓ Hidden States Passed to Ring</text>
+  </g>
+
+  <!-- FEATHER 2 (CENTER): Disaggregated MoE Expert Layers -->
+  <g transform="translate(440, 530)">
+    <!-- Feather Quill spine -->
+    <path d="M 110,0 L 110,270" stroke="#8b5cf6" stroke-width="2.5" stroke-linecap="round"/>
+    <path d="M 110,270 C 110,295 95,305 110,315 C 125,305 110,295 110,270" fill="url(#featherGrad2)"/>
+
+    <!-- Feather Header -->
+    <rect x="0" y="0" width="220" height="24" rx="4" fill="#7c3aed" opacity="0.9"/>
+    <text x="110" y="16" fill="#ffffff" font-size="11" font-weight="700" text-anchor="middle">FEATHER B: ROUTED EXPERTS</text>
+
+    <!-- Expert Block 1 -->
+    <g transform="translate(10, 32)">
+      <rect x="0" y="0" width="200" height="34" class="layer-rect"/>
+      <path d="M 0,0 L 5,0 L 5,34 L 0,34 Z" fill="#8b5cf6"/>
+      <text x="14" y="15" class="text-layer" font-weight="600">MoE Stage: Top-K Router</text>
+      <text x="14" y="28" class="text-node-sub">Dynamic Softmax Expert Gating</text>
+    </g>
+
+    <!-- Expert Block 2 -->
+    <g transform="translate(10, 72)">
+      <rect x="0" y="0" width="200" height="34" class="layer-rect"/>
+      <path d="M 0,0 L 5,0 L 5,34 L 0,34 Z" fill="#a855f7"/>
+      <text x="14" y="15" class="text-layer" font-weight="600">Active Experts 00 – 15</text>
+      <text x="14" y="28" class="text-node-sub">Fused CPU GEMM / AVX-512</text>
+    </g>
+
+    <!-- Expert Block 3 -->
+    <g transform="translate(10, 112)">
+      <rect x="0" y="0" width="200" height="34" class="layer-rect"/>
+      <path d="M 0,0 L 5,0 L 5,34 L 0,34 Z" fill="#c084fc"/>
+      <text x="14" y="15" class="text-layer" font-weight="600">Active Experts 16 – 47</text>
+      <text x="14" y="28" class="text-node-sub">Vulkan SPIR-V Compute Kernels</text>
+    </g>
+
+    <!-- Expert Block 4 -->
+    <g transform="translate(10, 152)">
+      <rect x="0" y="0" width="200" height="34" class="layer-rect"/>
+      <path d="M 0,0 L 5,0 L 5,34 L 0,34 Z" fill="#e879f9"/>
+      <text x="14" y="15" class="text-layer" font-weight="600">Shared / Dense Fallback</text>
+      <text x="14" y="28" class="text-node-sub">DeepSeek / Qwen Hybrid FFN</text>
+    </g>
+
+    <!-- Feather Footer / Downward Stream -->
+    <text x="110" y="210" class="text-node-sub" style="font-weight: 600; fill: #7c3aed;">↓ Expert Outputs Weighted &amp; Fused</text>
+  </g>
+
+  <!-- FEATHER 3 (RIGHT): Per-Layer Model Libraries & Generation Tail -->
+  <g transform="translate(650, 540)">
+    <!-- Feather Quill spine -->
+    <path d="M 110,0 L 110,260" stroke="#0d9488" stroke-width="2.5" stroke-linecap="round"/>
+    <path d="M 110,260 C 110,285 95,295 110,305 C 125,295 110,285 110,260" fill="url(#featherGrad3)"/>
+
+    <!-- Feather Header -->
+    <rect x="0" y="0" width="220" height="24" rx="4" fill="#0f766e" opacity="0.9"/>
+    <text x="110" y="16" fill="#ffffff" font-size="11" font-weight="700" text-anchor="middle">FEATHER C: MODEL LIBRARIES</text>
+
+    <!-- Lib Block 1 -->
+    <g transform="translate(10, 32)">
+      <rect x="0" y="0" width="200" height="34" class="layer-rect"/>
+      <path d="M 0,0 L 5,0 L 5,34 L 0,34 Z" fill="#0f766e"/>
+      <text x="14" y="15" class="text-layer" font-weight="600">--model-dir Slices</text>
+      <text x="14" y="28" class="text-node-sub">Per-Layer Sharded GGUF Weights</text>
+    </g>
+
+    <!-- Lib Block 2 -->
+    <g transform="translate(10, 72)">
+      <rect x="0" y="0" width="200" height="34" class="layer-rect"/>
+      <path d="M 0,0 L 5,0 L 5,34 L 0,34 Z" fill="#14b8a6"/>
+      <text x="14" y="15" class="text-layer" font-weight="600">IQK / Trellis Quantization</text>
+      <text x="14" y="28" class="text-node-sub">IQ2_KS, IQ4_KS, Row-Interleaved</text>
+    </g>
+
+    <!-- Lib Block 3 -->
+    <g transform="translate(10, 112)">
+      <rect x="0" y="0" width="200" height="34" class="layer-rect"/>
+      <path d="M 0,0 L 5,0 L 5,34 L 0,34 Z" fill="#2dd4bf"/>
+      <text x="14" y="15" class="text-layer" font-weight="600">RMSNorm &amp; Logits Tail</text>
+      <text x="14" y="28" class="text-node-sub">Temperature · Top-P · Samplers</text>
+    </g>
+
+    <!-- Lib Block 4 -->
+    <g transform="translate(10, 152)">
+      <rect x="0" y="0" width="200" height="34" class="layer-rect"/>
+      <path d="M 0,0 L 5,0 L 5,34 L 0,34 Z" fill="#38bdf8"/>
+      <text x="14" y="15" class="text-layer" font-weight="600">Byte-Exact Parity Check</text>
+      <text x="14" y="28" class="text-node-sub">Token-for-Token FP16 Equivalence</text>
+    </g>
+
+    <!-- Feather Footer / Downward Stream -->
+    <text x="110" y="210" class="text-node-sub" style="font-weight: 600; fill: #0f766e;">↓ Verified Token Stream Emitted</text>
+  </g>
+
+  <!-- ==================== LEGEND & ARCHITECTURAL METAPHOR ==================== -->
+  <g transform="translate(550, 835)" text-anchor="middle">
+    <text class="text-sub" style="font-size: 11px;">
+      <tspan font-weight="700" fill="#0284c7">HOOP:</tspan> Multi-Host Compute Ring &#160;·&#160;
+      <tspan font-weight="700" fill="#8b5cf6">WEB:</tspan> Low-Latency Socket &amp; Tensor Fabric &#160;·&#160;
+      <tspan font-weight="700" fill="#10b981">FEATHERS:</tspan> Partitioned Model Layers &amp; MoE Experts
+    </text>
+  </g>
+</svg>
