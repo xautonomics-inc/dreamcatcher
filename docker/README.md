@@ -205,9 +205,9 @@ All credits to the awesome community:
 The `server`/`swap` images ship `llama-stage-runner` beside `llama-server`: a
 thin driver that loads one stage of a very deep MoE (graph-build layer window
 via `STAGE_IL_START`/`STAGE_IL_END`), streams activations to the next stage
-over TCP **or RDMA**, and can serve the head stage's OpenAI HTTP endpoint.
-`llama-expert-server` is **not present in this fork's tree** and therefore not
-in the images; porting it is tracked separately.
+over TCP, and can serve the head stage's OpenAI HTTP endpoint.
+`llama-expert-server` (`examples/stage-runner/expert-server.cpp`) is also built
+and shipped in the images for offloaded Mixture-of-Experts serving over TCP.
 
 **Serve a chat model from the `server` image** — note `--jinja`: several chat
 templates (e.g. gemma) are rejected without it and requests to `/v1/chat/…`
@@ -218,11 +218,11 @@ docker run --rm -p 9292:8080 -v /my_local_files/gguf:/models:ro \
   localhost/ik_llama-cpu:server -m /models/model.gguf --jinja -c 2048 -t 8
 ```
 
-**RDMA (RoCE) transport.** Servers are compiled with `GGML_RPC=ON` and
-`GGML_RPC_RDMA=ON` (libibverbs). Stage handshakes exchange transport
-capabilities and use RDMA when **both** ends expose `/dev/infiniband`; with
-the device absent on either side they fall back to TCP, so the same image
-runs unchanged on non-RDMA hosts. To use it, pass the device through:
+**RPC RDMA (RoCE) transport.** Servers are compiled with `GGML_RPC=ON` and
+`GGML_RPC_RDMA=ON` (libibverbs), providing an optional RoCE RDMA transport tier
+for the RPC backend (`ggml-rpc`). Note that `llama-stage-runner` rings and the
+expert server exchange activations over TCP (`TCP_NODELAY`). To use the RDMA
+transport with `ggml-rpc`, pass the device through:
 
 ```bash
 docker run --rm --device /dev/infiniband ik_llama-cpu:server ...
