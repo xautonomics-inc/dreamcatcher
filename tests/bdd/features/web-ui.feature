@@ -13,7 +13,7 @@ Feature: llama-server Built-In Web User Interface
     Then the browser page title or header should display the application brand
     And the chat conversation container should be visible
 
-  @model-info @verification
+  @model-info @verification @known-issue @meta-100
   Scenario: Active model name is displayed in the Web UI
     When I navigate to "http://<host>:<port>/" using a headless browser
     Then the server properties should be loaded from "/props"

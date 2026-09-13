@@ -17,6 +17,7 @@ export BDD_HOST="${BDD_HOST:-127.0.0.1}"
 export BDD_PORT="${BDD_PORT:-8080}"
 
 REPORT_XML="${SCRIPT_DIR}/report.xml"
+TEST_TARGET="${BDD_TEST_TARGET:-${SCRIPT_DIR}}"
 
 echo "============================================================"
 echo " Running Dreamcatcher BDD Scenarios (pytest-bdd + Playwright)"
@@ -24,7 +25,7 @@ echo "============================================================"
 
 # Capture pytest exit code without masking via || true
 set +e
-python3 -m pytest "${SCRIPT_DIR}" \
+python3 -m pytest "${TEST_TARGET}" \
     -v \
     --junitxml="${REPORT_XML}" \
     -W ignore::pytest.PytestUnknownMarkWarning
