@@ -308,3 +308,43 @@ build/bin/test-quant-matmul -v        # CPU only; prints NMSE(kernel vs dequant)
 batch — the routed experts of a `UD-IQ4_XS` model run with `-ot exps=CPU` at decode are
 the common case, on every backend build, since the CPU does that matmul. The Vulkan
 sweep entries for `iq4_xs` should be read as "reference disagrees", not "backend wrong".
+
+---
+
+## `meta#96` — DeepSeek-V4-Flash on Vulkan backend produces degenerate token output
+
+On the Vulkan backend across all GPU vendors, DeepSeek-V4-Flash (`deepseek4`, measured with `UD-Q4_K_XL`, experts on CPU, `-fa on -ctk q8_0 -amb 512`) generates degenerate repetitive token output. The `meta#88` fix declined ik-specific dim-0 `GET_ROWS` nodes, correcting the decode-time attention mask gathering bug, but the `deepseek4` graph contains at least one additional Vulkan-side kernel fault. The CUDA and CPU backends on the same host are unaffected and produce coherent generation.
+
+**Repro:**
+```bash
+llama-cli --model-dir DeepSeek-V4-Flash-Vision-Exp-UD-Q4_K_XL.LAYR.GGUF -p "The capital of France is" -n 16 --temp 0 --seed 0 -ngl 99   # Vulkan build
+```
+**Symptom:** Emits degenerate repetitive sequences (e.g. `\n\n\nimportimportimport\n##…`) instead of coherent completions.
+**Workaround:** Run DeepSeek-V4 on CUDA (`-ngl 99`) or CPU (`-ngl 0`).
+
+---
+
+## `meta#100` — `llama-server --model-dir` reports empty `/props` model name (WebUI model title not rendered)
+
+When `llama-server` is launched with `--model-dir <path>` instead of `-m <file>`, the server's `/props` endpoint returns an empty string for `default_generation_settings.model` and `model_name`. While inference, sampling parameter configuration, and chat completions operate normally, the WebUI front-end does not render an active model name on the initial single-model screen.
+
+**Repro:**
+```bash
+llama-server --model-dir /path/to/layer-library -ngl 99 --port 8080
+curl -s http://127.0.0.1:8080/props | jq .default_generation_settings.model
+```
+**Symptom:** Returns `""` (empty string). In Playwright WebUI tests, the product assertion verifying visible active model name fails.
+**Workaround:** Harmless metadata omission. API completions and model generation are completely unaffected.
+
+---
+
+## `meta#102` — DeepSeek-V4 GGUFs with unsloth vision bias tensors fail to load ("wrong number of tensors")
+
+On 2026-09-04 (commit `e1efe867`), upstream Unsloth added 43 vision expert-routing bias tensors (`blk.N.exp_probs_b_vl.bias`) to `DeepSeek-V4-Flash-Vision-Exp-GGUF`, increasing total tensor count from 1328 to 1371. The current fork model loader enforces strict tensor count validation and aborts with `"wrong number of tensors"` (`llama-model-loader.cpp:1456`) when attempting to load GGUF files containing these extra tensors.
+
+**Repro:**
+```bash
+llama-cli -m DeepSeek-V4-Flash-Vision-Exp-UD-Q4_K_XL-00001-of-00005.gguf   # Unsloth rev 87ce1581 (post-09-04)
+```
+**Symptom:** Process aborts during model load with `error loading model: wrong number of tensors in model file: expected 1328, got 1371`.
+**Workaround:** Use the pinned Unsloth revision `37044a3c` (2026-09-02) or official `xautonomics/*.LAYR.GGUF` repositories, which maintain the verified 1328-tensor layout without the unhandled vision tensors.
