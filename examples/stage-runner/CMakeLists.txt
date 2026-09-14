@@ -29,6 +29,12 @@ if (STAGE_RDMA_TRANSPORT)
     target_sources(${TARGET} PRIVATE stage_rdma.cpp)
     target_include_directories(${TARGET} PRIVATE ${CMAKE_SOURCE_DIR}/ggml/src)
     target_link_libraries(${TARGET} PRIVATE ggml-transport)
+    if (NOT GGML_RPC_RDMA)
+        # Silent fallback guard: GGML_RPC_RDMA off means transport.cpp compiled
+        # without the RDMA tier; the runner's STAGE_RDMA_TRANSPORT code then
+        # negotiates nothing and stays on TCP. Loud on purpose.
+        message(STATUS "stage-runner: RDMA transport requested but ggml-rpc has no RDMA tier -> TCP only")
+    endif()
 endif()
 
 # Expert-tensor disaggregation (P1): the expert-server role and the
