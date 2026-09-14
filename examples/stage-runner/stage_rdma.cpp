@@ -109,6 +109,15 @@ bool stage_conn_write(stage_conn* c, const void* buf, uint32_t len) {
 const void* stage_conn_read(stage_conn* c, uint32_t* len) {
     if (!c || !c->rma) return nullptr;
     rma_completion cc;
+    // Wave arrival budget before parking: the next WRITE normally lands within a few
+    // thousand polls, so spin stays the fast path. Past the budget we sleep 50 us between
+    // polls — an inter-token/idle wait must not burn a whole core for the life of the
+    // connection (hybrid 8P+12E hosts: the spinning tail steals a P-core). Env knob:
+    // STAGE_RDMA_SPIN_BUDGET (0 = sleep-first, e.g. for power-constrained tails).
+    static const uint64_t spin_budget = [] {
+        const char * e = getenv("STAGE_RDMA_SPIN_BUDGET");
+        return e ? strtoull(e, nullptr, 10) : 200000ull;
+    }();
     for (uint64_t s = 0; ; ++s) {
         int n = c->rma->poll_writes(&cc, 1);
         if (n < 0)  return nullptr;
@@ -116,8 +125,9 @@ const void* stage_conn_read(stage_conn* c, uint32_t* len) {
             // No WRITE_WITH_IMM yet. Periodically check the control socket: if the peer died, the
             // completion will NEVER arrive over the dead QP, so without this the T2 receive busy-spins
             // forever and the relay wedges (never re-accepts the next head). THE relay recv-wedge fix.
-            if ((s & 0x3FFFF) == 0 && s > 0 && c->sock && c->sock->peer_closed()) return nullptr;
-            continue;                               // spin for the wave
+            if ((s & 0x3FF) == 0 && s > 0 && c->sock && c->sock->peer_closed()) return nullptr;
+            if (s >= spin_budget) usleep(50);
+            continue;                               // spin (bounded), then sleep-poll for the wave
         }
         if (len) *len = cc.byte_len;
         return c->rma->slot_ptr(rma_imm_slot(cc.imm));
