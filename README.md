@@ -4,7 +4,7 @@
 
 # dreamcatcher
 
-**dreamcatcher** is xAutonomics' fork of [ik_llama.cpp](https://github.com/ikawrakow/ik_llama.cpp) for running large mixture-of-experts models across a ring of mixed-architecture hosts. The name is the architecture: a hoop of attention stages — head, relay and tail on CUDA and Vulkan GPUs — woven together by a global slot scheduler, with the model's expert layers hanging from each stage as feathers: remote expert servers on APUs or CPUs, or direct expert offload to the CPU.
+**dreamcatcher** is [xAutonomics](https://xautonomics.com)' fork of [ik_llama.cpp](https://github.com/ikawrakow/ik_llama.cpp) for running large mixture-of-experts models across a ring of mixed-architecture hosts. The name is the architecture: a hoop of attention stages — head, relay and tail on CUDA and Vulkan GPUs — woven together by a global slot scheduler, with the model's expert layers hanging from each stage as feathers: remote expert servers on APUs or CPUs, or direct expert offload to the CPU.
 
 What it adds to ik_llama.cpp (details, design and the measurements behind each claim in [docs/DREAMCATCHER.md](docs/DREAMCATCHER.md)):
 
@@ -369,3 +369,7 @@ $ echo "source ~/.llama-completion.bash" >> ~/.bashrc
 - [nlohmann/json](https://github.com/nlohmann/json) - Single-header JSON library, used by various tools/examples - MIT License
 - [miniaudio.h](https://github.com/mackron/miniaudio) - Single-header audio format decoder, used by multimodal subsystem - Public domain
 - [subprocess.h](https://github.com/sheredom/subprocess.h) - Single-header process launching solution for C and C++ - Public domain
+
+## About
+
+dreamcatcher is built and maintained by [xAutonomics](https://xautonomics.com). Per-layer model libraries are published on [Hugging Face](https://huggingface.co/xautonomics).
