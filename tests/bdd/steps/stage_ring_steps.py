@@ -111,15 +111,25 @@ def step_submit_completion_prompt_ring(bdd_context, url, prompt):
         pytest.skip(f"Prerequisite unmet: stage ring completion endpoint unreachable at {resolved}: {exc}")
 
 
+def _wait_stage_exit(bdd_context, role: str, timeout: float = 30.0) -> str:
+    """Wait for a launched stage process to exit, then return its log text."""
+    stage = bdd_context.stages.get(role)
+    if not stage or not stage.get("proc"):
+        pytest.skip(f"Prerequisite unmet: active {role} stage runner required")
+    try:
+        stage["proc"].wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        pass  # read what was logged anyway; the assertions below fail with evidence
+    return Path(stage["log_file"]).read_text()
+
+
 @then('the head stage should transmit hidden activation tensors to the tail stage')
 def step_head_transmits_tensors(bdd_context):
-    head = bdd_context.stages.get("head")
-    if not head or not head.get("proc"):
-        pytest.skip("Prerequisite unmet: active head stage runner required to verify tensor transmission")
-    head_log = Path(head["log_file"]).read_text()
-    assert "transmit" in head_log.lower() or "activation" in head_log.lower() or "tensor" in head_log.lower(), (
-        f"Head stage did not log activation tensor transmission:\n{head_log}"
-    )
+    # Genuine ring traffic, not a loader log: the head only prints these after
+    # send_hidden of the prefill and after decoding tokens received back.
+    head_log = _wait_stage_exit(bdd_context, "head")
+    for needle in ("stage[head]: prefilled", "stage[head]: DECODE"):
+        assert needle in head_log, f"Expected '{needle}' in head stage log:\n{head_log}"
 
 
 @then(parsers.parse('the tail stage should evaluate layers {start:d} through {end:d} and compute final logits'))
@@ -127,13 +137,18 @@ def step_tail_evaluates_layers(bdd_context, start, end):
     tail = bdd_context.stages.get("tail")
     if not tail or not tail.get("proc"):
         pytest.skip("Prerequisite unmet: active tail stage runner required to verify layer evaluation")
-    tail_log = Path(tail["log_file"]).read_text()
-    assert (
-        f"layers {start}" in tail_log.lower()
-        or f"layer {start}" in tail_log.lower()
-        or "logits" in tail_log.lower()
-        or "eval" in tail_log.lower()
-    ), f"Tail stage did not log layer evaluation for {start}-{end}:\n{tail_log}"
+    # The tail serves a loop and does not exit; poll for its decode line.
+    deadline = time.time() + 30.0
+    tail_log = ""
+    while time.time() < deadline:
+        tail_log = Path(tail["log_file"]).read_text()
+        if "stage[tail]: decode" in tail_log:
+            break
+        time.sleep(0.2)
+    # The feature speaks inclusive layers (24 through 47); the runner window
+    # is half-open [24,48).
+    assert f"window [{start},{end + 1})" in tail_log, f"Tail did not assemble window [{start},{end + 1}):\n{tail_log}"
+    assert "stage[tail]: decode" in tail_log, f"Tail stage did not decode over the ring:\n{tail_log}"
 
 
 @then('the client should receive a valid completion stream')
