@@ -50,7 +50,9 @@
 #include <cstring>
 #include <map>
 #include <string>
+#ifdef STAGE_RDMA_TRANSPORT
 #include <unordered_map>
+#endif
 #include <vector>
 
 #include <arpa/inet.h>
