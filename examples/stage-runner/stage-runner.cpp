@@ -51,6 +51,8 @@
 #include <map>
 #include <string>
 #ifdef STAGE_RDMA_TRANSPORT
+#include <mutex>
+#include <shared_mutex>
 #include <unordered_map>
 #endif
 #include <vector>
@@ -213,10 +215,16 @@ static bool caps_hello_shim(int fd, bool client_first) {
 // With STAGE_RDMA unset, no device, or a peer that does not negotiate, is_rdma()
 // stays false and every call falls through to the byte stream — same wire as the
 // shim below (socket_t::get_caps emits the same all-zero blob on a non-RDMA
-// build). Map is written at connect/close only (single-threaded) and read
-// concurrently. ----
+// build). Guarded by a shared_mutex: with STAGE_SERVER=1 the forward edge is
+// touched from httplib worker threads, so connect/accept/close writers and the
+// send_hidden/recv_hidden readers can genuinely race (concurrent find() during
+// insert is UB). ----
 static std::unordered_map<int, stage_conn *> g_conns;
-static stage_conn * conn_for(int fd) { auto it = g_conns.find(fd); return it == g_conns.end() ? nullptr : it->second; }
+static std::shared_mutex g_conns_mtx;
+static stage_conn * conn_for(int fd) {
+    std::shared_lock<std::shared_mutex> lk(g_conns_mtx);
+    auto it = g_conns.find(fd); return it == g_conns.end() ? nullptr : it->second;
+}
 
 static void pack_hidden(const hidden_blob & h, std::vector<uint8_t> & buf) {
     const size_t rb = (size_t) h.n_rows * sizeof(int32_t);
@@ -281,9 +289,13 @@ static bool recv_hidden_conn(stage_conn * c, hidden_blob & h) {
 // once (the socket_t owns the fd). Unmapped fds (never happens on the stage edge
 // when the engine is on; belt for raw fds) fall through to plain close().
 static void stage_close(int fd) {
-    auto it = g_conns.find(fd);
-    if (it != g_conns.end()) { stage_conn * c = it->second; g_conns.erase(it); stage_conn_close(c); }
-    else if (fd >= 0) close(fd);
+    stage_conn * c = nullptr;
+    {
+        std::unique_lock<std::shared_mutex> lk(g_conns_mtx);
+        auto it = g_conns.find(fd);
+        if (it != g_conns.end()) { c = it->second; g_conns.erase(it); }
+    }
+    if (c) stage_conn_close(c); else if (fd >= 0) close(fd);
 }
 #else
 static void stage_close(int fd) { if (fd >= 0) close(fd); }
@@ -293,7 +305,7 @@ static int tcp_listen_accept(int port) {
     stage_conn * c = stage_conn_listen(port);
     if (!stage_conn_ok(c)) { if (c) stage_conn_close(c); return -1; }
     int fd = stage_conn_fd(c);
-    g_conns[fd] = c;
+    { std::unique_lock<std::shared_mutex> lk(g_conns_mtx); g_conns[fd] = c; }
     fprintf(stderr, "stage: accepted :%d fd=%d forward=%s\n", port, fd, stage_conn_is_rdma(c) ? "RDMA" : "TCP");
     return fd;
 #else
@@ -335,7 +347,7 @@ static int tcp_connect(const std::string & host, int port) {
         return -1;
     }
     int fd = stage_conn_fd(c);
-    g_conns[fd] = c;
+    { std::unique_lock<std::shared_mutex> lk(g_conns_mtx); g_conns[fd] = c; }
     fprintf(stderr, "stage: connected %s:%d fd=%d forward=%s\n", host.c_str(), port, fd, stage_conn_is_rdma(c) ? "RDMA" : "TCP");
     return fd;
 #else
