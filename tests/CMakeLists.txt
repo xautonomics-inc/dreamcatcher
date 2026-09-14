@@ -222,3 +222,14 @@ llama_target_and_test(test-autorelease.cpp        LABEL "model")
 get_filename_component(TEST_TARGET test-c.c NAME_WE)
 add_executable(${TEST_TARGET} test-c.c)
 target_link_libraries(${TEST_TARGET} PRIVATE llama)
+
+# STG2 forward-edge framing golden-bytes regression (stage-runner wire contract).
+# Source lives with the header it guards; standalone (stage-wire-framing.h +
+# POSIX only), so no common/llama link. Fails on ANY framing byte change.
+add_executable(test-staged-wire ${CMAKE_SOURCE_DIR}/examples/stage-runner/test-staged-wire.cpp)
+target_compile_features(test-staged-wire PRIVATE cxx_std_17)
+add_test(
+    NAME test-staged-wire
+    WORKING_DIRECTORY ${CMAKE_SOURCE_DIR}/examples/stage-runner
+    COMMAND $<TARGET_FILE:test-staged-wire>)
+set_property(TEST test-staged-wire PROPERTY LABELS "main")
