@@ -28,25 +28,57 @@ def create_synthetic_gguf(
     path.parent.mkdir(parents=True, exist_ok=True)
     w = GGUFWriter(path, "llama", endianess=endianess)
     w.add_uint32("llama.block_count", n_blocks)
+    w.add_uint32("llama.context_length", 64)
+    w.add_uint32("llama.embedding_length", tensor_dim)
+    w.add_float32("llama.attention.layer_norm_rms_epsilon", 1e-5)
+    w.add_uint32("llama.attention.head_count", 1)
+    w.add_uint32("llama.feed_forward_length", tensor_dim)
     w.add_uint32("llama.leading_dense_block_count", leading_dense)
     w.add_uint32("llama.nextn_predict_layers", nextn)
     w.add_string("general.name", "synthetic-test-model")
+    # Minimal llama-style tokenizer so loaders that require a vocabulary accept
+    # the file. SPM byte-fallback resolves any unmatched symbol via
+    # token_to_id.at("<0xNN>"), and a missing byte token throws
+    # std::out_of_range, which terminates the runner (uncaught) — so the vocab
+    # must carry all 256 "<0xNN>" byte tokens plus the BDD prompt chars.
+    n_vocab = 256 + 4
+    w.add_tokenizer_model("llama")
+    tokens = [f"<0x{i:02X}>" for i in range(256)] + ["P", "i", "n", "g"]
+    w.add_token_list(tokens)
+    w.add_token_scores([0.0] * n_vocab)
+    w.add_token_types([2] * 256 + [1] * 4)  # 2 = BYTE, 1 = NORMAL
+    w.add_bos_token_id(256)
+    w.add_eos_token_id(256)
+    w.add_unk_token_id(256)
 
-    d_embd = np.arange(tensor_dim * tensor_dim, dtype=np.float32).reshape((tensor_dim, tensor_dim))
+    # token_embd is (n_vocab, n_embd) = (260, 4); output projects the other way.
+    d_embd = np.arange(n_vocab * tensor_dim, dtype=np.float32).reshape((n_vocab, tensor_dim))
     w.add_tensor_info("token_embd.weight", d_embd.shape, d_embd.dtype, d_embd.nbytes)
 
     block_tensors: list[np.ndarray[tuple[int, int], np.dtype[np.float32]]] = []
     for i in range(n_blocks):
-        d_blk = np.arange(tensor_dim * tensor_dim, dtype=np.float32).reshape(
+        # Full standard llama per-layer tensor set; all 2-D weights are square
+        # (n_ff == n_embd) so gguf shape-reversal cannot break them.
+        mat = np.arange(tensor_dim * tensor_dim, dtype=np.float32).reshape(
             (tensor_dim, tensor_dim)
         ) * (i + 2)
-        block_tensors.append(d_blk)
-        w.add_tensor_info(f"blk.{i}.attn_q.weight", d_blk.shape, d_blk.dtype, d_blk.nbytes)
+        vec = np.ones((tensor_dim,), dtype=np.float32) * (i + 2)
+        for name, arr in (
+            ("attn_norm", vec), ("attn_q", mat), ("attn_k", mat),
+            ("attn_v", mat), ("attn_output", mat), ("ffn_norm", vec),
+            ("ffn_gate", mat), ("ffn_down", mat), ("ffn_up", mat),
+        ):
+            w.add_tensor_info(f"blk.{i}.{name}.weight", arr.shape, arr.dtype, arr.nbytes)
+            block_tensors.append(arr)
 
-    d_out = (
-        np.arange(tensor_dim * tensor_dim, dtype=np.float32).reshape((tensor_dim, tensor_dim)) * 10
-    )
+    # output_norm is a per-embedding gain vector: 1-D of length n_embd, not a matrix.
+    d_out = np.arange(tensor_dim, dtype=np.float32) * 10
     w.add_tensor_info("output_norm.weight", d_out.shape, d_out.dtype, d_out.nbytes)
+    # output projects n_embd -> n_vocab for the sampled logits. The writer
+    # reverses numpy shape into gguf ne, so pass (n_vocab, n_embd) to yield
+    # ne=[n_embd, n_vocab] as the loader requires.
+    d_log = np.arange(tensor_dim * n_vocab, dtype=np.float32).reshape((n_vocab, tensor_dim))
+    w.add_tensor_info("output.weight", d_log.shape, d_log.dtype, d_log.nbytes)
 
     d_other = None
     if include_other:
@@ -67,6 +99,7 @@ def create_synthetic_gguf(
     for d_blk in block_tensors:
         write_t(d_blk)
     write_t(d_out)
+    write_t(d_log)
     if d_other is not None:
         write_t(d_other)
 

@@ -186,11 +186,14 @@ static int tcp_listen_accept(int port) {
         return c;
     }
 }
+static int g_connect_timeout_ms = 10000;   // --connect-timeout: dial-out retry budget before descriptive exit
+
 static int tcp_connect(const std::string & host, int port) {
     int s = socket(AF_INET, SOCK_STREAM, 0);
     sockaddr_in a{}; a.sin_family = AF_INET; a.sin_port = htons(port);
     inet_pton(AF_INET, host.c_str(), &a.sin_addr);
-    for (int t = 0; t < 100; ++t) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(g_connect_timeout_ms);
+    while (std::chrono::steady_clock::now() < deadline) {
         if (connect(s, (sockaddr *) &a, sizeof(a)) == 0) {
             int f = 1; setsockopt(s, IPPROTO_TCP, TCP_NODELAY, &f, sizeof(f));
             if (!caps_hello_shim(s, /*client_first=*/true)) {   // peer dropped mid-hello: retry fresh
@@ -203,7 +206,10 @@ static int tcp_connect(const std::string & host, int port) {
         }
         usleep(100000);
     }
-    perror("connect"); return -1;
+    fprintf(stderr, "stage: connection to %s:%d failed within --connect-timeout %d ms (downstream unreachable)\n",
+            host.c_str(), port, g_connect_timeout_ms);
+    close(s);
+    return -1;
 }
 
 // ---- model ----
@@ -558,6 +564,7 @@ int main(int argc, char ** argv) {
         else if (a=="--n-ctx")      n_ctx      = atoi(nx("--n-ctx"));
         else if (a=="--n-ubatch")   n_ubatch   = atoi(nx("--n-ubatch"));
         else if (a=="--n-seq-max")  g_n_seq_max = atoi(nx("--n-seq-max"));   // max concurrent KV seqs (per-seq ctx = n_ctx/this)
+        else if (a=="--connect-timeout") g_connect_timeout_ms = atoi(nx("--connect-timeout"));  // dial-out retry budget, ms
         else if (a=="--fit-margin") g_fit_margin = atoi(nx("--fit-margin")); // per-GPU VRAM reserve (MiB) before auto-fit offloads experts
         else if (a=="--amb")        amb        = atoi(nx("--amb"));
         else if (a=="--return-listen") return_listen = atoi(nx("--return-listen"));
@@ -587,9 +594,13 @@ int main(int argc, char ** argv) {
     }
     if (model_path.empty() && model_dir.empty()) { fprintf(stderr,"stage: -m or --model-dir required\n"); return 1; }
     if (!model_path.empty() && !model_dir.empty()) { fprintf(stderr,"stage: -m and --model-dir are mutually exclusive\n"); return 1; }
+    // Banner reports the effective layer window: --layers wins (it is the
+    // launch-time source of truth), then STAGE_IL_START/END env, else "-".
+    const char * env_a = getenv("STAGE_IL_START"), * env_b = getenv("STAGE_IL_END");
+    const std::string il_a = win_a >= 0 ? std::to_string(win_a) : (env_a ? env_a : "-");
+    const std::string il_b = win_b >= 0 ? std::to_string(win_b) : (env_b ? env_b : "-");
     fprintf(stderr, "stage: IL=[%s,%s) EMIT=%s role=%s slots=%d\n",
-            getenv("STAGE_IL_START")?getenv("STAGE_IL_START"):"-",
-            getenv("STAGE_IL_END")?getenv("STAGE_IL_END"):"-",
+            il_a.c_str(), il_b.c_str(),
             getenv("STAGE_EMIT")?getenv("STAGE_EMIT"):"-", role.empty()?"file":role.c_str(), slots);
 
     // ik_llama uses a static backend registry (built-in backends); there is NO

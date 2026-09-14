@@ -46,10 +46,14 @@ def step_start_stage_runner(bdd_context, role, datatable):
         pytest.skip("Prerequisite unmet: llama-stage-runner binary not found. Build with cmake or set LLAMA_STAGE_RUNNER_BIN.")
 
     flag_map: dict[str, str] = {}
+    env: dict[str, str] = {}
     for row in datatable[1:]:
         flag = row[0].strip()
         val = row[1].strip() if len(row) > 1 else ""
-        flag_map[flag] = val
+        if flag.startswith("env:"):
+            env[flag[len("env:"):]] = bdd_context.resolve_placeholder(val)
+        else:
+            flag_map[flag] = val
 
     cmd = [bin_path]
     for f, v in flag_map.items():
@@ -57,9 +61,9 @@ def step_start_stage_runner(bdd_context, role, datatable):
         if v:
             cmd.append(bdd_context.resolve_placeholder(v))
 
-    log_file = bdd_context.temp_dir / f"stage_{role}.log"
+    log_file = bdd_context.tmp_path / f"stage_{role}.log"
     log_f = open(log_file, "w+", encoding="utf-8")
-    proc = subprocess.Popen(cmd, stdout=log_f, stderr=subprocess.STDOUT, text=True)
+    proc = subprocess.Popen(cmd, stdout=log_f, stderr=subprocess.STDOUT, text=True, env={**os.environ, **env})
     bdd_context.processes.append(proc)
     bdd_context.stages[role] = {"proc": proc, "flags": flag_map, "log_file": log_file, "log_f": log_f}
     time.sleep(1.0)
@@ -83,7 +87,16 @@ def step_head_reports_msg(bdd_context, msg):
     if not head or not head.get("proc"):
         pytest.skip("Prerequisite unmet: head stage runner not active")
     head_log = Path(head["log_file"]).read_text()
-    assert msg in head_log, f"Expected '{msg}' in head stage log:\n{head_log}"
+    assert bdd_context.resolve_placeholder(msg) in head_log, f"Expected '{msg}' in head stage log:\n{head_log}"
+
+
+@then(parsers.parse('the tail stage should report "{msg}"'))
+def step_tail_reports_msg(bdd_context, msg):
+    tail = bdd_context.stages.get("tail")
+    if not tail or not tail.get("proc"):
+        pytest.skip("Prerequisite unmet: tail stage runner not active")
+    tail_log = Path(tail["log_file"]).read_text()
+    assert bdd_context.resolve_placeholder(msg) in tail_log, f"Expected '{msg}' in tail stage log:\n{tail_log}"
 
 
 @when(parsers.parse('I submit a completion request to "{url}" with prompt "{prompt}"'))
@@ -98,15 +111,25 @@ def step_submit_completion_prompt_ring(bdd_context, url, prompt):
         pytest.skip(f"Prerequisite unmet: stage ring completion endpoint unreachable at {resolved}: {exc}")
 
 
+def _wait_stage_exit(bdd_context, role: str, timeout: float = 30.0) -> str:
+    """Wait for a launched stage process to exit, then return its log text."""
+    stage = bdd_context.stages.get(role)
+    if not stage or not stage.get("proc"):
+        pytest.skip(f"Prerequisite unmet: active {role} stage runner required")
+    try:
+        stage["proc"].wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        pass  # read what was logged anyway; the assertions below fail with evidence
+    return Path(stage["log_file"]).read_text()
+
+
 @then('the head stage should transmit hidden activation tensors to the tail stage')
 def step_head_transmits_tensors(bdd_context):
-    head = bdd_context.stages.get("head")
-    if not head or not head.get("proc"):
-        pytest.skip("Prerequisite unmet: active head stage runner required to verify tensor transmission")
-    head_log = Path(head["log_file"]).read_text()
-    assert "transmit" in head_log.lower() or "activation" in head_log.lower() or "tensor" in head_log.lower(), (
-        f"Head stage did not log activation tensor transmission:\n{head_log}"
-    )
+    # Genuine ring traffic, not a loader log: the head only prints these after
+    # send_hidden of the prefill and after decoding tokens received back.
+    head_log = _wait_stage_exit(bdd_context, "head")
+    for needle in ("stage[head]: prefilled", "stage[head]: DECODE"):
+        assert needle in head_log, f"Expected '{needle}' in head stage log:\n{head_log}"
 
 
 @then(parsers.parse('the tail stage should evaluate layers {start:d} through {end:d} and compute final logits'))
@@ -114,13 +137,18 @@ def step_tail_evaluates_layers(bdd_context, start, end):
     tail = bdd_context.stages.get("tail")
     if not tail or not tail.get("proc"):
         pytest.skip("Prerequisite unmet: active tail stage runner required to verify layer evaluation")
-    tail_log = Path(tail["log_file"]).read_text()
-    assert (
-        f"layers {start}" in tail_log.lower()
-        or f"layer {start}" in tail_log.lower()
-        or "logits" in tail_log.lower()
-        or "eval" in tail_log.lower()
-    ), f"Tail stage did not log layer evaluation for {start}-{end}:\n{tail_log}"
+    # The tail serves a loop and does not exit; poll for its decode line.
+    deadline = time.time() + 30.0
+    tail_log = ""
+    while time.time() < deadline:
+        tail_log = Path(tail["log_file"]).read_text()
+        if "stage[tail]: decode" in tail_log:
+            break
+        time.sleep(0.2)
+    # The feature speaks inclusive layers (24 through 47); the runner window
+    # is half-open [24,48).
+    assert f"window [{start},{end + 1})" in tail_log, f"Tail did not assemble window [{start},{end + 1}):\n{tail_log}"
+    assert "stage[tail]: decode" in tail_log, f"Tail stage did not decode over the ring:\n{tail_log}"
 
 
 @then('the client should receive a valid completion stream')
@@ -188,7 +216,13 @@ def step_head_unreachable_downstream(bdd_context, address):
     bin_path = find_stage_runner_bin()
     if not bin_path:
         pytest.skip("Prerequisite unmet: llama-stage-runner binary not found.")
-    res = subprocess.run([bin_path, "--role", "head", "--next-host", "127.0.0.1", "--next-port", "1"], capture_output=True, text=True, timeout=5.0)
+    if not bdd_context.lib_dir:
+        pytest.skip("Prerequisite unmet: partitioned model library not prepared for dial-out scenario.")
+    res = subprocess.run(
+        [bin_path, "--role", "head", "--model-dir", str(bdd_context.lib_dir), "--layers", "0,24",
+         "--connect", "127.0.0.1:1", "--connect-timeout", "3000", "--prompt", "Ping", "--max-tokens", "1"],
+        capture_output=True, text=True, timeout=5.0,
+    )
     bdd_context.last_returncode = res.returncode
     bdd_context.last_stderr = res.stderr
 
@@ -209,7 +243,7 @@ def step_unreachable_descriptive_error(bdd_context):
         pytest.skip("Prerequisite unmet: stage runner process was not run")
     assert bdd_context.last_returncode != 0, f"Expected non-zero returncode, got {bdd_context.last_returncode}"
     err = bdd_context.last_stderr.lower()
-    assert "error" in err or "timeout" in err or "connection" in err or "failed" in err, (
+    assert "downstream unreachable" in err, (
         f"Descriptive connection error not found in runner stderr: {bdd_context.last_stderr}"
     )
 
