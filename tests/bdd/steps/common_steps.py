@@ -2,9 +2,8 @@
 
 from __future__ import annotations
 
-import sys
-
 import json
+import sys
 from pathlib import Path
 from typing import Any
 import requests

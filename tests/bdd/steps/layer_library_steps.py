@@ -2,14 +2,13 @@
 
 from __future__ import annotations
 
-import sys
-
 import hashlib
 import json
 import os
+from pathlib import Path
 import re
 import subprocess
-from pathlib import Path
+import sys
 from typing import Any
 
 import pytest
