@@ -51,6 +51,7 @@
 #include <map>
 #include <string>
 #ifdef STAGE_RDMA_TRANSPORT
+#include <memory>
 #include <mutex>
 #include <shared_mutex>
 #include <unordered_map>
@@ -85,6 +86,7 @@ struct hidden_blob {
         seq.resize(rows); pos.resize(rows); data.resize((size_t) rows * embd);
     }
 };
+#include "stage-wire-framing.h"   // STG2 framing single source of truth (test-staged-wire shares it)
 
 // ---- socket helpers ----
 static bool send_all(int fd, const void * b, size_t n) {
@@ -99,46 +101,28 @@ static bool recv_all(int fd, void * b, size_t n) {
 }
 #ifdef STAGE_RDMA_TRANSPORT
 // defined with the transport block below (tcp_connect / tcp_listen_accept)
-static stage_conn * conn_for(int fd);
+static std::shared_ptr<stage_conn> conn_for(int fd);
 static bool send_hidden_conn(stage_conn * c, const hidden_blob & h);
 static bool recv_hidden_conn(stage_conn * c, hidden_blob & h);
 #endif
 static bool send_hidden(int fd, const hidden_blob & h) {
 #ifdef STAGE_RDMA_TRANSPORT
-    if (stage_conn * c = conn_for(fd)) {
-        if (stage_conn_is_rdma(c)) return send_hidden_conn(c, h);
+    if (auto c = conn_for(fd)) {
+        if (stage_conn_is_rdma(c.get())) return send_hidden_conn(c.get(), h);
         // TCP control conn from the engine: caps handshake already done at connect.
-        int32_t hdr[3] = { STAGE_MAGIC, h.n_rows, h.n_embd };
-        return send_all(fd, hdr, sizeof(hdr)) &&
-               send_all(fd, h.seq.data(),  h.n_rows * sizeof(int32_t)) &&
-               send_all(fd, h.pos.data(),  h.n_rows * sizeof(int32_t)) &&
-               send_all(fd, h.data.data(), h.data.size() * sizeof(float));
+        return framing_send(fd, h);
     }
 #endif
-    int32_t hdr[3] = { STAGE_MAGIC, h.n_rows, h.n_embd };
-    return send_all(fd, hdr, sizeof(hdr)) &&
-           send_all(fd, h.seq.data(),  h.n_rows * sizeof(int32_t)) &&
-           send_all(fd, h.pos.data(),  h.n_rows * sizeof(int32_t)) &&
-           send_all(fd, h.data.data(), h.data.size() * sizeof(float));
+    return framing_send(fd, h);
 }
 static bool recv_hidden(int fd, hidden_blob & h) {
 #ifdef STAGE_RDMA_TRANSPORT
-    if (stage_conn * c = conn_for(fd)) {
-        if (stage_conn_is_rdma(c)) return recv_hidden_conn(c, h);
-        int32_t hdr[3];
-        if (!recv_all(fd, hdr, sizeof(hdr)) || hdr[0] != STAGE_MAGIC) return false;
-        h.resize(hdr[1], hdr[2]);
-        return recv_all(fd, h.seq.data(),  h.n_rows * sizeof(int32_t)) &&
-               recv_all(fd, h.pos.data(),  h.n_rows * sizeof(int32_t)) &&
-               recv_all(fd, h.data.data(), h.data.size() * sizeof(float));
+    if (auto c = conn_for(fd)) {
+        if (stage_conn_is_rdma(c.get())) return recv_hidden_conn(c.get(), h);
+        return framing_recv(fd, h);
     }
 #endif
-    int32_t hdr[3];
-    if (!recv_all(fd, hdr, sizeof(hdr)) || hdr[0] != STAGE_MAGIC) return false;
-    h.resize(hdr[1], hdr[2]);
-    return recv_all(fd, h.seq.data(),  h.n_rows * sizeof(int32_t)) &&
-           recv_all(fd, h.pos.data(),  h.n_rows * sizeof(int32_t)) &&
-           recv_all(fd, h.data.data(), h.data.size() * sizeof(float));
+    return framing_recv(fd, h);
 }
 // back edge: C sampled tokens (one per slot) + a global eog flag
 static bool send_tokens(int fd, const std::vector<int32_t> & toks, int32_t eog) {
@@ -215,13 +199,25 @@ static bool caps_hello_shim(int fd, bool client_first) {
 // With STAGE_RDMA unset, no device, or a peer that does not negotiate, is_rdma()
 // stays false and every call falls through to the byte stream — same wire as the
 // shim below (socket_t::get_caps emits the same all-zero blob on a non-RDMA
-// build). Guarded by a shared_mutex: with STAGE_SERVER=1 the forward edge is
-// touched from httplib worker threads, so connect/accept/close writers and the
-// send_hidden/recv_hidden readers can genuinely race (concurrent find() during
-// insert is UB). ----
-static std::unordered_map<int, stage_conn *> g_conns;
+// build). Guarded by a shared_mutex AND shared_ptr ownership: with STAGE_SERVER=1
+// the forward edge is touched from httplib worker threads, so connect/accept/close
+// writers and the send_hidden/recv_hidden readers genuinely race. Two distinct
+// races, two mechanisms: (1) map structure (find during insert is UB) -> the lock;
+// (2) conn lifetime — conn_for used to return the raw pointer after dropping the
+// lock, so a stage_close on another thread (e.g. the server pipe's rx thread on a
+// dead return edge) could free it mid-send_hidden -> the map holds shared_ptr, and
+// callers keep the reference alive across the I/O. stage_close then only drops its
+// own reference; actual teardown waits for the last in-flight user. shutdown() in
+// ring_close (stage-server.h) makes any such in-flight I/O return promptly. ----
+static std::unordered_map<int, std::shared_ptr<stage_conn>> g_conns;
 static std::shared_mutex g_conns_mtx;
-static stage_conn * conn_for(int fd) {
+// The C API hands out stage_conn* to be closed via stage_conn_close (opaque type:
+// no delete). The shared_ptr deleter makes that happen exactly once, on the last
+// reference. Declared before the insert sites below.
+static std::shared_ptr<stage_conn> stage_conn_shared(stage_conn * c) {
+    return c ? std::shared_ptr<stage_conn>(c, stage_conn_close) : nullptr;
+}
+static std::shared_ptr<stage_conn> conn_for(int fd) {
     std::shared_lock<std::shared_mutex> lk(g_conns_mtx);
     auto it = g_conns.find(fd); return it == g_conns.end() ? nullptr : it->second;
 }
@@ -285,17 +281,18 @@ static bool recv_hidden_conn(stage_conn * c, hidden_blob & h) {
     if (!stage_conn_recv(c, buf.data(), nb)) return false;
     return unpack_hidden(buf.data(), nb, h);
 }
-// Close a stage link by fd: drop the map entry + tear the QP/socket down exactly
-// once (the socket_t owns the fd). Unmapped fds (never happens on the stage edge
-// when the engine is on; belt for raw fds) fall through to plain close().
+// Close a stage link by fd: drop the map entry exactly once. The shared_ptr
+// deleter runs stage_conn_close when the last reference (here or an in-flight
+// send_hidden/recv_hidden user) goes away. Unmapped fds (never happens on the
+// stage edge when the engine is on; belt for raw fds) fall through to close().
 static void stage_close(int fd) {
-    stage_conn * c = nullptr;
+    std::shared_ptr<stage_conn> c;
     {
         std::unique_lock<std::shared_mutex> lk(g_conns_mtx);
         auto it = g_conns.find(fd);
-        if (it != g_conns.end()) { c = it->second; g_conns.erase(it); }
+        if (it != g_conns.end()) { c = std::move(it->second); g_conns.erase(it); }
     }
-    if (c) stage_conn_close(c); else if (fd >= 0) close(fd);
+    if (!c && fd >= 0) close(fd);
 }
 #else
 static void stage_close(int fd) { if (fd >= 0) close(fd); }
@@ -305,8 +302,9 @@ static int tcp_listen_accept(int port) {
     stage_conn * c = stage_conn_listen(port);
     if (!stage_conn_ok(c)) { if (c) stage_conn_close(c); return -1; }
     int fd = stage_conn_fd(c);
-    { std::unique_lock<std::shared_mutex> lk(g_conns_mtx); g_conns[fd] = c; }
-    fprintf(stderr, "stage: accepted :%d fd=%d forward=%s\n", port, fd, stage_conn_is_rdma(c) ? "RDMA" : "TCP");
+    bool rdma = stage_conn_is_rdma(c);            // read BEFORE publish: after the map insert another thread may close
+    { auto sc = stage_conn_shared(c); std::unique_lock<std::shared_mutex> lk(g_conns_mtx); g_conns[fd] = sc; }
+    fprintf(stderr, "stage: accepted :%d fd=%d forward=%s\n", port, fd, rdma ? "RDMA" : "TCP");
     return fd;
 #else
     int s = socket(AF_INET, SOCK_STREAM, 0);
@@ -347,8 +345,9 @@ static int tcp_connect(const std::string & host, int port) {
         return -1;
     }
     int fd = stage_conn_fd(c);
-    { std::unique_lock<std::shared_mutex> lk(g_conns_mtx); g_conns[fd] = c; }
-    fprintf(stderr, "stage: connected %s:%d fd=%d forward=%s\n", host.c_str(), port, fd, stage_conn_is_rdma(c) ? "RDMA" : "TCP");
+    bool rdma = stage_conn_is_rdma(c);            // read BEFORE publish (see accept path)
+    { auto sc = stage_conn_shared(c); std::unique_lock<std::shared_mutex> lk(g_conns_mtx); g_conns[fd] = sc; }
+    fprintf(stderr, "stage: connected %s:%d fd=%d forward=%s\n", host.c_str(), port, fd, rdma ? "RDMA" : "TCP");
     return fd;
 #else
     int s = socket(AF_INET, SOCK_STREAM, 0);

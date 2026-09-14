@@ -30,10 +30,10 @@ if (STAGE_RDMA_TRANSPORT)
     target_include_directories(${TARGET} PRIVATE ${CMAKE_SOURCE_DIR}/ggml/src)
     target_link_libraries(${TARGET} PRIVATE ggml-transport)
     if (NOT GGML_RPC_RDMA)
-        # Silent fallback guard: GGML_RPC_RDMA off means transport.cpp compiled
+        # Loud fallback guard: GGML_RPC_RDMA off means transport.cpp compiled
         # without the RDMA tier; the runner's STAGE_RDMA_TRANSPORT code then
-        # negotiates nothing and stays on TCP. Loud on purpose.
-        message(STATUS "stage-runner: RDMA transport requested but ggml-rpc has no RDMA tier -> TCP only")
+        # negotiates nothing and stays on TCP. WARNING so it survives quiet builds.
+        message(WARNING "stage-runner: RDMA transport requested but ggml-rpc has no RDMA tier -> TCP only")
     endif()
 endif()
 
@@ -55,3 +55,8 @@ add_executable(${TARGET} expert-check.cpp)
 install(TARGETS ${TARGET} RUNTIME)
 target_link_libraries(${TARGET} PRIVATE common llama ${CMAKE_THREAD_LIBS_INIT})
 target_compile_features(${TARGET} PRIVATE cxx_std_17)
+
+# Golden-bytes regression for the STG2 forward-edge framing lives in
+# test-staged-wire.cpp (source stays here, next to stage-wire-framing.h and
+# test-data/stg2-frame.golden); it is registered with add_test in
+# tests/CMakeLists.txt, the subtree that has CTest enabled.
