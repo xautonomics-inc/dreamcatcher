@@ -5,9 +5,10 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from pathlib import Path
 import re
 import subprocess
-from pathlib import Path
+import sys
 from typing import Any
 
 import pytest
@@ -60,7 +61,7 @@ def step_run_slicer_with_args(bdd_context, datatable):
     out_path.mkdir(parents=True, exist_ok=True)
     bdd_context.lib_dir = out_path
 
-    cmd = ["python3", str(slicer_py), src, str(out_path), "--force"]
+    cmd = [sys.executable, str(slicer_py), src, str(out_path), "--force"]
     if no_hash:
         cmd.append("--no-hash")
 
@@ -136,7 +137,7 @@ def step_library_generated(bdd_context, monolith_path, output_dir):
         create_synthetic_gguf(m_path, n_blocks=4)
     repo_root = Path(__file__).resolve().parents[3]
     slicer_py = repo_root / "examples" / "stage-runner" / "slice_gguf_layers.py"
-    subprocess.run(["python3", str(slicer_py), str(m_path), str(o_dir), "--force"], check=True)
+    subprocess.run([sys.executable, str(slicer_py), str(m_path), str(o_dir), "--force"], check=True)
     with open(o_dir / "manifest.json", "r", encoding="utf-8") as f:
         bdd_context.manifest = json.load(f)
 
