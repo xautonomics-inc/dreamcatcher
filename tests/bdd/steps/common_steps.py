@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sys
+
 import json
 from pathlib import Path
 from typing import Any
@@ -22,7 +24,7 @@ def ensure_layer_library(lib_dir: Path, n_blocks: int = 4) -> None:
     create_synthetic_gguf(monolith, n_blocks=n_blocks)
     repo_root = Path(__file__).resolve().parents[3]
     slicer = repo_root / "examples" / "stage-runner" / "slice_gguf_layers.py"
-    subprocess.run(["python3", str(slicer), str(monolith), str(lib_dir), "--force"], check=True)
+    subprocess.run([sys.executable, str(slicer), str(monolith), str(lib_dir), "--force"], check=True)
 
 
 @given(parsers.parse('a valid model library exists at "{lib_dir}"'))
@@ -36,7 +38,10 @@ def step_valid_model_library_exists(bdd_context, lib_dir):
 def step_valid_partitioned_model_library_exists(bdd_context, lib_dir):
     resolved = Path(bdd_context.resolve_placeholder(lib_dir))
     bdd_context.lib_dir = resolved
-    ensure_layer_library(resolved, n_blocks=4)
+    # Size the synthetic library to the declared layer count so stage-runner
+    # layer windows (e.g. --layers 0,24 / 24,48) address real blocks.
+    n_blocks = getattr(bdd_context, "total_layers", None) or 4
+    ensure_layer_library(resolved, n_blocks=n_blocks)
 
 
 @given(parsers.parse('the library contains a valid "manifest.json" of format "{fmt}"'))
