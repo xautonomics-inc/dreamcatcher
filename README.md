@@ -119,9 +119,22 @@ See [Vulkan backend docs](docs/VULKAN-BACKEND.md) for device compatibility, buil
 Distributed MoE inference is supported via the expert-server role (`llama-expert-server`),
 which allows routed-expert tensors to be served by a remote process. See
 [the lane 10 documentation](docs/LANES-9-11.md#lane-10-expert-server-port) for details.
-The global slot router (lane 11) gates the head/relay/tail/server stages behind a
-configuration-driven arbiter for multi-GPU slot allocation (default OFF, fail-open).
-See [the lane 11 documentation](docs/LANES-9-11.md#lane-11-gslot-runtime) for details.
+### Multi-Agent Pipeline Parallelism & The Global Slot Router
+
+Dreamcatcher partitions large transformer models across a ring of heterogeneous pipeline stages (`head`, `relay`, and `tail` across CUDA, Vulkan, and CPU), exchanging intermediate activations (`hidden_blob`) over low-latency TCP sockets.
+
+In a single-request pipeline, non-bottleneck stages sit idle for >90% of each token cycle while waiting for activations to traverse the rest of the ring. Dreamcatcher converts this pipeline idle into multi-tenant concurrency, enabling multiple agent sessions through staggered wave execution:
+
+1. **Independent Sequence Slots (`PipeSlot`):** The pipeline server (`stage-server.h`) maintains concurrent slots, mapping each incoming agent session to an isolated sequence ID and KV cache context.
+2. **Per-Stage Request Isolation:** Each physical stage processes **one agent's request wave at a time** (a prefill chunk or a single decode step) for its assigned layer window.
+3. **Assembly-Line Interleaving:** Once a stage completes its layer forward pass for Agent Session $A$, it dispatches activations downstream via `send_hidden()` and immediately yields the stage compute context (`handoff()`). The stage is instantly ready to ingest and compute the next wave for Agent Session $B$. Concurrently, downstream stages execute their layer windows for Session $A$, keeping all ring nodes productively utilized and eliminating pipeline bubbles.
+4. **Time-Domain Arbitration via `gslot-runtime` (`STAGE_GSLOT_MODE=burst`):** When multiple pipeline stages or model processes are co-resident on shared accelerators or host CPUs, concurrent uncoordinated compute causes VRAM allocation collisions and spin-barrier thrashing. The Global Slot Router (`tools/gslot/arbiter.py` and `examples/stage-runner/gslot_client.h`) arbitrates device access through non-blocking turn leases:
+   - Stages acquire an exclusive lease immediately before compute (`g_gslot.open()`).
+   - Stages release the lease the exact instant activations are emitted downstream (`g_gslot.handoff()`).
+   - Both tenants run full-width without hot-path threadpool resizing or spatial partitioning ("exclusivity in time instead of partitioning in space").
+5. **Strict Fail-Open Resilience:** If `STAGE_GSLOT_SOCKET` is unset or the daemon becomes unreachable, `g_gslot.open()` evaluates to `true` with zero syscalls, ensuring cluster inference never blocks or deadlocks on scheduler availability.
+
+For configuration variables and integration details, see [docs/GSLOT-RUNTIME-PORT.md](docs/GSLOT-RUNTIME-PORT.md) and [docs/LANES-9-11.md](docs/LANES-9-11.md#lane-11-gslot-runtime).
 
 ### Step-by-step instructions for a case of a successful Windows build
 https://github.com/ikawrakow/ik_llama.cpp/blob/main/docs/build.md
