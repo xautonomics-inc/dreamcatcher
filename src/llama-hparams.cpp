@@ -759,7 +759,18 @@ void llm_load_hparams(
                     }
                 }
 
-                // head_count_kv is also a SOURCE-length per-layer array. Same absolute indexing.
+                // head_count and head_count_kv are also SOURCE-length per-layer arrays.
+                // Same absolute indexing. (get_arr returns false for a scalar key, so
+                // these are no-ops on a monolith or when the checkpoint stores scalars.)
+                {
+                    std::vector<uint32_t> n_head_src;
+                    if (ml.get_arr(LLM_KV_ATTENTION_HEAD_COUNT, n_head_src, false)) {
+                        GGML_ASSERT(n_head_src.size() >= hparams.n_layer_source());
+                        for (uint32_t il = 0; il < hparams.n_layer; ++il) {
+                            hparams.n_head_arr[il] = n_head_src[hparams.il_abs(il)];
+                        }
+                    }
+                }
                 {
                     std::vector<uint32_t> n_head_kv_src;
                     if (ml.get_arr(LLM_KV_ATTENTION_HEAD_COUNT_KV, n_head_kv_src, false)) {
