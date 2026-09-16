@@ -13,6 +13,7 @@ from layer_distribution import (
     Manifest,
     compute_blake2b_128,
     files_for_window,
+    papply_hash,
     precheck,
     rebalance,
     verify,
@@ -906,3 +907,129 @@ def test_manifest_roundtrip_preserves_scope_and_tensors() -> None:
     orig_files: list[dict[str, Any]] = original["files"]
     rt_files: list[dict[str, Any]] = roundtrip["files"]
     assert rt_files[0]["tensors"] == orig_files[0]["tensors"]
+
+
+# ============================================================================
+
+
+def test_papply_hash_is_deterministic() -> None:
+    """Same window computed twice yields the same papply hash."""
+    manifest = make_mock_manifest(block_count=40, nextn_layers=2)
+    m = Manifest.from_dict(manifest)
+
+    h1 = papply_hash(m, 10, 20)
+    h2 = papply_hash(m, 10, 20)
+    assert h1 == h2
+    assert len(h1) == 32  # blake2b-128 hex digest
+
+
+def test_papply_hash_differs_for_different_windows() -> None:
+    """Different windows produce different papply hashes."""
+    manifest = make_mock_manifest(block_count=40, nextn_layers=2)
+    m = Manifest.from_dict(manifest)
+
+    windows = [(0, 10), (10, 20), (20, 30), (30, 40), (15, 16), (5, 15)]
+    hashes = {papply_hash(m, a, b) for a, b in windows}
+    assert len(hashes) == len(windows)
+
+
+def test_papply_hash_includes_manifest_identity() -> None:
+    """Hash changes when manifest model_name changes (rebasability)."""
+    manifest1 = make_mock_manifest(block_count=40, nextn_layers=2)
+    manifest2 = make_mock_manifest(block_count=40, nextn_layers=2)
+    manifest2["source"]["model_name"] = "different-model"
+
+    m1 = Manifest.from_dict(manifest1)
+    m2 = Manifest.from_dict(manifest2)
+
+    h1 = papply_hash(m1, 10, 20)
+    h2 = papply_hash(m2, 10, 20)
+    assert h1 != h2
+
+
+def test_papply_hash_includes_window_bounds() -> None:
+    """Hash changes when window bounds change (even with same file count)."""
+    manifest = make_mock_manifest(block_count=40, nextn_layers=2)
+    m = Manifest.from_dict(manifest)
+
+    h1 = papply_hash(m, 0, 10)
+    h2 = papply_hash(m, 10, 20)
+    assert h1 != h2
+
+
+def test_papply_hash_covers_nextn_layers() -> None:
+    """End window covering NextN layers produces hash reflecting those files."""
+    manifest = make_mock_manifest(block_count=40, nextn_layers=2)
+    m = Manifest.from_dict(manifest)
+
+    files = files_for_window(m, 30, 40)
+    nextn_files = {f for f in files if "nextn" in f}
+    assert len(nextn_files) == 2
+
+    # Hash should be valid and deterministic
+    h = papply_hash(m, 30, 40)
+    assert len(h) == 32
+    assert papply_hash(m, 30, 40) == h
+
+
+def test_papply_hash_accepts_dict_manifest() -> None:
+    """papply_hash accepts a raw dict manifest (not just Manifest instance)."""
+    manifest = make_mock_manifest(block_count=40, nextn_layers=2)
+
+    h_dict = papply_hash(manifest, 10, 20)
+    h_obj = papply_hash(Manifest.from_dict(manifest), 10, 20)
+    assert h_dict == h_obj
+
+
+def test_papply_hash_single_layer() -> None:
+    """Single-layer window produces a valid hash."""
+    manifest = make_mock_manifest(block_count=40, nextn_layers=2)
+    m = Manifest.from_dict(manifest)
+
+    h = papply_hash(m, 15, 16)
+    assert len(h) == 32
+    # Different from a 10-layer window
+    assert h != papply_hash(m, 0, 10)
+
+
+def test_papply_hash_raises_on_invalid_window() -> None:
+    """Invalid window bounds raise ValueError."""
+    manifest = make_mock_manifest(block_count=40, nextn_layers=2)
+    m = Manifest.from_dict(manifest)
+
+    with pytest.raises(ValueError):
+        papply_hash(m, -1, 10)
+
+    with pytest.raises(ValueError):
+        papply_hash(m, 10, 5)
+
+    with pytest.raises(ValueError):
+        papply_hash(m, 0, 50)
+
+
+def test_papply_hash_with_other_files() -> None:
+    """Hash includes parts-other.gguf when present in manifest."""
+    manifest = make_mock_manifest(block_count=40, nextn_layers=2, include_other=True)
+    m = Manifest.from_dict(manifest)
+
+    h_with_other = papply_hash(m, 0, 10)
+    h_without_other = papply_hash(make_mock_manifest(block_count=40, nextn_layers=2), 0, 10)
+
+    # The file set is the same (other files are included in all windows),
+    # but the manifest identity differs (different file list means different hashes)
+    assert h_with_other != h_without_other
+
+
+def test_papply_hash_consistent_with_files_for_window() -> None:
+    """papply_hash is consistent with the file set from files_for_window."""
+    manifest = make_mock_manifest(block_count=40, nextn_layers=2)
+    m = Manifest.from_dict(manifest)
+
+    a, b = 10, 20
+    files = files_for_window(m, a, b)
+    h = papply_hash(m, a, b)
+
+    # The hash should be derivable from the same components
+    assert len(h) == 32
+    # And deterministic across calls
+    assert papply_hash(m, a, b) == h

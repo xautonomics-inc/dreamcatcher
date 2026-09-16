@@ -1,0 +1,4 @@
+# Ignore temporary files in scratch, but keep proof scripts
+*
+!prove_papply_hash.py
+!.gitignore

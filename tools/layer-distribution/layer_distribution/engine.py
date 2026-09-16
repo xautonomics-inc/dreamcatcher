@@ -134,6 +134,61 @@ def files_for_window(manifest: dict[str, Any] | Manifest | Path | str, a: int, b
     return result_files
 
 
+def papply_hash(
+    manifest: dict[str, Any] | Manifest | Path | str,
+    a: int,
+    b: int,
+) -> str:
+    """Compute a deterministic hash for a layer-window subset (the "papply hash").
+
+    This hash accounts for window rebasing by incorporating:
+    - The manifest identity (model_name, arch, block_count, nextn_predict_layers)
+    - The window bounds [a, b)
+    - The sorted set of files in the window with their sizes and hashes
+
+    This allows a node serving a rebased window to prove it holds exactly
+    the expected subset of the layer library, regardless of how the
+    absolute layer indices map to files on that node.
+
+    Args:
+        manifest: Dictionary or Manifest instance defining the layer library.
+        a: Start layer index (inclusive, 0-indexed).
+        b: End layer index (exclusive, 0-indexed).
+
+    Returns:
+        A 32-character hex string (blake2b-128) representing the window subset.
+
+    Raises:
+        ValueError: If window bounds are invalid (delegated to files_for_window).
+    """
+    m = _normalize_manifest(manifest)
+    window_files = files_for_window(m, a, b)
+
+    # Build a deterministic representation of the window subset
+    # Include manifest identity so the hash is unique per model
+    manifest_id = (
+        f"{m.source.model_name}|{m.source.arch}|"
+        f"{m.source.block_count}|{m.source.nextn_predict_layers}"
+    )
+
+    # Build file descriptors sorted by filename for determinism
+    file_map = {mf.file: mf for mf in m.files}
+    file_descriptors = []
+    for fname in sorted(window_files):
+        mf = file_map.get(fname)
+        if mf is not None:
+            file_descriptors.append(
+                f"{fname}|{mf.n_bytes_file}|{mf.hash or ''}|{mf.kind}|{mf.abs_index or ''}"
+            )
+        else:
+            # File not in manifest (shouldn't happen for files_for_window results)
+            file_descriptors.append(f"{fname}|0||unknown|")
+
+    # Combine all components into a single string and hash
+    combined = f"{manifest_id}|{a}|{b}|" + "|".join(file_descriptors)
+    return compute_blake2b_128(combined.encode("utf-8"))
+
+
 def verify(
     files: Mapping[str, Path | bytes | tuple[int, str] | tuple[int, str, str]]
     | Path
