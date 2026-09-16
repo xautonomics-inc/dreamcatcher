@@ -12,9 +12,9 @@ Feature: Serve the Inkling (TML) architecture end to end
   verification (the same rule as BDD_SERVER_URL in release-checks.feature).
   Recorded oracle run (do not re-run it):
     oracle dir:  /fast/build/agents/noah/p1/d0-oracle-20260915T2024/
-    greedy-64x8.json     — greedy token IDs plus the top-10 token probabilities
-                           per position (n_probs: 10; the dump holds no full
-                           logit vectors)
+    greedy-64x8.json     — greedy token IDs plus per-position log-probabilities
+                           (fields logprob and top_logprobs, n_probs: 10; the
+                           dump holds no full logit vectors)
     kld-base-4x2048.bin  — base logits dump over the D0 4-chunk perplexity split
     ppl.log              — per-chunk and final perplexity log
     ppl 72.6183 ± 5.49154 — the ± value is the oracle's own error bar, not the
@@ -54,7 +54,8 @@ Feature: Serve the Inkling (TML) architecture end to end
     Then every tensor is created with the Inkling names and shapes
     And the KV keys include dense_block_count, d_rel, rel_extent, rel_extent_swa,
       shortconv_kernel, logit_scale_denom, log_scaling_n_floor, log_scaling_alpha,
-      unpadded_vocab_size, the per-layer SWA pattern, and the expert FFN length
+      unpadded_vocab_size, block_count, attention.sliding_window,
+      attention.sliding_window_pattern, and the expert FFN length
     And no forward pass has run
 
   @d2 @parity @pending
@@ -62,7 +63,7 @@ Feature: Serve the Inkling (TML) architecture end to end
     Given the D0 oracle dump "greedy-64x8.json" exists in the INKLING_ORACLE_DIR directory
     When the model runs greedy generation on CPU for the D0 fixed prompt set
     Then every generated token ID equals the oracle token IDs
-    And the top-10 token probabilities at each position match the oracle within tolerance
+    And the per-position log-probabilities (logprob, top_logprobs) match the oracle within tolerance
 
   @d2 @parity @pending
   Scenario: 4-chunk perplexity reproduces the oracle per-chunk values
