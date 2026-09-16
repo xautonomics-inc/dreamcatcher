@@ -58,6 +58,16 @@ struct llama_hparams {
     uint32_t n_ff_exp           = 0;
     uint32_t n_ff_shexp         = 0;
     uint32_t n_expert_shared    = 0;
+
+    // inkling (private arch)
+    uint32_t n_shortconv_l_cache  = 0;
+    uint32_t n_embd_r_impl        = 0;
+    uint32_t inkling_d_rel        = 0;
+    uint32_t inkling_rel_extent   = 0; // global (non-SWA) layers
+    uint32_t inkling_rel_extent_swa = 0; // local (SWA) layers
+    uint32_t inkling_log_n_floor  = 0; // 0 = log-N scaling disabled
+    float    inkling_log_alpha    = 0.0f;
+    uint32_t inkling_unpadded_n_vocab = 0; // 0 = no padded-vocab masking
     uint32_t n_norm_groups      = 0;
     uint32_t n_expert_groups    = 0;
     uint32_t n_group_used       = 0;
@@ -253,6 +263,15 @@ struct llama_hparams {
         if (this->n_ff_shexp         != other.n_ff_shexp)         return true;
         if (this->n_expert_shared    != other.n_expert_shared)    return true;
 
+        if (this->n_shortconv_l_cache    != other.n_shortconv_l_cache)    return true;
+        if (this->n_embd_r_impl          != other.n_embd_r_impl)          return true;
+        if (this->inkling_d_rel          != other.inkling_d_rel)          return true;
+        if (this->inkling_rel_extent     != other.inkling_rel_extent)     return true;
+        if (this->inkling_rel_extent_swa != other.inkling_rel_extent_swa) return true;
+        if (this->inkling_log_n_floor    != other.inkling_log_n_floor)    return true;
+        if (!is_float_close(this->inkling_log_alpha, other.inkling_log_alpha, EPSILON)) return true;
+        if (this->inkling_unpadded_n_vocab != other.inkling_unpadded_n_vocab) return true;
+
         if (this->rope_finetuned  != other.rope_finetuned)  return true;
         if (this->n_ctx_orig_yarn != other.n_ctx_orig_yarn) return true;
 
@@ -359,6 +378,29 @@ struct llama_hparams {
 
     uint32_t n_embd_v_gqa(uint32_t il = 0) const { // dimension of value embeddings across all k-v heads
         return n_head_kv(il) * n_embd_head_v(il);
+    }
+
+    uint32_t n_embd_k_gqa_max() const {
+        uint32_t val = n_embd_k_gqa();
+        for (uint32_t il = 0; il < n_layer; ++il) {
+            val = std::max(val, n_embd_k_gqa(il));
+        }
+        return val;
+    }
+
+    uint32_t n_embd_v_gqa_max() const {
+        uint32_t val = n_embd_v_gqa();
+        for (uint32_t il = 0; il < n_layer; ++il) {
+            val = std::max(val, n_embd_v_gqa(il));
+        }
+        return val;
+    }
+
+    uint32_t n_embd_r() const {
+        if (n_embd_r_impl != 0) {
+            return n_embd_r_impl;
+        }
+        return 0;
     }
 
     uint32_t n_embd_k_s() const { // dimension of the rolling state embeddings

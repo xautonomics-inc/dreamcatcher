@@ -89,6 +89,8 @@ struct create_tensors_helper : public create_tensors_helper_interface {
 
     bool create_qwen35_tensors(const LLM_TN & tn);
 
+    bool create_inkling_tensors(const LLM_TN & tn);
+
     bool create_phi2_tensors(const LLM_TN & tn);
 
     bool create_phi3_tensors(const LLM_TN & tn);

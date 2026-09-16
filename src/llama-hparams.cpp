@@ -735,6 +735,50 @@ void llm_load_hparams(
                     default: model.type = e_model::MODEL_UNKNOWN;
                 }
             } break;
+        case LLM_ARCH_INKLING:
+            {
+                ml.get_key(LLM_KV_ATTENTION_LAYERNORM_RMS_EPS, hparams.f_norm_rms_eps);
+
+                ml.get_key_or_arr(LLM_KV_EXPERT_FEED_FORWARD_LENGTH, hparams.n_ff_exp, false);
+                ml.get_key(LLM_KV_EXPERT_SHARED_COUNT,        hparams.n_expert_shared);
+                ml.get_key(LLM_KV_EXPERT_WEIGHTS_SCALE,       hparams.expert_weights_scale);
+                ml.get_key(LLM_KV_EXPERT_GATING_FUNC,         hparams.expert_gating_func, false);
+
+                ml.get_key(LLM_KV_ATTENTION_SLIDING_WINDOW, hparams.n_swa);
+                ml.get_key_or_arr(LLM_KV_ATTENTION_SLIDING_WINDOW_PATTERN, hparams.swa_layers, hparams.n_layer, false);
+
+                // every layer carries packed shortconv state, so all layers are "recurrent" in the
+                // layer-library sense (the full-attention Q/K/V still run, but the state is uniform)
+                for (uint32_t il = 0; il < hparams.n_layer; ++il) {
+                    hparams.recurrent_layer_arr[il] = true;
+                }
+
+                ml.get_key(LLM_KV_INKLING_D_REL,              hparams.inkling_d_rel);
+                ml.get_key(LLM_KV_INKLING_REL_EXTENT,         hparams.inkling_rel_extent);
+                ml.get_key(LLM_KV_INKLING_REL_EXTENT_SWA,     hparams.inkling_rel_extent_swa);
+                ml.get_key(LLM_KV_INKLING_SHORTCONV_KERNEL,   hparams.n_shortconv_l_cache);
+                ml.get_key(LLM_KV_INKLING_DENSE_BLOCK_COUNT,  hparams.n_layer_dense_lead);
+
+                float logit_scale_denom = 0.0f;
+                ml.get_key(LLM_KV_INKLING_LOGIT_SCALE_DENOM, logit_scale_denom);
+                GGML_ASSERT(logit_scale_denom != 0.0f);
+                hparams.f_logit_scale = 1.0f / logit_scale_denom;
+
+                ml.get_key(LLM_KV_INKLING_LOG_SCALING_N_FLOOR, hparams.inkling_log_n_floor,      false);
+                ml.get_key(LLM_KV_INKLING_LOG_SCALING_ALPHA,   hparams.inkling_log_alpha,        false);
+                ml.get_key(LLM_KV_INKLING_UNPADDED_VOCAB_SIZE, hparams.inkling_unpadded_n_vocab, false);
+
+                GGML_ASSERT(hparams.n_shortconv_l_cache > 1);
+                GGML_ASSERT(hparams.inkling_d_rel > 0);
+                GGML_ASSERT(hparams.inkling_rel_extent > 0 && hparams.inkling_rel_extent_swa > 0);
+
+                // uniform state per cell: 4 packed streams [k | v | attn | mlp] of last K-1 columns,
+                // k/v sized for the widest layer
+                const uint32_t d_conv = hparams.n_shortconv_l_cache - 1;
+                hparams.n_embd_r_impl = d_conv * (hparams.n_embd_k_gqa_max() + hparams.n_embd_v_gqa_max() + 2*hparams.n_embd);
+
+                model.type = e_model::MODEL_UNKNOWN;
+            } break;
         case LLM_ARCH_QWEN35MOE:
             {
                 ml.get_key(LLM_KV_EXPERT_FEED_FORWARD_LENGTH,        hparams.n_ff_exp, false);
