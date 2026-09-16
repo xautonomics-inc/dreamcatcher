@@ -745,7 +745,30 @@ void llm_load_hparams(
                 ml.get_key(LLM_KV_EXPERT_GATING_FUNC,         hparams.expert_gating_func, false);
 
                 ml.get_key(LLM_KV_ATTENTION_SLIDING_WINDOW, hparams.n_swa);
-                ml.get_key_or_arr(LLM_KV_ATTENTION_SLIDING_WINDOW_PATTERN, hparams.swa_layers, hparams.n_layer, false);
+
+                // the sliding-window pattern is a SOURCE-length per-layer array. Read the whole
+                // thing and index it absolutely so a sliced layer library picks the right entry
+                // for each block. [meta#91]
+                {
+                    std::vector<uint32_t> swa_pattern;
+                    if (ml.get_arr(LLM_KV_ATTENTION_SLIDING_WINDOW_PATTERN, swa_pattern, false)) {
+                        GGML_ASSERT(swa_pattern.size() >= hparams.n_layer_source());
+                        for (uint32_t il = 0; il < hparams.n_layer; ++il) {
+                            hparams.swa_layers[il] = swa_pattern[hparams.il_abs(il)];
+                        }
+                    }
+                }
+
+                // head_count_kv is also a SOURCE-length per-layer array. Same absolute indexing.
+                {
+                    std::vector<uint32_t> n_head_kv_src;
+                    if (ml.get_arr(LLM_KV_ATTENTION_HEAD_COUNT_KV, n_head_kv_src, false)) {
+                        GGML_ASSERT(n_head_kv_src.size() >= hparams.n_layer_source());
+                        for (uint32_t il = 0; il < hparams.n_layer; ++il) {
+                            hparams.n_head_kv_arr[il] = n_head_kv_src[hparams.il_abs(il)];
+                        }
+                    }
+                }
 
                 // every layer carries packed shortconv state, so all layers are "recurrent" in the
                 // layer-library sense (the full-attention Q/K/V still run, but the state is uniform)

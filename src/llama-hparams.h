@@ -269,7 +269,6 @@ struct llama_hparams {
         if (this->inkling_rel_extent     != other.inkling_rel_extent)     return true;
         if (this->inkling_rel_extent_swa != other.inkling_rel_extent_swa) return true;
         if (this->inkling_log_n_floor    != other.inkling_log_n_floor)    return true;
-        if (!is_float_close(this->inkling_log_alpha, other.inkling_log_alpha, EPSILON)) return true;
         if (this->inkling_unpadded_n_vocab != other.inkling_unpadded_n_vocab) return true;
 
         if (this->rope_finetuned  != other.rope_finetuned)  return true;
@@ -290,6 +289,7 @@ struct llama_hparams {
 
         const float EPSILON = 1e-9f;
 
+        if (!is_float_close(this->inkling_log_alpha,    other.inkling_log_alpha,    EPSILON)) return true;
         if (!is_float_close(this->f_norm_eps,            other.f_norm_eps,            EPSILON)) return true;
         if (!is_float_close(this->f_norm_rms_eps,        other.f_norm_rms_eps,        EPSILON)) return true;
         if (!is_float_close(this->kda_gate_lower_bound,  other.kda_gate_lower_bound,  EPSILON)) return true;
