@@ -21,7 +21,9 @@ Feature: Serve the Inkling (TML) architecture end to end
                            parity tolerance; parity asserts the four per-chunk
                            values below
     oracle host/build: nvidia, build 0db1d97c3ac1f9882b7b8b1719373bb76a52d353,
-    CPU-only (CUDA_VISIBLE_DEVICES=""), -t 20, Inkling-Small UD-Q4_K_M
+    CUDA-built but run CPU-only (CUDA_VISIBLE_DEVICES=""); a D2 parity run must
+    reproduce this build and its CPU feature set (AVX2, FMA, LLAMAFILE, REPACK),
+    not just the command line, -t 20, Inkling-Small UD-Q4_K_M
   sha256 greedy-64x8.json     1b5e5c4bff5b98cbe91345e5df290a804667e25ff728fbbba78b3d08cef923f0
   sha256 kld-base-4x2048.bin  aeab11429a2567db2b36f210754a444ce97f6a9fa851bf0389b236129838b505
   sha256 ppl.log              98f7349cb50c92500b5cd79171e0fcf34453a79abec7c7fccfd881f1f4ab4edc
