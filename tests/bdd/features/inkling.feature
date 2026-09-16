@@ -54,8 +54,10 @@ Feature: Serve the Inkling (TML) architecture end to end
     Then every tensor is created with the Inkling names and shapes
     And the KV keys include dense_block_count, d_rel, rel_extent, rel_extent_swa,
       shortconv_kernel, logit_scale_denom, log_scaling_n_floor, log_scaling_alpha,
-      unpadded_vocab_size, block_count, attention.sliding_window,
-      attention.sliding_window_pattern, and the expert FFN length
+      vocab_size, unpadded_vocab_size, block_count, attention.sliding_window,
+      attention.sliding_window_pattern, attention.head_count_kv,
+      feed_forward_length, expert_feed_forward_length, expert_count,
+      expert_used_count, and expert_shared_count
     And no forward pass has run
 
   @d2 @parity @pending
