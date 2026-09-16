@@ -5,13 +5,17 @@ Feature: Serve the Inkling (TML) architecture end to end
   stage rings, and remote experts
   So that every execution mode produces results identical to the reference port
 
-  Expected values bind to the D0 oracle artifacts (the D0 oracle lane): greedy
-  token IDs, FNV/raw logits dumps, and 4-chunk perplexity recorded from the
-  internal llama.cpp-lineage port on Inkling-Small, checked in with the exact
-  commands and hashes. Until those artifacts land, every scenario below is
-  pending and MUST fail closed: an unbound `<oracle_dir>` stops the scenario
-  before it touches a model or service (the same rule as the other feature
-  files in this directory).
+  Expected values bind to the D0 oracle artifacts (the D0 oracle lane), recorded
+  from the internal llama.cpp-lineage port on Inkling-Small and checked in with
+  the exact commands and hashes:
+    oracle dir:  /fast/build/agents/noah/p1/d0-oracle-20260915T2024/
+    greedy-64x8.json     — greedy token IDs and raw logits, D0 fixed prompt set
+    kld-base-4x2048.bin  — base logits dump over the D0 4-chunk perplexity split
+    ppl 72.6183          — oracle 4-chunk perplexity
+  Until those artifacts land (the directory is not on every host), every
+  scenario below is pending and MUST fail closed: an unbound or missing
+  `<oracle_dir>` stops the scenario before it touches a model or service
+  (the same rule as the other feature files in this directory).
 
   Lane gates (from the 2026-09-15 Inkling plan):
   D1 arch plumbing, D2 `build_inkling.cpp` CPU parity, D3 cache + kernels,
@@ -34,14 +38,16 @@ Feature: Serve the Inkling (TML) architecture end to end
 
   @d2 @parity @pending
   Scenario: CPU greedy generation matches the D0 oracle token-for-token
+    Given the D0 oracle dump "greedy-64x8.json" exists in "<oracle_dir>"
     When the model runs greedy generation on CPU for the D0 fixed prompt set
     Then every generated token ID equals the oracle token IDs
     And the raw logits are within tolerance of the oracle logits dumps
 
   @d2 @parity @pending
   Scenario: 4-chunk perplexity equals the oracle within error
+    Given the D0 oracle dump "kld-base-4x2048.bin" exists in "<oracle_dir>"
     When the model computes perplexity on CPU over the D0 4-chunk split
-    Then the perplexity equals the oracle value within the recorded error
+    Then the perplexity equals the oracle value 72.6183 within the recorded error
 
   @d3 @cache @pending
   Scenario: The hybrid attention+recurrent cache serves banded SWA windows
