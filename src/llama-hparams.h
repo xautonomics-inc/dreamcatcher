@@ -368,6 +368,11 @@ struct llama_hparams {
         return n_head/n_head_kv;
     }
 
+    // inkling: per-layer SWA / recurrent accessors reconciled with swa_layers and recurrent_layer_arr.
+    // swa_layers[il] is window-local (the loader rebases it centrally), so no il_abs here.
+    bool is_swa(uint32_t il) const { return swa_layers[il] != 0; }
+    bool is_recr(uint32_t il) const { return recurrent_layer_arr[il]; }
+
     uint32_t n_embd_head_k(int il) const { return swa_layers[il] ? n_embd_head_k_swa : n_embd_head_k_full; }
 
     uint32_t n_embd_head_v(int il) const { return swa_layers[il] ? n_embd_head_v_swa : n_embd_head_v_full; }

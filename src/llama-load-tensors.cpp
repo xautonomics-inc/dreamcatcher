@@ -1772,7 +1772,7 @@ bool create_tensors_helper::create_inkling_tensors(const LLM_TN & tn) {
 
         const int64_t n_head_kv_i = hparams.n_head_kv(i);
         const int64_t kvw         = n_head_kv_i * head_dim;
-        const int64_t rel_extent  = hparams.swa_layers[i] ? hparams.inkling_rel_extent_swa : hparams.inkling_rel_extent;
+        const int64_t rel_extent  = hparams.is_swa(i) ? hparams.inkling_rel_extent_swa : hparams.inkling_rel_extent;
 
         layer.attn_norm = create_tensor(ctx_split, tn(LLM_TENSOR_ATTN_NORM, "weight", i), {n_embd}, 0);
 
