@@ -1,115 +1,79 @@
-# D1 - Inkling architecture plumbing (design note)
+# D1 - Inkling architecture plumbing (design note, rev 2)
 
 Owner: noah. Branch: `agent/noah/inkling-d1-arch-plumbing`. P0.
 
-Goal of D1: add the Inkling architecture plumbing to dreamcatcher so a later lane
-(D2) can write `build_inkling.cpp` and validate against the D0 oracle. D1 itself
-must land the arch enum, tensor names, hparams, loader/quant hooks, and the two
-ggml operators and memory/attention infrastructure Inkling depends on. It does
-NOT build the Inkling graph yet - that is D2.
+Rev 2 corrects the premise after Ben's review (`b0f42e90`): dreamcatcher is NOT
+missing SWA or recurrent state. It has ik-native versions of both, so D1 must
+NOT port upstream's memory hierarchy. This revision narrows D1 to the arch
+plumbing only.
 
-The oracle for everything below is the internal llama.cpp-lineage port on
-`agent/noah/inkling-p1` (matches upstream PR #25731 on Inkling-Small, 48/48
-tokens identical). The reference commit is `ce16fff2a` ("Add TML Inkling
-architecture"), plus the later iswa/banded/experts-remote work.
+## Corrected premise
 
-## What Inkling needs that dreamcatcher does not have yet
+Dreamcatcher already has, natively:
 
-Dreamcatcher is a heavily refactored fork. Compared to the oracle, it is missing
-the whole iswa/hybrid-memory/recurrent-state subsystem and the banded flash
-attention op. Concretely:
+- **SWA** — `llama_kv_cache` has `size_swa`/`sink_rows`/`window_swa`/`head_swa`/
+  `pos_base_swa` (`src/llama-context.h:106-112`) plus `llama_swa_calc_window_view`
+  (`:16-40`). The interleaved pattern is expressed per-layer via
+  `hparams.swa_layers[il]` and `hparams.n_swa_pattern`
+  (`src/llama-hparams.h:40-41,214`), and Gemma3 uses it through
+  `build_inp_KQ_mask_swa` + `llm_build_kv(..., n_swa)` (`build_gemma3.cpp:25,72-74`).
+- **Recurrent state** — `llama_kv_cache::recurrent` and `s_l` (per-layer
+  recurrent/conv state storage) (`src/llama-context.h:79-85,126`), already used
+  by qwen3next ("qnext") and openPangu.
+- **Stage emit** — a head stage emitting the post-window residual instead of
+  logits is already implemented for hybrid models
+  (`build_qwen3next.cpp:18-24,90-93`, via `llm_stage.h`).
 
-- No `src/llama-kv-cache-iswa.*` / `src/llama-memory-hybrid-iswa.*` /
-  `src/llama-memory-recurrent.*`. Dreamcatcher keeps its state in the
-  `llama_kv_cache` struct in `src/llama-context.h` (fields `k_l`, `v_l`, `s_l`)
-  and its graph builders under `src/graphs/`, and there is no
-  `llama_memory_i` / `llama_memory_context_ptr` interface.
-- No `GGML_OP_FLASH_ATTN_EXT_BANDED` op. `ggml/include/ggml.h` only has
-  `GGML_OP_FLASH_ATTN_EXT` and `GGML_OP_FLASH_ATTN_BACK`.
-- No Inkling tensor names in `enum llm_tensor` (`src/llama-arch.h`), no
-  `LLM_ARCH_INKLING` in the arch enum, no Inkling hparams fields.
-- No `build_attn_inp_kv_iswa()` / `llm_graph_input_attn_kv_iswa` helper. The
-  gemma3/4 builders here use `build_std_attention` directly rather than the
-  oracle's iswa attention input path.
+Inkling's 5:1 SWA pattern (55 SWA + 11 global, window 512) maps onto
+`swa_layers[il] = (il_abs(il) % 6 != 5)` with `n_swa = 512`; its short-conv state
+maps onto `recurrent` + `s_l` the way qwen3next does it.
 
-## Files I will touch (with what each does)
+## Decisions (from Ben)
 
-### ggml layer - banded flash attention op
+1. **No upstream memory classes.** Do NOT port `llama-kv-cache-iswa`,
+   `llama-memory-hybrid-iswa`, `llama-memory-recurrent`, or
+   `build_attn_inp_kv_iswa`. Inkling goes through ik's single `llama_kv_cache`:
+   the SWA fields for its 5:1 pattern, and `recurrent`/`s_l` for short-conv
+   state. If a gap shows up (e.g. both SWA and recurrent at once, or the
+   rel-extent window), extend that struct and cite the gap with file:line.
+2. **No banded-FA op in D1 or D2.** Correctness in D2 uses the existing SWA mask
+   path on CPU. `GGML_OP_FLASH_ATTN_EXT_BANDED` and its CUDA kernel are
+   performance work → D3 (gwen).
+3. **D1 scope** is exactly the arch plumbing below. Gate: Inkling-Small metadata
+   and every tensor created, on CPU, no compute.
 
-- `ggml/include/ggml.h` - add `GGML_OP_FLASH_ATTN_EXT_BANDED` to the op enum
-  and declare `ggml_flash_attn_ext_banded(...)`.
-- `ggml/src/ggml.c` - add the op case, tensor name ("flash_attn_ext_banded"),
-  the `ggml_flash_attn_ext_banded` constructor, and the
-  `GGML_OP_FLASH_ATTN_EXT_BANDED` handling in the compute/dup/check paths.
-- `ggml/src/ggml-cpu/ops.cpp` - CPU fallback for the banded op (or route to the
-  existing FLASH_ATTN_EXT CPU path with the banded mask).
-- `ggml/src/ggml-cuda/fattn-banded.cu` / `.cuh` - the banded MMA flash attention
-  kernel (ported from the oracle; fp16 accumulator overflow guard).
-- `ggml/src/ggml-cuda/fattn-common.cuh`, `fattn-mma-f16.cuh`, `fattn.cu`,
-  `ggml-cuda.cu` - wire the banded kernel into the CUDA dispatch.
-- `ggml/src/ggml-cuda/mmf.cuh`, `mmq.cuh`, `mmvf.cu`, `mmvq.cu`, `pad.cu`,
-  `ssm-conv.cu`, `argsort.cu` - the small CUDA fixes the oracle carries alongside
-  the banded op (these are needed for the op to build/run; ported verbatim).
-- `ggml/src/ggml-backend-meta.cpp`, `ggml/src/ggml-rpc/ggml-rpc.cpp`,
-  `ggml/include/ggml-rpc.h` - op registration for meta/rpc backends.
+## D1 scope (exact)
 
-### arch / hparams / model plumbing
-
-- `src/llama-arch.h` - add `LLM_ARCH_INKLING` to the arch enum, add the Inkling
+- `src/llama-arch.h` — add `LLM_ARCH_INKLING` to the arch enum; add Inkling
   tensor names to `enum llm_tensor` (shortconv_k/v/attn/mlp, attn_rel_proj,
-  attn_rel_b, attn_rel_b_swa), add `LLM_KV_INKLING_*` metadata keys.
-- `src/llama-arch.cpp` - add the `"inkling"` arch name and the Inkling KV key
+  attn_rel_b, attn_rel_b_swa); add `LLM_KV_INKLING_*` metadata keys.
+- `src/llama-arch.cpp` — add the `"inkling"` arch name and the Inkling KV key
   string table.
-- `src/llama-hparams.h` - add `n_shortconv_l_cache`, `inkling_d_rel`,
-  `inkling_rel_extent`, `inkling_rel_extent_swa`, `inkling_log_n_floor`,
-  `inkling_log_alpha`, `inkling_unpadded_n_vocab`; add the `is_swa_impl` /
-  `is_recr_impl` arrays and `is_swa()` / `is_recr()` accessors (dreamcatcher
-  currently has `recurrent_layer_arr` + `swa_layers`; reconcile with these).
-- `src/llama-hparams.cpp` - parse the Inkling keys, set `is_recr_impl` /
-  `is_swa_impl` uniformly (Inkling is all-recurrent), compute `n_embd_r_impl`.
-- `src/llama-model.h` - add `llama_layer` fields: `shortconv_k/v/attn/mlp`,
-  `attn_rel_proj`, `attn_rel_b`, `attn_rel_b_swa`; add the `llama_model_inkling`
-  class declaration.
-- `src/llama-model.cpp` - Inkling tensor loader (`load_arch_tensors`), tensor
-  name mapping, and the arch dispatch in the model constructor.
-- `src/llama-load-tensors.cpp` - any tensor-name/loader table entries Inkling
-  needs.
-- `src/llama-quant.cpp` - the Inkling quant hooks the oracle carries.
-- `src/llama-vocab.cpp` / `.h` - Inkling vocab handling (unpadded vocab masking)
+- `src/llama-hparams.h` — add Inkling hparams: `n_shortconv_l_cache` (short-conv
+  kernel), `inkling_d_rel`, `inkling_rel_extent`, `inkling_rel_extent_swa`,
+  `inkling_log_n_floor`, `inkling_log_alpha`, `inkling_unpadded_n_vocab`, and the
+  SWA pattern/window fields (reuse `n_swa`/`n_swa_pattern`/`swa_layers` where
+  possible). Add `is_swa()` / `is_recr()` accessors reconciled with the existing
+  `swa_layers` / `recurrent_layer_arr`.
+- `src/llama-hparams.cpp` — parse the Inkling keys; set `swa_layers[il]` for the
+  5:1 pattern and `n_swa = 512`; set `recurrent_layer_arr` (Inkling is
+  all-recurrent for short-conv); compute `n_embd_r_impl` if needed.
+- `src/llama-model.h` — add `llama_layer` fields for shortconv_k/v/attn/mlp,
+  attn_rel_proj, attn_rel_b, attn_rel_b_swa; declare `llama_model_inkling`.
+- `src/llama-model.cpp` — Inkling tensor loader (`load_arch_tensors`), tensor
+  name mapping, arch dispatch in the model constructor.
+- `src/llama-load-tensors.cpp` — Inkling tensor-name/loader table entries.
+- `src/llama-vocab.cpp` / `.h` — Inkling vocab handling (unpadded vocab masking)
   if not already covered by existing paths.
-- `src/llama-model-saver.cpp` - Inkling model-saver entries.
-
-### attention / memory infrastructure
-
-- `src/llama-kv-cache-iswa.h` / `.cpp` - the two-instance (SWA / non-SWA) KV
-  cache for interleaved SWA attention. Ported from the oracle; must adapt to
-  dreamcatcher's `llama_kv_cache` (which lives in `src/llama-context.h`).
-- `src/llama-memory-hybrid-iswa.h` / `.cpp` - the hybrid (SWA + base) memory
-  context and its attention input helper.
-- `src/llama-memory-recurrent.h` / `.cpp` - per-layer recurrent shortconv state
-  storage (the `s_l` path Inkling uses for its packed shortconv streams).
-- `src/llama-build-context.h` / `.cpp` - add the iswa attention input builder
-  (`build_attn_inp_kv_iswa` / `llm_graph_input_attn_kv_iswa`) and the banded
-  attention call site; add `build_inkling()` declaration. Dreamcatcher's
-  `build_std_attention` is the base to extend, mirroring the oracle's gemma3/4
-  iswa builders.
-- `src/graphs/` - the gemma3/4 iswa builders referenced in the plan are the
-  oracle's `gemma3.cpp` / `gemma4.cpp`; in dreamcatcher the equivalent is
-  `src/graphs/build_gemma3.cpp` / `build_gemma4.cpp`, which I will extend to
-  route through the iswa attention path (the plan's "reuse gemma3/4 iswa
-  builders" means reusing the iswa attention pattern they establish, not
-  copying the oracle's graph files).
-
-### tests
-
-- `tests/test-llama-archs.cpp` - add Inkling to the arch round-trip test.
-- `tests/test-backend-ops.cpp` - add a banded flash-attn op case (the oracle has
-  `test-flash-attn-bias.cpp` / `test-flash-attn-generic-hash.cpp`; D6's
-  synthetic-GGUF fixture will exercise the full graph).
+- `src/llama-model-saver.cpp` — Inkling model-saver entries.
+- `tests/test-llama-archs.cpp` — add Inkling to the arch round-trip test.
 
 ## What D1 deliberately does NOT do
 
 - No `build_inkling()` graph implementation (D2).
+- No banded flash-attn op (D3, gwen).
+- No upstream memory classes (`llama-kv-cache-iswa`, `llama-memory-hybrid-iswa`,
+  `llama-memory-recurrent`, `build_attn_inp_kv_iswa`).
 - No stage rings / stage-runner wiring (D4b), no remote experts (D4c).
 - No mmproj / multimodal Inkling support (D3/D4a scope; the oracle's
   `tools/mtmd/models/inkling.cpp` and `conversion/inkling.py` are out of D1).
@@ -117,20 +81,14 @@ attention op. Concretely:
 
 ## Gate for D1
 
-D1 is "arch plumbing" - it is complete when the Inkling arch loads a real
-Inkling GGUF's metadata and tensor names without error and the banded op is
-present in the build. Runtime parity is D2's gate. I will verify D1 with a
-load-only smoke against the D0 oracle's Inkling-Small GGUF once it is available,
-and by building the banded op test.
+D1 is complete when Inkling-Small's metadata loads and **every tensor is
+created** on CPU, with no compute. I will verify with a load-only smoke against
+the D0 oracle's Inkling-Small GGUF once it is available, plus the arch
+round-trip test. Runtime parity is D2's gate.
 
 ## Open questions / notes for review
 
-- Dreamcatcher's `llama_kv_cache` is a single struct in `src/llama-context.h`
-  rather than a `llama_memory_i` hierarchy. Porting the iswa cache will mean
-  either (a) adapting `llama_kv_cache_iswa` to wrap dreamcatcher's struct, or
-  (b) introducing the `llama_memory_i` interface. I lean (a) to minimize churn,
-  but flag for review.
-- The oracle carries a large set of CUDA kernel changes alongside the banded op
-  (mmf/mmq/mmvf/mmvq/pad/ssm-conv/argsort). Some may be incidental to the
-  banded op. I will port only what the banded op + Inkling graph actually need,
-  and note any that are dropped.
+- Whether the rel-extent window needs a new `llama_kv_cache` field or can be
+  derived from the existing SWA window. Flag with file:line if a gap appears.
+- Whether short-conv state needs a distinct `s_l` layout from qwen3next's, or can
+  reuse it as-is. Flag with file:line if a gap appears.
