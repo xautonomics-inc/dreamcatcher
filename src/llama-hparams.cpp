@@ -745,41 +745,10 @@ void llm_load_hparams(
                 ml.get_key(LLM_KV_EXPERT_GATING_FUNC,         hparams.expert_gating_func, false);
 
                 ml.get_key(LLM_KV_ATTENTION_SLIDING_WINDOW, hparams.n_swa);
-
-                // the sliding-window pattern is a SOURCE-length per-layer array. Read the whole
-                // thing and index it absolutely so a sliced layer library picks the right entry
-                // for each block. [meta#91]
-                {
-                    std::vector<uint32_t> swa_pattern;
-                    if (ml.get_arr(LLM_KV_ATTENTION_SLIDING_WINDOW_PATTERN, swa_pattern, false)) {
-                        GGML_ASSERT(swa_pattern.size() >= hparams.n_layer_source());
-                        for (uint32_t il = 0; il < hparams.n_layer; ++il) {
-                            hparams.swa_layers[il] = swa_pattern[hparams.il_abs(il)];
-                        }
-                    }
-                }
-
-                // head_count and head_count_kv are also SOURCE-length per-layer arrays.
-                // Same absolute indexing. (get_arr returns false for a scalar key, so
-                // these are no-ops on a monolith or when the checkpoint stores scalars.)
-                {
-                    std::vector<uint32_t> n_head_src;
-                    if (ml.get_arr(LLM_KV_ATTENTION_HEAD_COUNT, n_head_src, false)) {
-                        GGML_ASSERT(n_head_src.size() >= hparams.n_layer_source());
-                        for (uint32_t il = 0; il < hparams.n_layer; ++il) {
-                            hparams.n_head_arr[il] = n_head_src[hparams.il_abs(il)];
-                        }
-                    }
-                }
-                {
-                    std::vector<uint32_t> n_head_kv_src;
-                    if (ml.get_arr(LLM_KV_ATTENTION_HEAD_COUNT_KV, n_head_kv_src, false)) {
-                        GGML_ASSERT(n_head_kv_src.size() >= hparams.n_layer_source());
-                        for (uint32_t il = 0; il < hparams.n_layer; ++il) {
-                            hparams.n_head_kv_arr[il] = n_head_kv_src[hparams.il_abs(il)];
-                        }
-                    }
-                }
+                // the loader rebases block-length arrays centrally (llama_model_loader_slice_block_arrays),
+                // so the array is already window-local by the time we read it; il_abs() is only for
+                // arch-derived per-layer quantities, not array-valued ones.
+                ml.get_key_or_arr(LLM_KV_ATTENTION_SLIDING_WINDOW_PATTERN, hparams.swa_layers, hparams.n_layer, false);
 
                 // every layer carries packed shortconv state, so all layers are "recurrent" in the
                 // layer-library sense (the full-attention Q/K/V still run, but the state is uniform)
