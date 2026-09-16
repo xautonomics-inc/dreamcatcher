@@ -228,7 +228,7 @@ def slice_model(
     src_blocks = int(src_blocks)
 
     src_nextn = int(srcget("nextn_predict_layers", 0) or 0)
-    src_leading = int(srcget("leading_dense_block_count", 0) or 0)
+    src_leading = int(srcget("leading_dense_block_count", srcget("dense_block_count", 0)) or 0)
     nextn_lo = src_blocks - src_nextn
 
     name_field = meta.get_field("general.name")
@@ -295,9 +295,15 @@ def slice_model(
 
         tmp_path = out_path / f".{fname}.tmp.{os.getpid()}"
         try:
+            # Use the arch's own spelling for the dense-block-count key.
+            # deepseek/laguna lineage uses leading_dense_block_count;
+            # Inkling uses dense_block_count. Detect from source metadata.
+            dense_key = f"{arch}.dense_block_count"
+            if meta.get_field(dense_key) is None:
+                dense_key = f"{arch}.leading_dense_block_count"
             overrides = {
                 f"{arch}.block_count": (n_blk, GGUFValueType.UINT32),
-                f"{arch}.leading_dense_block_count": (n_dense, GGUFValueType.UINT32),
+                dense_key: (n_dense, GGUFValueType.UINT32),
                 f"{arch}.nextn_predict_layers": (n_nextn, GGUFValueType.UINT32),
             }
             w = GGUFWriter(tmp_path, arch, endianess=meta.endianess)
