@@ -3115,6 +3115,10 @@ ggml_cgraph * llm_build_context::llama_build_graph(
             {
                 result = llm.build_step35();
             } break;
+        case LLM_ARCH_INKLING:
+            {
+                result = llm.build_inkling();
+            } break;
         case LLM_ARCH_LAGUNA:
             {
                 result = llm.build_laguna();

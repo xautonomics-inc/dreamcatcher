@@ -1591,6 +1591,27 @@ static bool llama_kv_cache_init(
                 }
             }
 
+            if (model.arch == LLM_ARCH_INKLING) {
+                // Inkling keeps four short-conv streams per layer packed into one state cell:
+                // [k | v | attn | mlp], each holding the last (shortconv_kernel - 1) columns.
+                // hparams.n_embd_r_impl is that packed width, computed in llama-hparams.cpp
+                // when the arch loads; n_embd_r() returns it in preference to the ssm_* sizing.
+                //
+                // This is deliberately NOT the qnext_recurrent branch above: that path sizes
+                // from n_embd_v_s()/n_embd_ple_conv(), both derived from ssm_* which Inkling
+                // never sets (width 0 -> ggml_nbytes 0 -> ggml-alloc returns NULL, surfacing
+                // as a bogus "failed to allocate" at llama.cpp:1656), and it pushes nullptr
+                // into k_l/v_l, which would break attention. Inkling needs BOTH a real
+                // attention cache and conv state, so the state rides alongside k/v here,
+                // the same shape of hybrid the openPangu branch above uses.
+                const int64_t conv_ne = (int64_t) hparams.n_embd_r();
+                GGML_ASSERT(conv_ne > 0);
+                ggml_tensor * s_conv = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, conv_ne, qnext_state_slots);
+                ggml_format_name(s_conv, "cache_s_l%d", i);
+                cache.s_l[i] = s_conv;
+                cache.s_l_position_strict = true;
+            }
+
             if (split_cache_i) {
                 bool use_V_for_K = model.layers[i].attn_k_norm && model.layers[i].attn_k_norm->ne[0] == K->ne[1] ? true : false;
                 auto extra_K = (const ggml_split_tensor_t *)K->extra;
@@ -6265,6 +6286,97 @@ static void llama_set_inputs(llama_context & lctx, const llama_batch & batch) {
         for (int64_t j = 0; j < n_tokens; ++j) {
             // qwen3next and openPangu use a single local recurrent state slot.
             data[j] = 0;
+        }
+    }
+
+    // ---- inkling (private arch) inputs ----
+
+    // log-N attention scale: tau = 1 + alpha*log(max((pos+1)/n_floor, 1)); applied to q and to
+    // the relative-position logits on GLOBAL (non-SWA) layers only.
+    if (lctx.inp_inkling_tau) {
+        const auto & hp = lctx.model.hparams;
+
+        GGML_ASSERT(ggml_backend_buffer_is_host(lctx.inp_inkling_tau->buffer));
+        float * data = (float *) lctx.inp_inkling_tau->data;
+
+        const float n_floor = (float) hp.inkling_log_n_floor;
+        const float alpha   = hp.inkling_log_alpha;
+
+        for (int64_t i = 0; i < (int64_t) batch.n_tokens; ++i) {
+            const float eff = (float) (batch.pos[i] + 1) / n_floor;
+            data[i] = 1.0f + alpha*logf(std::max(eff, 1.0f));
+        }
+    }
+
+    // Flattened relative-position gather indices, [n_kv, n_tokens] in global token order.
+    // The graph reshapes the bias to {n_head, (extent+1)*n_tokens} and gathers with a 1-D
+    // index, so the row must encode BOTH the token and the bucket: i*(extent+1) + rel.
+    // rel == extent selects the zero-bias pad column, used for empty cells and for any
+    // distance outside the layer's extent.
+    {
+        const auto & hp = lctx.model.hparams;
+
+        auto fill_rel_idx = [&](ggml_tensor * dst, uint32_t extent) {
+            if (!dst) return;
+
+            GGML_ASSERT(ggml_backend_buffer_is_host(dst->buffer));
+            int32_t * data = (int32_t *) dst->data;
+
+            const int64_t n_kv_dst = dst->ne[0];
+            GGML_ASSERT(dst->ne[1] >= (int64_t) batch.n_tokens);
+
+            for (int64_t i = 0; i < (int64_t) batch.n_tokens; ++i) {
+                const llama_seq_id seq_id = batch.seq_id[i][0];
+                const llama_pos    p1     = batch.pos[i];
+
+                for (int64_t j = 0; j < n_kv_dst; ++j) {
+                    const auto & cell = lctx.kv_self.cells[j];
+
+                    int32_t rel = (int32_t) extent;
+                    // an empty cell's position is irrelevant: the KQ mask removes it anyway
+                    if (cell.pos >= 0 && cell.has_seq_id(seq_id)) {
+                        const llama_pos d = p1 - cell.pos;
+                        if (d >= 0 && d < (llama_pos) extent) {
+                            rel = (int32_t) d;
+                        }
+                    }
+
+                    data[i*n_kv_dst + j] = (int32_t) (i*(extent + 1)) + rel;
+                }
+            }
+        };
+
+        fill_rel_idx(lctx.inp_inkling_rel_idx,     hp.inkling_rel_extent);
+        fill_rel_idx(lctx.inp_inkling_rel_idx_swa, hp.inkling_rel_extent_swa);
+    }
+
+    // padded vocab rows get -inf so samplers never emit a padded id
+    if (lctx.inp_inkling_vocab_mask) {
+        const auto & hp = lctx.model.hparams;
+
+        GGML_ASSERT(ggml_backend_buffer_is_host(lctx.inp_inkling_vocab_mask->buffer));
+        float * data = (float *) lctx.inp_inkling_vocab_mask->data;
+
+        const int64_t n_vocab_dst = lctx.inp_inkling_vocab_mask->ne[0];
+        const int64_t n_unpadded  = hp.inkling_unpadded_n_vocab;
+
+        for (int64_t id = 0; id < n_vocab_dst; ++id) {
+            data[id] = id < n_unpadded ? 0.0f : -INFINITY;
+        }
+    }
+
+    // constant 0..n_shexp-1 per token: shared experts ride mul_mat_id because 2D views into
+    // a repacked/quantised 3D expert bank are invalid
+    if (lctx.inp_inkling_shexp_idx) {
+        GGML_ASSERT(ggml_backend_buffer_is_host(lctx.inp_inkling_shexp_idx->buffer));
+        int32_t * data = (int32_t *) lctx.inp_inkling_shexp_idx->data;
+
+        const int64_t n_shexp_dst = lctx.inp_inkling_shexp_idx->ne[0];
+
+        for (int64_t j = 0; j < (int64_t) batch.n_tokens; ++j) {
+            for (int64_t sx = 0; sx < n_shexp_dst; ++sx) {
+                data[j*n_shexp_dst + sx] = (int32_t) sx;
+            }
         }
     }
 
