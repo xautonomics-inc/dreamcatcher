@@ -90,6 +90,14 @@ static ggml_tensor * inkling_sconv(
 }
 
 ggml_cgraph * llm_build_context::build_inkling() {
+    // D2 is the CPU correctness path. Inkling's content-relative bias is a per-head
+    // additive term on kq, and ggml_flash_attn_ext never materialises kq -- the reference
+    // handles that with GGML_OP_FLASH_ATTN_EXT_BANDED, which is D3 work and not in this
+    // tree yet. Until it lands, the arch must run with flash attention OFF.
+    GGML_ASSERT(!cparams.flash_attn &&
+            "INKLING requires -fa 0 until the banded flash-attn op (D3) lands: the "
+            "content-relative bias is per-head and cannot be applied on the FA path");
+
     ggml_cgraph * gf = new_graph_custom();
 
     const int64_t d_rel    = hparams.inkling_d_rel;
@@ -257,26 +265,28 @@ ggml_cgraph * llm_build_context::build_inkling() {
         kq_b = ggml_cont(ctx0, ggml_permute(ctx0, kq_b, 2, 0, 1, 3));       // {n_kv, n_tokens, n_head}
         cb(kq_b, "inkling_kq_b", il);
 
-        // ---- relative bias folded into the additive mask ----
-        // This tree's llm_build_kv() has no kq_b parameter. soft_max_ext computes
-        // softmax(kq*scale + mask) and does NOT scale the mask, so an additive
-        // per-(kv,token,head) bias can ride the mask tensor unchanged.
+        // ---- attention with the relative bias as a true per-head kq_b ----
+        // The bias CANNOT ride kq_mask: ggml asserts mask->ne[2] == 1 (head broadcast)
+        // while this bias is per-head {n_kv, n_tokens, n_head}. It is threaded to
+        // llm_build_kqv as an optional kq_b and added to kq before the softmax.
         //
         // The reference divides q by head_dim (NOT sqrt(head_dim)) and passes kq_scale 1.0
-        // so that the bias stays unscaled -- keep that exactly, it is a parity-visible choice.
+        // so the bias stays unscaled -- keep that exactly, it is parity-visible.
         q = ggml_scale(ctx0, q, 1.0f/float(head_dim));
 
         ggml_tensor * kq_mask_cur = is_swa && KQ_mask_swa ? KQ_mask_swa : KQ_mask;
-        ggml_tensor * kq_mask_eff = ggml_add(ctx0, kq_b, kq_mask_cur);
-        cb(kq_mask_eff, "inkling_kq_mask_eff", il);
+        const int n_swa_l = is_swa ? (int) hparams.n_swa : 0;
 
         ggml_tensor * attn_out = llm_build_kv(ctx0, lctx, kv_self, gf,
                 layer.wo, NULL,
                 k, v, q,
-                kq_mask_eff,
+                kq_mask_cur,
                 n_tokens, kv_head, n_kv_cur,
                 1.0f,
-                cb, il);
+                cb, il,
+                nullptr, n_swa_l, -1,
+                nullptr, nullptr, -1,
+                kq_b);
         cb(attn_out, "inkling_attn_o", il);
 
         attn_out = inkling_sconv(ctx0, gf, attn_out, layer.shortconv_attn, state_all,
@@ -331,36 +341,45 @@ ggml_cgraph * llm_build_context::build_inkling() {
             ggml_tensor * all_logits = ggml_concat(ctx0, topk_logits, shared_logits, 0);
 
             // logsigmoid(x) = -softplus(-x)
+            // logsigmoid(x) = -softplus(-x); the softmax spans routed top-k AND shared
+            // logits together, so shared gammas fall out of the same distribution
             ggml_tensor * w = ggml_neg(ctx0, ggml_softplus(ctx0, ggml_neg(ctx0, all_logits)));
             w = ggml_soft_max(ctx0, w);
             w = ggml_scale(ctx0, w, hparams.expert_weights_scale);
+            // gate global scale applies to the MoE weights too, not just the dense FFN
+            w = ggml_mul(ctx0, w, layer.ffn_gscale);
             cb(w, "inkling_moe_weights", il);
 
             const size_t wsz = ggml_element_size(w);
 
-            ggml_tensor * routed_w = ggml_cont(ctx0,
+            ggml_tensor * weights = ggml_cont(ctx0,
                     ggml_view_2d(ctx0, w, n_expert_used, n_tokens, w->nb[1], 0));
+            weights = ggml_reshape_3d(ctx0, weights, 1, n_expert_used, n_tokens);
 
-            // routing is precomputed above, so gate_inp is null and the weights ride
-            // input_logits while the top-k ids ride selected_experts (long overload only)
-            ggml_tensor * moe_out = llm_build_moe_ffn(ctx0, lctx, ffn_in,
-                    nullptr,              nullptr,
-                    layer.ffn_up_exps,    nullptr,
-                    layer.ffn_gate_exps,  nullptr,
-                    layer.ffn_down_exps,  nullptr,
-                    nullptr,
-                    n_expert, n_expert_used,
-                    LLM_FFN_SILU, false, false, 0.0f,
-                    (llm_expert_gating_func_type) hparams.expert_gating_func,
-                    cb, il, gf, false,
-                    nullptr, nullptr,
-                    routed_w, nullptr,
-                    selected);
+            ggml_tensor * xr = ggml_reshape_3d(ctx0, ffn_in, n_embd, 1, n_tokens);
 
-            // shared experts, weighted by the trailing n_shexp gammas
+            // Routed experts are applied directly rather than via llm_build_moe_ffn: that
+            // helper derives its own weights from [n_expert, n_tokens] probs and cannot
+            // express inkling's softmax(logsigmoid(.)) taken jointly over routed+shared.
+            ggml_tensor * moe_out = nullptr;
+            {
+                ggml_tensor * gate = llm_build_lora_mm_id(lctx, ctx0, layer.ffn_gate_exps, xr, selected);
+                ggml_tensor * up   = llm_build_lora_mm_id(lctx, ctx0, layer.ffn_up_exps,   xr, selected);
+                ggml_tensor * h    = ggml_mul(ctx0, ggml_silu(ctx0, gate), up);
+
+                ggml_tensor * experts = llm_build_lora_mm_id(lctx, ctx0, layer.ffn_down_exps, h, selected);
+                experts = ggml_mul(ctx0, experts, weights);
+
+                for (int64_t i = 0; i < n_expert_used; ++i) {
+                    ggml_tensor * e = ggml_view_2d(ctx0, experts, n_embd, n_tokens,
+                            experts->nb[2], i*experts->nb[1]);
+                    moe_out = moe_out ? ggml_add(ctx0, moe_out, e) : e;
+                }
+            }
+
+            // shared experts, weighted by the trailing n_shexp gammas of the same softmax
             if (n_shexp > 0) {
                 GGML_ASSERT(shexp_idx != nullptr);
-                ggml_tensor * xr = ggml_reshape_3d(ctx0, ffn_in, n_embd, 1, n_tokens);
 
                 ggml_tensor * gs = llm_build_lora_mm_id(lctx, ctx0, layer.ffn_gate_shexp, xr, shexp_idx);
                 ggml_tensor * us = llm_build_lora_mm_id(lctx, ctx0, layer.ffn_up_shexp,   xr, shexp_idx);
@@ -373,8 +392,8 @@ ggml_cgraph * llm_build_context::build_inkling() {
 
                 ggml_tensor * ds = llm_build_lora_mm_id(lctx, ctx0, layer.ffn_down_shexp, hs, shexp_idx);
 
-                for (int64_t s = 0; s < n_shexp; ++s) {
-                    ggml_tensor * e = ggml_view_2d(ctx0, ds, n_embd, n_tokens, ds->nb[2], s*ds->nb[1]);
+                for (int64_t sx = 0; sx < n_shexp; ++sx) {
+                    ggml_tensor * e = ggml_view_2d(ctx0, ds, n_embd, n_tokens, ds->nb[2], sx*ds->nb[1]);
                     moe_out = ggml_add(ctx0, moe_out, e);
                 }
             }

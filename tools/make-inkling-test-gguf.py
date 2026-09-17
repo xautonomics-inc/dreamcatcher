@@ -69,6 +69,15 @@ writer.add_array("tokenizer.ggml.scores", [float(-i) for i in range(N_VOCAB)])
 writer.add_array("tokenizer.ggml.token_type", [gguf.TokenType.NORMAL] * N_VOCAB)
 # gpt2 BPE needs merges; provide a minimal pair set so vocab init succeeds
 writer.add_array("tokenizer.ggml.merges", [f"tok0 tok{i}" for i in range(1, min(64, N_VOCAB))])
+# BOS/EOS ids so the fixture can drive a real forward pass, not just a load.
+# Without a BOS the synthetic vocab ("tok0".."tokN", not byte-level BPE) tokenizes
+# nothing and llama-cli exits with "input is empty" before any graph runs -- which
+# is fine for the D1 load gate but useless for D2, where the point is to execute
+# the graph. With a BOS, an empty prompt still yields one token.
+writer.add_uint32("tokenizer.ggml.bos_token_id", 1)
+writer.add_uint32("tokenizer.ggml.eos_token_id", 2)
+writer.add_bool("tokenizer.ggml.add_bos_token", True)
+writer.add_bool("tokenizer.ggml.add_eos_token", False)
 
 # --- tensors ---
 def add_tensor(name, shape):
