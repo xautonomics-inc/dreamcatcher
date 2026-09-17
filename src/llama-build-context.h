@@ -443,6 +443,7 @@ struct llm_build_context {
     ggml_cgraph * build_seedoss();
 
     ggml_cgraph * build_laguna();
+    ggml_cgraph * build_inkling();
 
     ggml_cgraph * build_step35();
 
