@@ -89,6 +89,8 @@ struct create_tensors_helper : public create_tensors_helper_interface {
 
     bool create_qwen35_tensors(const LLM_TN & tn);
 
+    bool create_inkling_tensors(const LLM_TN & tn);
+
     bool create_phi2_tensors(const LLM_TN & tn);
 
     bool create_phi3_tensors(const LLM_TN & tn);
@@ -1744,6 +1746,78 @@ bool create_tensors_helper::create_qwen3next_tensors(const LLM_TN & tn) {
             layer.ffn_gate_shexp = create_tensor(ctx_split, tn(LLM_TENSOR_FFN_GATE_SHEXP, "weight", i), {n_embd, n_ff_shexp}, llama_model_loader::TENSOR_NOT_REQUIRED);
             layer.ffn_up_shexp   = create_tensor(ctx_split, tn(LLM_TENSOR_FFN_UP_SHEXP,   "weight", i), {n_embd, n_ff_shexp}, llama_model_loader::TENSOR_NOT_REQUIRED);
             layer.ffn_down_shexp = create_tensor(ctx_split, tn(LLM_TENSOR_FFN_DOWN_SHEXP, "weight", i), {n_ff_shexp, n_embd}, llama_model_loader::TENSOR_NOT_REQUIRED);
+        }
+    }
+
+    return use_mmap_buffer;
+}
+
+bool create_tensors_helper::create_inkling_tensors(const LLM_TN & tn) {
+    LOADING_PRELUDE
+
+    const int64_t head_dim = n_embd_head_k;
+    const int64_t d_rel    = hparams.inkling_d_rel;
+    const int64_t K        = hparams.n_shortconv_l_cache;
+    const int64_t n_ff_exp = hparams.n_ff_exp ? hparams.n_ff_exp : n_ff / n_expert_used;
+    const int64_t n_shexp  = hparams.n_expert_shared;
+
+    model.tok_embd = create_tensor(ctx_input, tn(LLM_TENSOR_TOKEN_EMBD, "weight"), {n_embd, n_vocab}, 0);
+    model.tok_norm = create_tensor(ctx_input, tn(LLM_TENSOR_TOKEN_EMBD_NORM, "weight", 0), {n_embd}, 0);
+    model.output_norm = create_tensor(ctx_output, tn(LLM_TENSOR_OUTPUT_NORM,     "weight"), {n_embd}, 0);
+    model.output      = create_tensor(ctx_output, tn(LLM_TENSOR_OUTPUT,          "weight"), {n_embd, n_vocab}, 0);
+
+    for (int i = 0; i < n_layer; ++i) {
+        ggml_context * ctx_split = ctx_for_layer_split(i);
+        auto & layer = model.layers[i];
+
+        const int64_t n_head_kv_i = hparams.n_head_kv(i);
+        const int64_t kvw         = n_head_kv_i * head_dim;
+        const int64_t rel_extent  = hparams.is_swa(i) ? hparams.inkling_rel_extent_swa : hparams.inkling_rel_extent;
+
+        layer.attn_norm = create_tensor(ctx_split, tn(LLM_TENSOR_ATTN_NORM, "weight", i), {n_embd}, 0);
+
+        layer.wq = create_tensor(ctx_split, tn(LLM_TENSOR_ATTN_Q, "weight", i), {n_embd, n_head*head_dim}, 0);
+        layer.wk = create_tensor(ctx_split, tn(LLM_TENSOR_ATTN_K, "weight", i), {n_embd, kvw}, 0);
+        layer.wv = create_tensor(ctx_split, tn(LLM_TENSOR_ATTN_V, "weight", i), {n_embd, kvw}, 0);
+        layer.wr = create_tensor(ctx_split, tn(LLM_TENSOR_ATTN_R, "weight", i), {n_embd, n_head*d_rel}, 0);
+        layer.wo = create_tensor(ctx_split, tn(LLM_TENSOR_ATTN_OUT, "weight", i), {n_head*head_dim, n_embd}, 0);
+
+        layer.attn_q_norm = create_tensor(ctx_split, tn(LLM_TENSOR_ATTN_Q_NORM, "weight", i), {head_dim}, 0);
+        layer.attn_k_norm = create_tensor(ctx_split, tn(LLM_TENSOR_ATTN_K_NORM, "weight", i), {head_dim}, 0);
+
+        // stored in checkpoint orientation [d_rel, E] -> gguf ne = [E, d_rel]
+        layer.attn_rel_proj = create_tensor(ctx_split, tn(LLM_TENSOR_ATTN_REL_PROJ, "weight", i), {rel_extent, d_rel}, 0);
+
+        layer.shortconv_k    = create_tensor(ctx_split, tn(LLM_TENSOR_SHORTCONV_K,    "weight", i), {K, kvw}, 0);
+        layer.shortconv_v    = create_tensor(ctx_split, tn(LLM_TENSOR_SHORTCONV_V,    "weight", i), {K, kvw}, 0);
+        layer.shortconv_attn = create_tensor(ctx_split, tn(LLM_TENSOR_SHORTCONV_ATTN, "weight", i), {K, n_embd}, 0);
+        layer.shortconv_mlp  = create_tensor(ctx_split, tn(LLM_TENSOR_SHORTCONV_MLP,  "weight", i), {K, n_embd}, 0);
+
+        layer.ffn_norm   = create_tensor(ctx_split, tn(LLM_TENSOR_FFN_NORM,   "weight", i), {n_embd}, 0);
+        layer.ffn_gscale = create_tensor(ctx_split, tn(LLM_TENSOR_FFN_GSCALE, "weight", i), {1}, 0);
+
+        if (i < (int) hparams.n_layer_dense_lead) {
+            const int64_t n_ff_i = hparams.n_ff(i);
+
+            layer.ffn_gate = create_tensor(ctx_split, tn(LLM_TENSOR_FFN_GATE, "weight", i), {n_embd, n_ff_i}, 0);
+            layer.ffn_up   = create_tensor(ctx_split, tn(LLM_TENSOR_FFN_UP,   "weight", i), {n_embd, n_ff_i}, 0);
+            layer.ffn_down = create_tensor(ctx_split, tn(LLM_TENSOR_FFN_DOWN, "weight", i), {n_ff_i, n_embd}, 0);
+        } else {
+            GGML_ASSERT(n_expert > 0 && n_expert_used > 0 && n_shexp > 0);
+
+            // gate holds n_expert + n_shexp rows (incl. shared-expert sink logits)
+            layer.ffn_gate_inp    = create_tensor(ctx_split, tn(LLM_TENSOR_FFN_GATE_INP,    "weight", i), {n_embd, n_expert + n_shexp}, 0);
+            layer.ffn_exp_probs_b = create_tensor(ctx_split, tn(LLM_TENSOR_FFN_EXP_PROBS_B, "bias",   i), {n_expert}, 0);
+
+            layer.ffn_gate_exps = create_tensor(ctx_split, tn(LLM_TENSOR_FFN_GATE_EXPS, "weight", i), {n_embd, n_ff_exp, n_expert}, 0);
+            layer.ffn_up_exps   = create_tensor(ctx_split, tn(LLM_TENSOR_FFN_UP_EXPS,   "weight", i), {n_embd, n_ff_exp, n_expert}, 0);
+            layer.ffn_down_exps = create_tensor(ctx_split, tn(LLM_TENSOR_FFN_DOWN_EXPS, "weight", i), {n_ff_exp, n_embd, n_expert}, 0);
+
+            // shared experts stacked as an n_shexp bank, registered MUL_MAT_ID so the loader
+            // picks a mul_mat_id-capable buffer
+            layer.ffn_gate_shexp = create_tensor(ctx_split, tn(LLM_TENSOR_FFN_GATE_SHEXPS, "weight", i), {n_embd, n_ff_exp, n_shexp}, 0);
+            layer.ffn_up_shexp   = create_tensor(ctx_split, tn(LLM_TENSOR_FFN_UP_SHEXPS,   "weight", i), {n_embd, n_ff_exp, n_shexp}, 0);
+            layer.ffn_down_shexp = create_tensor(ctx_split, tn(LLM_TENSOR_FFN_DOWN_SHEXPS, "weight", i), {n_ff_exp, n_embd, n_shexp}, 0);
         }
     }
 
@@ -5792,6 +5866,8 @@ bool create_tensors_helper::create_tensors() {
             use_mmap_buffer = create_qwen35moe_tensors(tn); break;
         case LLM_ARCH_QWEN35:
             use_mmap_buffer = create_qwen35_tensors(tn); break;
+        case LLM_ARCH_INKLING:
+            use_mmap_buffer = create_inkling_tensors(tn); break;
         case LLM_ARCH_PHI2:
             use_mmap_buffer = create_phi2_tensors(tn); break;
         case LLM_ARCH_PHI3:
