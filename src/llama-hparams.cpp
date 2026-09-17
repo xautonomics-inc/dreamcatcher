@@ -750,11 +750,14 @@ void llm_load_hparams(
                 // arch-derived per-layer quantities, not array-valued ones.
                 ml.get_key_or_arr(LLM_KV_ATTENTION_SLIDING_WINDOW_PATTERN, hparams.swa_layers, hparams.n_layer, false);
 
-                // every layer carries packed shortconv state, so all layers are "recurrent" in the
-                // layer-library sense (the full-attention Q/K/V still run, but the state is uniform)
-                for (uint32_t il = 0; il < hparams.n_layer; ++il) {
-                    hparams.recurrent_layer_arr[il] = true;
-                }
+                // NOTE: Inkling's packed shortconv state is NOT wired into the layer-library
+                // recurrent path here. Flagging all layers recurrent makes the KV-cache build take
+                // the qnext_recurrent branch (llama.cpp:1401-1413), which sizes cache_s_l from
+                // n_embd_v_s()/n_embd_ple_conv() — both derive from ssm_d_conv/ssm_d_inner/ssm_n_group,
+                // which Inkling never sets, so the width is 0, ggml_nbytes returns 0, ggml-alloc
+                // returns NULL, and llama.cpp:1656 reports a bogus allocation failure. That path is
+                // D3 (gwen) work, not D1 arch plumbing; D1 stops at the missing graph. See the
+                // verification note in docs/inkling-d1-arch-plumbing.md.
 
                 ml.get_key(LLM_KV_INKLING_D_REL,              hparams.inkling_d_rel);
                 ml.get_key(LLM_KV_INKLING_REL_EXTENT,         hparams.inkling_rel_extent);
