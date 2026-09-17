@@ -611,9 +611,23 @@ if (GGML_RPC)
     set(GGML_HEADERS_RPC ../include/ggml-rpc.h
                          ggml-rpc/transport.h
                          ggml-rpc/rma-channel.h)
-    set(GGML_SOURCES_RPC ggml-rpc.cpp
-                         ggml-rpc/transport.cpp)
+    set(GGML_SOURCES_RPC ggml-rpc.cpp)
     set(GGML_EXTRA_INCLUDES ${GGML_EXTRA_INCLUDES} ${CMAKE_CURRENT_SOURCE_DIR}/ggml-rpc)
+
+    # transport.cpp is built as an OBJECT library so out-of-ggml targets that use
+    # the Scope-B (T2) tier directly (e.g. llama-stage-runner via stage_rdma.cpp)
+    # can link the socket_t symbols WITHOUT also linking libggml. Without this,
+    # transport.cpp is effectively compiled once per consuming target, and the
+    # GGML_RPC_RDMA define below is applied per-source-file only to ggml's build
+    # — a consumer that compiled transport.cpp itself would silently get a
+    # TCP-only transport into an RDMA-enabled ggml (ODR mismatch). The OBJECT
+    # objects enter ggml via the generator expression in GGML_SOURCES_RPC below.
+    add_library(ggml-transport OBJECT ggml-rpc/transport.cpp)
+    target_include_directories(ggml-transport PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR}/../include)
+    target_compile_features(ggml-transport PRIVATE cxx_std_17)
+    set_target_properties(ggml-transport PROPERTIES POSITION_INDEPENDENT_CODE ON)
+    list(APPEND GGML_SOURCES_RPC $<TARGET_OBJECTS:ggml-transport>)
 
     # RDMA transport tier (Linux only, auto-detected via libibverbs). OFF →
     # transport.cpp compiles as a pure TCP byte stream, no libibverbs dep.
@@ -632,8 +646,15 @@ if (GGML_RPC)
         if (NOT IBVERBS_LIB)
             find_library(IBVERBS_LIB ibverbs REQUIRED)
         endif()
-        set_source_files_properties(ggml-rpc.cpp ggml-rpc/transport.cpp PROPERTIES
+        # ggml-rpc.cpp is compiled as part of ggml and needs the define; the
+        # transport object library carries it as a PUBLIC define so that any
+        # consumer linking ggml-transport compiles stage_rdma.cpp against the
+        # same RDMA-enabled transport ABI. libibverbs is PUBLIC for the same
+        # reason: the objects that reference ibv_* verbs live in ggml-transport.
+        set_source_files_properties(ggml-rpc.cpp PROPERTIES
                                     COMPILE_DEFINITIONS GGML_RPC_RDMA)
+        target_compile_definitions(ggml-transport PUBLIC GGML_RPC_RDMA)
+        target_link_libraries(ggml-transport PUBLIC ${IBVERBS_LIB})
         set(GGML_EXTRA_LIBS ${GGML_EXTRA_LIBS} ${IBVERBS_LIB})
         message(STATUS "  RPC RDMA transport enabled (libibverbs: ${IBVERBS_LIB})")
     else()
