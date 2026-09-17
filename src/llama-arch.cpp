@@ -94,6 +94,7 @@ static const std::map<llm_arch, const char *> LLM_ARCH_NAMES = {
     { LLM_ARCH_GEMMA4_ASSISTANT,"gemma4-assistant"   },
     { LLM_ARCH_OPENPANGU,       "openpangu"    },
     { LLM_ARCH_MUSE_GLIMMER,    "muse-glimmer" },
+    { LLM_ARCH_INKLING,         "inkling"      },
     { LLM_ARCH_UNKNOWN,         "(unknown)"    },
 };
 
@@ -264,6 +265,18 @@ static const std::map<llm_kv, const char *> LLM_KV_NAMES = {
     { LLM_KV_KDA_HEAD_DIM,                  "%s.kda.head_dim"       },
     { LLM_KV_KDA_SAFE_GATE,                 "%s.kda.safe_gate"      },
     { LLM_KV_KDA_GATE_LOWER_BOUND,          "%s.kda.gate_lower_bound" },
+
+    // inkling (private arch)
+    { LLM_KV_SHORTCONV_L_CACHE,             "%s.shortconv.l_cache"  },
+    { LLM_KV_INKLING_D_REL,                 "%s.d_rel"              },
+    { LLM_KV_INKLING_REL_EXTENT,            "%s.rel_extent"         },
+    { LLM_KV_INKLING_REL_EXTENT_SWA,        "%s.rel_extent_swa"     },
+    { LLM_KV_INKLING_SHORTCONV_KERNEL,      "%s.shortconv_kernel"   },
+    { LLM_KV_INKLING_DENSE_BLOCK_COUNT,     "%s.dense_block_count"  },
+    { LLM_KV_INKLING_LOGIT_SCALE_DENOM,     "%s.logit_scale_denom"  },
+    { LLM_KV_INKLING_LOG_SCALING_N_FLOOR,   "%s.log_scaling_n_floor"},
+    { LLM_KV_INKLING_LOG_SCALING_ALPHA,     "%s.log_scaling_alpha"  },
+    { LLM_KV_INKLING_UNPADDED_VOCAB_SIZE,   "%s.unpadded_vocab_size"},
 
     { LLM_KV_TOKENIZER_MODEL,                "tokenizer.ggml.model"                    },
     { LLM_KV_TOKENIZER_PRE,                  "tokenizer.ggml.pre"                      },
