@@ -6346,6 +6346,8 @@ static void llama_set_inputs(llama_context & lctx, const llama_batch & batch) {
             }
         };
 
+        // fill_rel_idx no-ops on nullptr; build_inkling leaves the unused one null when
+        // no layer of that kind exists, and a pruned input has no host buffer to write.
         fill_rel_idx(lctx.inp_inkling_rel_idx,     hp.inkling_rel_extent);
         fill_rel_idx(lctx.inp_inkling_rel_idx_swa, hp.inkling_rel_extent_swa);
     }
