@@ -1,16 +1,17 @@
 #!/bin/bash
-# D2 Inkling parity runner — ben 2026-09-17. Counterpart to run-d0-oracle.ben.sh.
+# D2 Inkling parity runner — ben 2026-09-17/18. Counterpart to run-d0-oracle.ben.sh.
 #
 # Modes:
-#   precheck  Settle the banded-FA question CHEAPLY on the 77 GB UD-IQ2_M quant using the
-#             INTERNAL build (which has the banded op): one ppl pass with default -fa, one with
-#             -fa 0, then diff the four chunk values. Differ => the recorded D0 oracle used
-#             banded FA and is the wrong comparand for D2 (which has no banded op); a non-FA
-#             oracle must be re-recorded. Identical => the recorded oracle stands.
-#   parity    Run THIS tree's D2 build on UD-Q4_K_M and compare to the D0 oracle:
-#             64-token greedy token-for-token, and the four per-chunk perplexity values.
+#   precheck   Internal build on the 77 GB IQ2_M quant, ppl with default -fa vs -fa 0, diffed.
+#              SETTLED 2026-09-18 on the real model: the paths DIFFER (banded 72.6183 vs masked
+#              77.0969), so the recorded D0 oracle is D3's comparand, NOT D2's. Kept for reruns.
+#   refgreedy  Record the MASKED-PATH greedy reference: noah's internal build, llama-server -fa 0,
+#              the D0 prompt set and request body. D2 executes the masked path, so THIS -- not the
+#              recorded banded greedy-64x8.json -- is what D2's tokens must match. Writes $REFM/.
+#   parity     This tree's D2 build on Q4_K_M, -fa 0: greedy token-for-token vs $REFM, and the four
+#              per-chunk ppl values vs the masked-path capture from the 2026-09-18 01:57 window.
 #
-# PRECONDITION (booked window): resident services quieted by claude-ops; MemAvailable >= 160 GiB.
+# PRECONDITION (booked window): resident model servers quieted; MemAvailable >= 160 GiB.
 # Never runs alongside a build. Stops its own processes on exit. Fails closed.
 set -uo pipefail
 
@@ -25,10 +26,12 @@ MDIR=/fast/models/unsloth/Inkling-Small-GGUF
 M_Q4=$MDIR/UD-Q4_K_M/Inkling-Small-UD-Q4_K_M-00001-of-00005.gguf
 M_IQ2=$MDIR/UD-IQ2_M/Inkling-Small-UD-IQ2_M-00001-of-00003.gguf
 WIKI=/fast/build/llama.cpp-inkling/eval-q4km/wikitext-2-raw/wiki.test.raw
-ORACLE=/fast/build/agents/noah/p1/d0-oracle-20260915T2024
+ORACLE=/fast/build/agents/noah/p1/d0-oracle-20260915T2024    # banded-path capture (D3's gate);
+                                                             # used here ONLY for the prompt set
+MASKED_PPL=$D2/window-20260918T0156/ppl-fa-off.log            # reference, masked path, real Q4_K_M
+REFM=$D2/ref-masked                                          # masked-path greedy reference (refgreedy)
 OUT=$D2/d2-$MODE-$(date -u +%Y%m%dT%H%M)
 THREADS=20
-PORT=18098                                # NOT 18097: never collide with a live oracle server
 MEM_FLOOR_GIB=160
 MEM_ABORT_KB=$((12*1024*1024))
 
@@ -70,113 +73,128 @@ precond() {
   for f in "$@"; do [ -e "$f" ] || { echo "PRECONDITION-FAIL: missing $f"; exit 2; }; done
 }
 
+chunks() { grep -oE '\[1\][0-9.]+,\[2\][0-9.]+,\[3\][0-9.]+,\[4\][0-9.]+,' "$1" | tail -1; }
+
 ppl_run() {  # ppl_run <binary> <model> <extra-args> <logfile>
   "$1" -m "$2" -ngl 0 -t $THREADS -f "$WIKI" -c 2048 -b 2048 --chunks 4 $3 > "$4" 2>&1
   echo "  ppl rc=$? -> $4"
-  grep -oE '^\[[0-9]+\][0-9.]+' "$4" | tr -d '[]' | sed 's/^[0-9]*//' | tr '\n' ' '; echo
+  echo "  chunks: $(chunks "$4")"
+}
+
+# run_greedy <server-binary> <port> <out.json> [compare.json]
+# Drives the D0 prompt set (read from the banded recording, prompts only) through a server with
+# the D0 request body. With compare.json, checks tokens position-for-position and returns 1 on any
+# mismatch. Provenance is the server binary hash: a parity number without provenance is not evidence.
+run_greedy() {
+  local bin=$1 port=$2 out=$3 cmp=${4:-}
+  echo "--- greedy: server=$(sha256sum "$bin" | cut -c1-12) port=$port -> $out"
+  "$bin" -m "$M_Q4" -ngl 0 -t $THREADS -c 4096 -np 1 --jinja $FA_OFF \
+      --host 127.0.0.1 --port $port > "$out.server.log" 2>&1 &
+  SP=$!
+  for _ in $(seq 1 360); do
+    curl -sf http://127.0.0.1:$port/health >/dev/null 2>&1 && break
+    kill -0 $SP 2>/dev/null || { echo "SERVER-DIED"; tail -30 "$out.server.log"; return 3; }
+    sleep 5
+  done
+  curl -sf http://127.0.0.1:$port/health >/dev/null || { echo "SERVER-NOT-HEALTHY"; return 3; }
+  memlog server-healthy
+  python3 - "$port" "$out" "$ORACLE/greedy-64x8.json" "$cmp" <<'PY'
+import json,sys,urllib.request,hashlib
+port,out,prompts_from,cmp=sys.argv[1:5]
+prompts=[r["prompt"] for r in json.load(open(prompts_from))]
+ref=json.load(open(cmp)) if cmp else None
+res=[];fails=0
+for i,p in enumerate(prompts):
+    body={"prompt":p,"n_predict":64,"temperature":0,"top_k":1,"seed":1,
+          "cache_prompt":False,"return_tokens":True,"n_probs":10}
+    r=json.load(urllib.request.urlopen(urllib.request.Request(
+        f"http://127.0.0.1:{port}/completion",data=json.dumps(body).encode(),
+        headers={"Content-Type":"application/json"}),timeout=1800))
+    got=r.get("tokens")
+    rec={"i":i,"prompt":p,"tokens":got,"content":r.get("content"),
+         "completion_probabilities":r.get("completion_probabilities"),"timings":r.get("timings")}
+    sha=hashlib.sha256(json.dumps(got).encode()).hexdigest()[:16]
+    if ref is not None:
+        want=ref[i]["tokens"]; ok=(got==want); rec["match"]=ok
+        if ok: print(f"prompt {i}: MATCH ({len(got)} tokens) sha={sha}",flush=True)
+        else:
+            fails+=1; n=min(len(got or []),len(want or []))
+            first=next((k for k in range(n) if got[k]!=want[k]), n)
+            print(f"prompt {i}: MISMATCH at token {first} (got {got[first:first+4] if got else None} want {want[first:first+4]}) sha={sha}",flush=True)
+    else:
+        print(f"prompt {i}: {len(got or [])} tokens, {round((r.get('timings') or {}).get('predicted_per_second',0),2)} tok/s, sha={sha}",flush=True)
+    res.append(rec)
+json.dump(res,open(out,"w"),indent=1)
+if ref is not None: print(f"GREEDY: {len(prompts)-fails}/{len(prompts)} prompts token-for-token identical")
+sys.exit(1 if fails else 0)
+PY
+  local rc=$?
+  kill -TERM $SP; wait $SP 2>/dev/null; SP=""; echo "$(date -u +%T) server stopped"
+  memlog after-greedy
+  return $rc
 }
 
 case "$MODE" in
 # ---------------------------------------------------------------- precheck
 precheck)
   echo "=== D2 PRECHECK (banded-FA question) $(date -u +%FT%TZ) host=$(hostname)"
-  echo "    internal build on IQ2_M: default -fa vs -fa 0. Same quant both runs; only the"
-  echo "    COMPARISON matters, absolute values are meaningless across quants."
   precond "$M_IQ2" "$WIKI" "$NOAH_B/llama-perplexity"
   watchdog
-  echo "--- run A: default -fa (AUTO => flash_attn true => banded path if predicate holds)"
-  A=$(ppl_run "$NOAH_B/llama-perplexity" "$M_IQ2" "" "$OUT/ppl-fa-auto.log" | tail -1)
-  memlog after-A
-  echo "--- run B: -fa 0 (masked path, what D2 does)"
-  B2=$(ppl_run "$NOAH_B/llama-perplexity" "$M_IQ2" "-fa 0" "$OUT/ppl-fa-off.log" | tail -1)
-  memlog after-B
-  echo
-  echo "chunks with -fa auto : $A"
-  echo "chunks with -fa 0    : $B2"
-  if [ "$A" = "$B2" ]; then
-    echo "VERDICT: IDENTICAL -> flash-attn path does not change the numbers; the recorded D0"
-    echo "         oracle stands as D2's comparand. Proceed to: $0 parity"
-  else
-    echo "VERDICT: DIFFER -> the recorded oracle is NOT a valid comparand for D2's masked path."
-    echo "         Re-record a non-FA oracle for D2; keep the FA capture as D3's gate."
-  fi
+  echo "--- run A: default -fa"; ppl_run "$NOAH_B/llama-perplexity" "$M_IQ2" "" "$OUT/ppl-fa-auto.log"
+  echo "--- run B: -fa 0";       ppl_run "$NOAH_B/llama-perplexity" "$M_IQ2" "-fa 0" "$OUT/ppl-fa-off.log"
+  A=$(chunks "$OUT/ppl-fa-auto.log"); B2=$(chunks "$OUT/ppl-fa-off.log")
+  echo "fa auto: $A"; echo "fa 0   : $B2"
+  [ "$A" = "$B2" ] && echo "VERDICT: IDENTICAL" || echo "VERDICT: DIFFER -> recorded oracle is not D2's comparand"
+  ;;
+# ---------------------------------------------------------------- refgreedy
+refgreedy)
+  echo "=== D2 REFGREEDY (masked-path greedy reference) $(date -u +%FT%TZ) host=$(hostname)"
+  echo "    binary = noah's internal build (has the banded op; forced OFF with $FA_OFF)"
+  precond "$M_Q4" "$NOAH_B/llama-server" "$ORACLE/greedy-64x8.json"
+  watchdog
+  mkdir -p "$REFM"
+  run_greedy "$NOAH_B/llama-server" 18098 "$REFM/greedy-64x8-masked.json"; rc=$?
+  echo "refgreedy rc=$rc"
+  ( cd "$REFM" && sha256sum greedy-64x8-masked.json > SHA256SUMS ) && cat "$REFM/SHA256SUMS"
+  [ $rc -eq 0 ]
   ;;
 # ---------------------------------------------------------------- parity
 parity)
-  # Provenance: the staged tree has no .git (it is rsynced without it), so fall back to
-  # hashing the binaries actually being run. A parity number without provenance is not evidence.
+  # Provenance: the staged tree has no .git (it is rsynced without it), so fall back to hashing
+  # the binaries actually being run.
   TREE=$(git -C $D2 rev-parse --short HEAD 2>/dev/null)
   [ -n "$TREE" ] || TREE="nogit:server=$(sha256sum $B/llama-server | cut -c1-12),ppl=$(sha256sum $B/llama-perplexity | cut -c1-12)"
   echo "=== D2 PARITY $(date -u +%FT%TZ) host=$(hostname) tree=$TREE"
-  echo "    oracle=$ORACLE  model=$M_Q4  fa=OFF(masked)  threads=$THREADS"
-  precond "$M_Q4" "$WIKI" "$B/llama-server" "$B/llama-perplexity" "$ORACLE/greedy-64x8.json" "$ORACLE/ppl.log"
+  echo "    model=$M_Q4  fa=OFF(masked)  threads=$THREADS"
+  echo "    greedy comparand = $REFM/greedy-64x8-masked.json  (masked path, NOT the banded oracle)"
+  echo "    ppl    comparand = $MASKED_PPL"
+  precond "$M_Q4" "$WIKI" "$B/llama-server" "$B/llama-perplexity" \
+          "$REFM/greedy-64x8-masked.json" "$MASKED_PPL" "$ORACLE/greedy-64x8.json"
   watchdog
 
-  # ---- (1) greedy: the oracle drove this through llama-server, NOT llama-cli ----
-  $B/llama-server -m "$M_Q4" -ngl 0 -t $THREADS -c 4096 -np 1 --jinja $FA_OFF \
-      --host 127.0.0.1 --port $PORT > "$OUT/server.log" 2>&1 &
-  SP=$!
-  for _ in $(seq 1 360); do
-    curl -sf http://127.0.0.1:$PORT/health >/dev/null 2>&1 && break
-    kill -0 $SP 2>/dev/null || { echo "SERVER-DIED"; tail -30 "$OUT/server.log"; exit 3; }
-    sleep 5
-  done
-  curl -sf http://127.0.0.1:$PORT/health >/dev/null || { echo "SERVER-NOT-HEALTHY"; exit 3; }
-  memlog server-healthy
+  # ---- (1) greedy vs the masked-path reference (the oracle drove this via llama-server) ----
+  run_greedy "$B/llama-server" 18099 "$OUT/d2-greedy-64x8.json" "$REFM/greedy-64x8-masked.json"; grc=$?
+  echo "greedy compare rc=$grc"
 
-  python3 - "$PORT" "$OUT" "$ORACLE" <<'PY'
-import json,sys,urllib.request
-port,out,oracle=sys.argv[1],sys.argv[2],sys.argv[3]
-ref=json.load(open(f"{oracle}/greedy-64x8.json"))
-res=[];fails=0
-for rec in ref:
-    p=rec["prompt"]
-    body={"prompt":p,"n_predict":64,"temperature":0,"top_k":1,"seed":1,
-          "cache_prompt":False,"return_tokens":True,"n_probs":10}
-    r=json.load(urllib.request.urlopen(urllib.request.Request(
-        f"http://127.0.0.1:{port}/completion",data=json.dumps(body).encode(),
-        headers={"Content-Type":"application/json"}),timeout=1800))
-    got,want=r.get("tokens"),rec.get("tokens")
-    ok = got==want
-    if not ok:
-        fails+=1
-        n=min(len(got or []),len(want or []))
-        first=next((i for i in range(n) if got[i]!=want[i]), n)
-        print(f"prompt {rec['i']}: MISMATCH at token {first} (got {got[first:first+4] if got else None} want {want[first:first+4]})",flush=True)
-    else:
-        print(f"prompt {rec['i']}: MATCH ({len(got)} tokens)",flush=True)
-    res.append({"i":rec["i"],"match":ok,"tokens":got,
-                "completion_probabilities":r.get("completion_probabilities")})
-json.dump(res,open(f"{out}/d2-greedy-64x8.json","w"),indent=1)
-print(f"GREEDY: {len(ref)-fails}/{len(ref)} prompts token-for-token identical")
-sys.exit(1 if fails else 0)
-PY
-  grc=$?; echo "greedy compare rc=$grc"
-  kill -TERM $SP; wait $SP 2>/dev/null; SP=""; echo "$(date -u +%T) server stopped"
-  memlog after-greedy
-
-  # ---- (2) perplexity vs the oracle's four chunk values ----
+  # ---- (2) perplexity vs the masked-path four chunk values ----
   ppl_run "$B/llama-perplexity" "$M_Q4" "$FA_OFF --kl-divergence-base $OUT/d2-kld-4x2048.bin" "$OUT/ppl.log"
   memlog after-ppl
-  got=$(grep -oE '^\[[0-9]+\][0-9.]+' "$OUT/ppl.log" | sed 's/^\[[0-9]*\]//' | tr '\n' ' ')
-  want=$(grep -oE '^\[[0-9]+\][0-9.]+' "$ORACLE/ppl.log" | sed 's/^\[[0-9]*\]//' | tr '\n' ' ')
-  echo "ppl oracle : $want"
-  echo "ppl d2     : $got"
+  got=$(chunks "$OUT/ppl.log"); want=$(chunks "$MASKED_PPL")
+  echo "ppl reference (masked): $want"
+  echo "ppl d2                : $got"
   prc=0; [ "$got" = "$want" ] || prc=1
 
   ( cd "$OUT" && sha256sum d2-greedy-64x8.json ppl.log > SHA256SUMS ) 2>/dev/null
   echo
   if [ $grc -eq 0 ] && [ $prc -eq 0 ]; then
-    echo "=== D2 PARITY PASS (greedy token-for-token AND 4/4 ppl chunks) out=$OUT"
+    echo "=== D2 PARITY PASS (greedy token-for-token AND 4/4 ppl chunks vs the masked-path reference) out=$OUT"
   else
     echo "=== D2 PARITY FAIL (greedy rc=$grc, ppl rc=$prc) out=$OUT"
-    echo "    Before blaming the port: confirm the oracle's flash-attn path matches this run's."
-    echo "    D2 runs masked (-fa 0); if the oracle ran banded FA the comparand is wrong."
-    echo "    Settle with: $0 precheck"
+    echo "    Both comparands are the reference's MASKED path, matching what D2 runs."
   fi
   [ $grc -eq 0 ] && [ $prc -eq 0 ]
   ;;
 *)
-  echo "usage: $0 [precheck|parity]"; exit 64;;
+  echo "usage: $0 [precheck|refgreedy|parity]"; exit 64;;
 esac
 echo "=== D2 $MODE DONE $(date -u +%FT%TZ) out=$OUT"
