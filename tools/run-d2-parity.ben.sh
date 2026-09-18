@@ -37,7 +37,7 @@ MEM_ABORT_KB=$((12*1024*1024))
 
 # Inkling has no banded FA in this tree, so build_inkling asserts unless FA is off. The bias is
 # per-head and ggml_flash_attn_ext never materialises kq, so there is nothing to add it to.
-FA_OFF="-fa 0"
+FA_OFF="-fa off"
 
 export CUDA_VISIBLE_DEVICES=""
 mkdir -p "$OUT"
