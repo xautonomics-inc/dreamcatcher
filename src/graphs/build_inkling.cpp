@@ -130,8 +130,27 @@ ggml_cgraph * llm_build_context::build_inkling() {
     }
     ggml_build_forward_expand(gf, inpL);
 
+    // Create per-layer inputs only if a layer ACTUALLY uses them. An input that is
+    // created but never referenced is pruned by the graph allocator, leaving a null
+    // buffer that llama_set_inputs then asserts on
+    // (llama.cpp: GGML_ASSERT(ggml_backend_buffer_is_host(...->buffer))).
+    // The reference does the same scan (needs_rel_idx_local / needs_rel_idx_global).
+    // Clear last graph's pointers first: anything not re-created below must read as absent,
+    // or llama_set_inputs would write through a stale pointer into a freed buffer.
+    lctx.inp_inkling_tau         = nullptr;
+    lctx.inp_inkling_rel_idx     = nullptr;
+    lctx.inp_inkling_rel_idx_swa = nullptr;
+    lctx.inp_inkling_vocab_mask  = nullptr;
+    lctx.inp_inkling_shexp_idx   = nullptr;
+
+    bool has_swa_layer    = false;
+    bool has_global_layer = false;
+    for (int il = 0; il < n_layer; ++il) {
+        if (hparams.is_swa(il)) { has_swa_layer = true; } else { has_global_layer = true; }
+    }
+
     ggml_tensor * KQ_mask     = build_inp_KQ_mask();
-    ggml_tensor * KQ_mask_swa = hparams.n_swa > 0 ? build_inp_KQ_mask_swa() : nullptr;
+    ggml_tensor * KQ_mask_swa = (hparams.n_swa > 0 && has_swa_layer) ? build_inp_KQ_mask_swa() : nullptr;
 
     // sequence ids for ggml_ssm_conv, shared by all four conv sites
     lctx.inp_s_seq_qnext = ggml_new_tensor_2d(ctx0, GGML_TYPE_I32, 1, n_tokens);
@@ -141,7 +160,7 @@ ggml_cgraph * llm_build_context::build_inkling() {
 
     // log-N attention scaling, global (non-SWA) layers only: tau = 1 + alpha*log(max(pos+1)/n_floor, 1)
     ggml_tensor * tau = nullptr;
-    if (hparams.inkling_log_n_floor > 0) {
+    if (hparams.inkling_log_n_floor > 0 && has_global_layer) {
         lctx.inp_inkling_tau = ggml_new_tensor_3d(ctx0, GGML_TYPE_F32, 1, 1, n_tokens);
         cb(lctx.inp_inkling_tau, "inp_inkling_tau", -1);
         ggml_set_input(lctx.inp_inkling_tau);
@@ -151,13 +170,16 @@ ggml_cgraph * llm_build_context::build_inkling() {
     // flattened relative-position indices, one per (kv, token) pair; index E selects the
     // zero pad column for out-of-band / empty cells
     const int32_t n_kv_cur = n_kv;
-    lctx.inp_inkling_rel_idx = ggml_new_tensor_2d(ctx0, GGML_TYPE_I32, n_kv_cur, n_tokens);
-    cb(lctx.inp_inkling_rel_idx, "inp_inkling_rel_idx", -1);
-    ggml_set_input(lctx.inp_inkling_rel_idx);
-    ggml_tensor * rel_idx = lctx.inp_inkling_rel_idx;
+    ggml_tensor * rel_idx = nullptr;
+    if (has_global_layer) {
+        lctx.inp_inkling_rel_idx = ggml_new_tensor_2d(ctx0, GGML_TYPE_I32, n_kv_cur, n_tokens);
+        cb(lctx.inp_inkling_rel_idx, "inp_inkling_rel_idx", -1);
+        ggml_set_input(lctx.inp_inkling_rel_idx);
+        rel_idx = lctx.inp_inkling_rel_idx;
+    }
 
     ggml_tensor * rel_idx_swa = nullptr;
-    if (hparams.n_swa > 0) {
+    if (hparams.n_swa > 0 && has_swa_layer) {
         lctx.inp_inkling_rel_idx_swa = ggml_new_tensor_2d(ctx0, GGML_TYPE_I32, n_kv_cur, n_tokens);
         cb(lctx.inp_inkling_rel_idx_swa, "inp_inkling_rel_idx_swa", -1);
         ggml_set_input(lctx.inp_inkling_rel_idx_swa);
