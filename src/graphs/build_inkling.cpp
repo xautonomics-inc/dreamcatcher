@@ -323,15 +323,18 @@ ggml_cgraph * llm_build_context::build_inkling() {
 
             ggml_tensor * routed = ggml_cont(ctx0,
                     ggml_view_2d(ctx0, logits, n_expert, n_tokens, logits->nb[1], 0));
-            ggml_tensor * shared_logits =
-                    ggml_view_2d(ctx0, logits, n_shexp, n_tokens, logits->nb[1], n_expert*lsz);
+            ggml_tensor * shared_logits = ggml_cont(ctx0,
+                    ggml_view_2d(ctx0, logits, n_shexp, n_tokens, logits->nb[1], n_expert*lsz));
 
             // bias affects selection only, not the weights
             ggml_tensor * scores = ggml_sigmoid(ctx0, routed);
             scores = ggml_add(ctx0, scores, layer.ffn_exp_probs_b);
             cb(scores, "inkling_moe_scores", il);
 
-            ggml_tensor * selected = ggml_top_k(ctx0, scores, n_expert_used);
+            // ggml_top_k is argsort + a view, so the result is NOT contiguous. It is used
+            // below as ggml_get_rows indices and as mul_mat_id expert ids, both of which
+            // need a real buffer -- glm5next:176 and deepseek4:885 wrap it the same way.
+            ggml_tensor * selected = ggml_cont(ctx0, ggml_top_k(ctx0, scores, n_expert_used));
             cb(selected, "inkling_moe_topk", il);
 
             ggml_tensor * routed3     = ggml_reshape_3d(ctx0, routed, 1, n_expert, n_tokens);
@@ -340,7 +343,6 @@ ggml_cgraph * llm_build_context::build_inkling() {
 
             ggml_tensor * all_logits = ggml_concat(ctx0, topk_logits, shared_logits, 0);
 
-            // logsigmoid(x) = -softplus(-x)
             // logsigmoid(x) = -softplus(-x); the softmax spans routed top-k AND shared
             // logits together, so shared gammas fall out of the same distribution
             ggml_tensor * w = ggml_neg(ctx0, ggml_softplus(ctx0, ggml_neg(ctx0, all_logits)));

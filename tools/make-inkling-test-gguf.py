@@ -64,11 +64,33 @@ writer.add_uint32("inkling.unpadded_vocab_size", UNPADDED_VOCAB)
 
 # tokenizer metadata (minimal BPE-ish to satisfy vocab init)
 writer.add_string("tokenizer.ggml.model", "gpt2")
-writer.add_array("tokenizer.ggml.tokens", [f"tok{i}" for i in range(N_VOCAB)])
+
+# Byte-level vocab for ids 0..255, so ORDINARY TEXT TOKENIZES.
+# The previous vocab was "tok0".."tokN", which tokenized nothing: llama-cli exited with
+# "input is empty" and llama-perplexity with "the data file ... tokenizes to only 1 tokens".
+# That made the fixture load-only, which is why D2 had no cheap numerical gate and a bad
+# port was not caught until a 152 GB parity run. With byte tokens the same 14 MB fixture can
+# run perplexity, so two builds can be diffed against each other on a laptop-sized model.
+def _gpt2_byte_encoder():
+    bs = list(range(ord("!"), ord("~")+1)) + list(range(ord("\u00a1"), ord("\u00ac")+1)) \
+       + list(range(ord("\u00ae"), ord("\u00ff")+1))
+    cs = bs[:]
+    n = 0
+    for b in range(256):
+        if b not in bs:
+            bs.append(b); cs.append(256+n); n += 1
+    return {b: chr(c) for b, c in zip(bs, cs)}
+
+_be = _gpt2_byte_encoder()
+tokens = [_be[b] for b in range(256)] + [f"tok{i}" for i in range(256, N_VOCAB)]
+writer.add_array("tokenizer.ggml.tokens", tokens)
 writer.add_array("tokenizer.ggml.scores", [float(-i) for i in range(N_VOCAB)])
 writer.add_array("tokenizer.ggml.token_type", [gguf.TokenType.NORMAL] * N_VOCAB)
-# gpt2 BPE needs merges; provide a minimal pair set so vocab init succeeds
-writer.add_array("tokenizer.ggml.merges", [f"tok0 tok{i}" for i in range(1, min(64, N_VOCAB))])
+# The gpt2 loader REFUSES an empty merges list ("cannot find tokenizer merges in model
+# file"), so supply a few pairs over rarely-adjacent high byte tokens. Byte-level fallback
+# does the real work; these exist to satisfy the loader without shaping tokenization.
+writer.add_array("tokenizer.ggml.merges",
+                 [f"{tokens[200+i]} {tokens[201+i]}" for i in range(8)])
 # BOS/EOS ids so the fixture can drive a real forward pass, not just a load.
 # Without a BOS the synthetic vocab ("tok0".."tokN", not byte-level BPE) tokenizes
 # nothing and llama-cli exits with "input is empty" before any graph runs -- which
