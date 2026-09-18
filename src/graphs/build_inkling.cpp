@@ -19,9 +19,13 @@
 //     3-arg, state concat'd by the caller      6-arg, fused: returns conv output AND
 //                                              the new state in one tensor (see the
 //                                              openPangu precedent in this tree)
-//   build_attn(..., kq_b, ...)               llm_build_kv() has NO kq_b parameter, so
-//                                              the relative-position bias needs the
-//                                              bespoke KQ path below
+//   build_attn(..., kq_b, ...)               llm_build_kv() takes an optional trailing
+//                                              kq_b (added for this arch), applied to kq
+//                                              before the softmax on the non-FA path
+//   V reshaped to 3D before cpy_v            V stays 2D {n_embd_v_gqa, n_tokens}: the
+//                                              store lays V into a TRANSPOSED cache via
+//                                              ggml_transpose(v_cur), which is only
+//                                              correct on 2D (see the note at the call)
 //   separate base/swa caches + banded FA     one cache + SWA masks; the banded
 //                                              flash-attn op is D3, NOT D2
 //
@@ -247,7 +251,14 @@ ggml_cgraph * llm_build_context::build_inkling() {
 
         q = ggml_reshape_3d(ctx0, q, head_dim, n_head,    n_tokens);
         k = ggml_reshape_3d(ctx0, k, head_dim, n_head_kv, n_tokens);
-        v = ggml_reshape_3d(ctx0, v, head_dim, n_head_kv, n_tokens);
+        // V deliberately stays 2D {n_embd_v_gqa, n_tokens}. The reference reshapes V to
+        // 3D because mainline's cpy_v handles it; this tree's llm_build_kv_store lays V
+        // into a TRANSPOSED cache via ggml_transpose(v_cur), which swaps dims 0 and 1. On
+        // 2D that yields {n_tokens, n_embd_v_gqa} and matches the cache view. On a 3D
+        // {head_dim, n_head_kv, n_tokens} it swaps head_dim with n_head_kv instead -- same
+        // element count, so no assert, but the copy scrambles layout: position 0 lands
+        // correctly and every later position receives another channel of token 0.
+        // K is unaffected because the K cache is not transposed.
 
         q = llm_build_norm(ctx0, q, hparams, layer.attn_q_norm, NULL, LLM_NORM_RMS, cb, il);
         k = llm_build_norm(ctx0, k, hparams, layer.attn_k_norm, NULL, LLM_NORM_RMS, cb, il);
