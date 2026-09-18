@@ -5,6 +5,7 @@ Sized small (2 layers: 1 dense lead + 1 MoE) but with the exact metadata keys
 and tensor shapes the reference loader expects, so llama-cli --load can verify
 that every Inkling tensor is created with the right shape/type on CPU.
 """
+import hashlib
 import sys
 import numpy as np
 from pathlib import Path
@@ -19,13 +20,15 @@ N_LAYER     = 2
 N_EMBD      = 256
 N_VOCAB     = 1024
 N_HEAD      = 8
+N_HEAD_KV   = 2   # GQA 4:1, the ratio the real model uses (32/8)
 HEAD_DIM    = 32  # n_embd / n_head
 D_REL       = 16
 REL_EXTENT  = 512
 REL_EXTENT_SWA = 512
 SHORTCONV_K = 4
 DENSE_LEAD  = 1          # blk.0 dense, blk.1 MoE
-N_EXPERT    = 8
+N_EXPERT    = 16
+N_EXPERT_USED = 6  # real model routes 6; >1 exercises the top-k path properly
 N_SHEXP     = 2
 N_FF_EXP    = 256
 N_FF_DENSE  = 512
@@ -42,11 +45,11 @@ writer.add_uint32("inkling.context_length", 4096)
 writer.add_uint32("inkling.embedding_length", N_EMBD)
 writer.add_uint32("inkling.feed_forward_length", N_FF_DENSE)
 writer.add_uint32("inkling.attention.head_count", N_HEAD)
-writer.add_uint32("inkling.attention.head_count_kv", N_HEAD)
+writer.add_uint32("inkling.attention.head_count_kv", N_HEAD_KV)
 writer.add_float32("inkling.attention.layer_norm_rms_epsilon", 1e-5)
 writer.add_uint32("inkling.rope.dimension_count", 0)  # no rope
 writer.add_uint32("inkling.expert_count", N_EXPERT)
-writer.add_uint32("inkling.expert_used_count", 2)
+writer.add_uint32("inkling.expert_used_count", N_EXPERT_USED)
 writer.add_uint32("inkling.expert_shared_count", N_SHEXP)
 writer.add_uint32("inkling.expert_feed_forward_length", N_FF_EXP)
 writer.add_float32("inkling.expert_weights_scale", 1.0)
@@ -107,9 +110,30 @@ def add_tensor(name, shape):
 
     The writer serializes the numpy shape REVERSED into ggml ne, so build the
     numpy array in the reversed order to land ne == shape in the file.
+
+    Weights are DETERMINISTIC AND NON-ZERO, seeded per tensor name so the file is
+    byte-reproducible on any host.
+
+    This used to write np.zeros, which made the fixture useless as a correctness
+    check: with every weight zero the logits are zero, softmax is uniform, and ANY
+    graph -- correct or catastrophically wrong -- scores exactly PPL 1000.0000 over
+    a 1024 vocab. A broken build_inkling passed this fixture and was only caught by
+    a 152 GB parity run (ppl 640327 vs an expected 77). Zeros cannot distinguish
+    right arithmetic from garbage; structured weights can.
+
+    Norm-style weights sit near 1.0 (a zero RMS-norm gain annihilates the residual
+    stream); everything else is small-scale noise so activations neither vanish nor
+    saturate over a few layers.
     """
     npy_shape = tuple(reversed(shape))
-    data = np.zeros(npy_shape, dtype=np.float32)
+    seed = int.from_bytes(hashlib.sha256(name.encode()).digest()[:8], "little")
+    rng = np.random.default_rng(seed)
+    if name.endswith("_norm.weight") or name.endswith("gscale.weight"):
+        data = (1.0 + 0.02 * rng.standard_normal(npy_shape)).astype(np.float32)
+    elif name.endswith(".bias"):
+        data = (0.01 * rng.standard_normal(npy_shape)).astype(np.float32)
+    else:
+        data = (0.05 * rng.standard_normal(npy_shape)).astype(np.float32)
     writer.add_tensor(name, data)
 
 # global
@@ -121,7 +145,7 @@ add_tensor("output.weight", (N_EMBD, N_VOCAB))
 for i in range(N_LAYER):
     is_swa = bool(SWA_PATTERN[i])
     rel_extent = REL_EXTENT_SWA if is_swa else REL_EXTENT
-    kvw = N_HEAD * HEAD_DIM
+    kvw = N_HEAD_KV * HEAD_DIM
     add_tensor(f"blk.{i}.attn_norm.weight", (N_EMBD,))
     add_tensor(f"blk.{i}.attn_q.weight", (N_EMBD, N_HEAD * HEAD_DIM))
     add_tensor(f"blk.{i}.attn_k.weight", (N_EMBD, kvw))
