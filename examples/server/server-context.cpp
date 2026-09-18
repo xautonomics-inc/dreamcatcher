@@ -1127,6 +1127,7 @@ bool server_context::launch_slot_with_task(server_slot& slot, server_task& task)
     auto stream_opt = json_value(data, "stream_options", json::object());
     slot.params.include_usage = json_value(stream_opt, "include_usage", false);
     slot.params.cache_prompt = json_value(data, "cache_prompt", true);
+    slot.params.return_tokens = json_value(data, "return_tokens", false);
     slot.params.n_predict = json_value(data, "n_predict", json_value(data, "max_tokens", json_value(data, "max_completion_tokens", defaults.n_predict)));
     slot.saturate_predict = json_value(data, "saturate_predict", false);
     slot.sparams.top_k = json_value(data, "top_k", default_sparams.top_k);
@@ -2550,6 +2551,19 @@ void server_context::send_final_response(server_slot& slot) {
             slot.generated_token_probs.begin(),
             slot.generated_token_probs.end());
         res->data["completion_probabilities"] = probs_vector_to_json(ctx, res->probs_output);
+    }
+
+    // Generated token ids, on request -- the same field mainline emits for "return_tokens".
+    // generated_token_probs holds EVERY sampled token (server_slot::add_token_string is
+    // unconditional), so this is complete even when n_probs == 0 and no
+    // completion_probabilities are emitted. Off by default: no existing client asked for it.
+    if (slot.params.return_tokens) {
+        std::vector<llama_token> ids;
+        ids.reserve(slot.generated_token_probs.size());
+        for (const auto & t : slot.generated_token_probs) {
+            ids.push_back(t.tok);
+        }
+        res->data["tokens"] = ids;
     }
 
     if (slot.oaicompat) {

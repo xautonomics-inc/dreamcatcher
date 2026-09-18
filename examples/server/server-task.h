@@ -52,6 +52,7 @@ struct slot_params {
     bool stream = true;
     bool include_usage = false;
     bool cache_prompt = true; // remember the prompt to avoid reprocessing all prompt
+    bool return_tokens = false; // include the generated token ids in the final response (mainline-compatible)
 
     int32_t  n_keep = 0; // number of tokens to keep from initial prompt
     int32_t  n_discard = 0; // number of tokens after n_keep that may be discarded when shifting context, 0 defaults to half
