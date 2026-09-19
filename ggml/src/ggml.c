@@ -4405,6 +4405,7 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "CONV_2D_DW",
 
     "FLASH_ATTN_EXT",
+    "FLASH_ATTN_EXT_BANDED",
     "FLASH_ATTN_BACK",
     "SSM_CONV",
     "SSM_SCAN",
@@ -4465,7 +4466,7 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "GATED_DELTA_NET",
 };
 
-static_assert(GGML_OP_COUNT == 122, "GGML_OP_COUNT != 122");
+static_assert(GGML_OP_COUNT == 123, "GGML_OP_COUNT != 123");
 
 static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "none",
@@ -4546,6 +4547,7 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
     "conv_2d_dw(x)",
 
     "flash_attn_ext(x)",
+    "flash_attn_ext_banded(x)",
     "flash_attn_back(x)",
     "ssm_conv(x)",
     "ssm_scan(x)",
@@ -4607,7 +4609,7 @@ static const char * GGML_OP_SYMBOL[GGML_OP_COUNT] = {
 
 };
 
-static_assert(GGML_OP_COUNT == 122, "GGML_OP_COUNT != 122");
+static_assert(GGML_OP_COUNT == 123, "GGML_OP_COUNT != 123");
 
 static_assert(GGML_OP_POOL_COUNT == 2, "GGML_OP_POOL_COUNT != 2");
 
@@ -10903,7 +10905,7 @@ struct ggml_tensor * ggml_flash_attn_ext(
 void ggml_flash_attn_ext_set_prec(
         struct ggml_tensor * a,
         enum ggml_prec       prec) {
-    GGML_ASSERT(a->op == GGML_OP_FLASH_ATTN_EXT);
+    GGML_ASSERT(a->op == GGML_OP_FLASH_ATTN_EXT || a->op == GGML_OP_FLASH_ATTN_EXT_BANDED);
 
     const int32_t prec_i32 = (int32_t) prec;
 
@@ -10924,6 +10926,97 @@ void ggml_flash_attn_ext_add_sinks(
     GGML_ASSERT(sinks->type == GGML_TYPE_F32);
 
     a->src[4] = sinks;
+}
+
+// ggml_flash_attn_ext_banded
+//
+// D3 (Inkling): flash attention whose additive bias is read from a relative-position band
+// instead of a dense [n_kv] row. ggml op scaffold (enum, name table, dispatch, task count)
+// by gwen; constructor, position/window extension and the CPU kernel by ben. Layout and
+// score convention follow the mainline reference's ggml_flash_attn_ext_banded.
+
+struct ggml_tensor * ggml_flash_attn_ext_banded(
+        struct ggml_context * ctx,
+        struct ggml_tensor  * q,
+        struct ggml_tensor  * k,
+        struct ggml_tensor  * v,
+        struct ggml_tensor  * mask,
+        struct ggml_tensor  * rel_logits,
+        float                 scale,
+        int64_t               rel_extent) {
+    GGML_ASSERT(ggml_can_mul_mat(k, q));
+    GGML_ASSERT(q->type == GGML_TYPE_F32);
+    GGML_ASSERT(q->ne[3] == k->ne[3]);
+    GGML_ASSERT(q->ne[3] == v->ne[3]);
+    GGML_ASSERT(q->ne[2] % k->ne[2] == 0);
+    GGML_ASSERT(q->ne[2] % v->ne[2] == 0);
+
+    GGML_ASSERT(rel_logits != NULL);
+    GGML_ASSERT(rel_logits->type == GGML_TYPE_F32 ||
+                rel_logits->type == GGML_TYPE_F16 ||
+                rel_logits->type == GGML_TYPE_BF16);
+    GGML_ASSERT(rel_extent > 0);
+    GGML_ASSERT(rel_logits->ne[0] == rel_extent);
+    GGML_ASSERT(rel_logits->ne[1] == q->ne[2] && "rel_logits dim 1 must be n_head");
+    GGML_ASSERT(rel_logits->ne[2] >= q->ne[1] && "rel_logits dim 2 must cover n_q");
+    GGML_ASSERT(rel_logits->ne[3] == 1 || rel_logits->ne[3] == q->ne[3]);
+
+    if (mask) {
+        GGML_ASSERT(mask->type == GGML_TYPE_F16);
+        GGML_ASSERT(ggml_is_contiguous(mask));
+        GGML_ASSERT(mask->ne[1] >= q->ne[1] && "mask must cover n_q rows");
+        GGML_ASSERT(q->ne[2] % mask->ne[2] == 0);
+        GGML_ASSERT(q->ne[3] % mask->ne[3] == 0);
+    }
+
+    bool is_node = false;
+    if (q->grad || k->grad || v->grad) {
+        is_node = true;
+    }
+
+    // result is { v->ne[0], n_head, n_q, n_batch } == permute(0, 2, 1, 3) of the natural layout
+    int64_t ne[4] = { v->ne[0], q->ne[2], q->ne[1], q->ne[3] };
+    struct ggml_tensor * result = ggml_new_tensor(ctx, GGML_TYPE_F32, 4, ne);
+
+    float params[] = { scale, 0.0f, 0.0f };
+    ggml_set_op_params(result, params, sizeof(params));
+    ggml_set_op_params_i32(result, 3, GGML_PREC_F32);       // the band saturates an f16 accumulator: always f32
+    ggml_set_op_params_i32(result, 4, 0);                   // window (0 = none)
+    ggml_set_op_params_i32(result, 5, (int32_t) rel_extent);
+
+    result->op     = GGML_OP_FLASH_ATTN_EXT_BANDED;
+    result->grad   = is_node ? ggml_dup_tensor(ctx, result) : NULL;
+    result->src[0] = q;
+    result->src[1] = k;
+    result->src[2] = v;
+    result->src[3] = mask;
+    result->src[5] = rel_logits;
+
+    return result;
+}
+
+void ggml_flash_attn_ext_banded_set_pos(
+        struct ggml_tensor * a,
+        struct ggml_tensor * q_pos,
+        struct ggml_tensor * kv_pos) {
+    GGML_ASSERT(a->op == GGML_OP_FLASH_ATTN_EXT_BANDED);
+    GGML_ASSERT((q_pos == NULL) == (kv_pos == NULL) && "pass both positions or neither");
+    if (q_pos) {
+        GGML_ASSERT(q_pos->type  == GGML_TYPE_I32 && ggml_is_contiguous(q_pos));
+        GGML_ASSERT(kv_pos->type == GGML_TYPE_I32 && ggml_is_contiguous(kv_pos));
+        GGML_ASSERT(ggml_nelements(q_pos)  >= a->src[0]->ne[1] && "q_pos must cover n_q");
+        GGML_ASSERT(ggml_nelements(kv_pos) >= a->src[1]->ne[1] && "kv_pos must cover n_kv");
+    }
+    a->src[6] = q_pos;
+    a->src[7] = kv_pos;
+}
+
+void ggml_flash_attn_ext_banded_set_window(
+        struct ggml_tensor * a,
+        int32_t              window) {
+    GGML_ASSERT(a->op == GGML_OP_FLASH_ATTN_EXT_BANDED);
+    GGML_ASSERT(window >= 0);
+    ggml_set_op_params_i32(a, 4, window);
 }
 
 // ggml_flash_attn_back
@@ -23297,6 +23390,268 @@ static void ggml_compute_forward_flash_attn_ext(
     }
 }
 
+// ggml_compute_forward_flash_attn_ext_banded
+//
+// Generic CPU kernel for GGML_OP_FLASH_ATTN_EXT_BANDED (D3, Inkling). One query row per
+// iteration, online softmax over n_kv (ref: https://arxiv.org/pdf/2112.05682.pdf), the
+// same structure as ggml_compute_forward_flash_attn_ext_f16 minus alibi/softcap/sinks/iqk.
+//
+//   dist  = q_pos[iq1] - kv_pos[ic]                 if the position inputs are set
+//         = iq1 + (n_kv - n_q) - ic                  otherwise (mainline column convention)
+//   skip  if window > 0 and dist outside [0, window)  (SWA cutoff, -INF)
+//   skip  if mask[iq1][ic] == -INF                    (causal / empty cell / other sequence)
+//   score = (q.k)*scale + (0 <= dist < rel_extent ? rel[dist, head, iq1, iq3 % ne3] : 0) + mask
+//
+// The accumulator is always f32: the unnormalised band bias overflows an f16 VKQ.
+static inline float ggml_flash_attn_ext_banded_load(const struct ggml_tensor * rel, const char * row, int64_t dist) {
+    const char * ptr = row + (size_t) dist * rel->nb[0];
+    switch (rel->type) {
+        case GGML_TYPE_F32:  return *(const float *) ptr;
+        case GGML_TYPE_F16:  return GGML_FP16_TO_FP32(*(const ggml_fp16_t *) ptr);
+        case GGML_TYPE_BF16: return GGML_BF16_TO_FP32(*(const ggml_bf16_t *) ptr);
+        default: GGML_ABORT("banded flash attention: unsupported rel_logits type");
+    }
+}
+
+static void ggml_compute_forward_flash_attn_ext_banded_f32(
+        const struct ggml_compute_params * params,
+        struct ggml_tensor * dst) {
+
+    const struct ggml_tensor * q      = dst->src[0];
+    const struct ggml_tensor * k      = dst->src[1];
+    const struct ggml_tensor * v      = dst->src[2];
+    const struct ggml_tensor * mask   = dst->src[3];
+    const struct ggml_tensor * rel    = dst->src[5];
+    const struct ggml_tensor * q_pos  = dst->src[6];
+    const struct ggml_tensor * kv_pos = dst->src[7];
+
+    GGML_TENSOR_LOCALS(int64_t, neq, q,   ne)
+    GGML_TENSOR_LOCALS(size_t,  nbq, q,   nb)
+    GGML_TENSOR_LOCALS(int64_t, nek, k,   ne)
+    GGML_TENSOR_LOCALS(size_t,  nbk, k,   nb)
+    GGML_TENSOR_LOCALS(int64_t, nev, v,   ne)
+    GGML_TENSOR_LOCALS(size_t,  nbv, v,   nb)
+    GGML_TENSOR_LOCALS(int64_t, ne,  dst, ne)
+    GGML_TENSOR_LOCALS(size_t,  nb,  dst, nb)
+
+    const int ith = params->ith;
+    const int nth = params->nth;
+
+    const int64_t Dk = nek0;
+    const int64_t Dv = nev0;
+    const int64_t N  = neq1;
+
+    GGML_ASSERT(ne0 == Dv);
+    GGML_ASSERT(ne2 == N);
+
+    // input tensor rows must be contiguous
+    GGML_ASSERT(nbq0 == ggml_type_size(q->type));
+    GGML_ASSERT(nbk0 == ggml_type_size(k->type));
+    GGML_ASSERT(nbv0 == ggml_type_size(v->type));
+
+    GGML_ASSERT(neq0 == Dk);
+    GGML_ASSERT(neq1 == N);
+
+    // dst cannot be transposed or permuted
+    GGML_ASSERT(nb0 == sizeof(float));
+    GGML_ASSERT(nb0 <= nb1);
+    GGML_ASSERT(nb1 <= nb2);
+    GGML_ASSERT(nb2 <= nb3);
+
+    GGML_ASSERT(rel != NULL);
+    GGML_ASSERT(rel->ne[1] == neq2);
+    GGML_ASSERT(rel->ne[2] >= neq1);
+    GGML_ASSERT(rel->ne[3] == 1 || rel->ne[3] == neq3);
+    GGML_ASSERT((q_pos == NULL) == (kv_pos == NULL));
+    if (q_pos) {
+        GGML_ASSERT(q_pos->type == GGML_TYPE_I32 && kv_pos->type == GGML_TYPE_I32);
+        GGML_ASSERT(ggml_nelements(q_pos) >= neq1 && ggml_nelements(kv_pos) >= nek1);
+    }
+
+    // broadcast factors
+    const int64_t rk2 = neq2/nek2;
+    const int64_t rk3 = neq3/nek3;
+
+    const int64_t rv2 = neq2/nev2;
+    const int64_t rv3 = neq3/nev3;
+
+    // parallelize by q rows using ggml_vec_dot_f32
+
+    // total rows in q
+    const int nr = neq1*neq2*neq3;
+
+    // rows per thread
+    const int dr = (nr + nth - 1)/nth;
+
+    // row range for this thread
+    const int ir0 = dr*ith;
+    const int ir1 = MIN(ir0 + dr, nr);
+
+    float scale = 1.0f;
+    memcpy(&scale, (float *) dst->op_params + 0, sizeof(float));
+
+    const int32_t window     = ggml_get_op_params_i32(dst, 4);
+    const int64_t rel_extent = rel->ne[0];
+    GGML_ASSERT(ggml_get_op_params_i32(dst, 5) == (int32_t) rel_extent);
+
+    enum ggml_type    const k_vec_dot_type = type_traits[k->type].vec_dot_type;
+    ggml_from_float_t const q_to_vec_dot   = type_traits[k_vec_dot_type].from_float;
+    ggml_vec_dot_t    const kq_vec_dot     = type_traits[k->type].vec_dot;
+    ggml_to_float_t   const v_to_float     = type_traits[v->type].to_float;
+
+    // an f32 K has no from_float converter in this tree: dot it against the raw f32 q instead
+    const bool k_is_f32 = k->type == GGML_TYPE_F32;
+
+    GGML_ASSERT((k_is_f32                 || q_to_vec_dot) && "fattn banded: unsupported K-type");
+    GGML_ASSERT((v->type == GGML_TYPE_F32 || v_to_float  ) && "fattn banded: unsupported V-type");
+
+    const int64_t Dkv = MAX(Dk, Dv);
+
+    const int32_t * qp = q_pos  ? (const int32_t *) q_pos->data  : NULL;
+    const int32_t * kp = kv_pos ? (const int32_t *) kv_pos->data : NULL;
+
+    // loop over n_batch and n_head
+    for (int ir = ir0; ir < ir1; ++ir) {
+        // q indices
+        const int iq3 = ir/(neq2*neq1);
+        const int iq2 = (ir - iq3*neq2*neq1)/neq1;
+        const int iq1 = (ir - iq3*neq2*neq1 - iq2*neq1);
+
+        float S = 0.0f;      // sum
+        float M = -INFINITY; // maximum KQ value
+
+        float       * VKQ32 = (float       *) params->wdata + ith*(3*Dkv + CACHE_LINE_SIZE_F32); // FP32 VKQ accumulator
+        float       * V32   =                 (VKQ32 + 1*Dkv); // (temporary) FP32 V buffer
+        ggml_fp16_t * Q_q   = (ggml_fp16_t *) (VKQ32 + 2*Dkv); // (temporary) buffer for Q converted to quantized/FP16
+
+        memset(VKQ32, 0, Dkv*sizeof(float));
+
+        const ggml_fp16_t * mp = mask ? (const ggml_fp16_t *)((const char *) mask->data
+                + iq1*mask->nb[1] + (iq2 % mask->ne[2])*mask->nb[2] + (iq3 % mask->ne[3])*mask->nb[3]) : NULL;
+
+        // this query row's band: rel[:, head, q_row, batch]
+        const char * rel_row = (const char *) rel->data
+                + (size_t) iq2*rel->nb[1] + (size_t) iq1*rel->nb[2] + (size_t) (iq3 % rel->ne[3])*rel->nb[3];
+
+        // query position: explicit, or the tail-aligned column index
+        const int64_t qpos = qp ? (int64_t) qp[iq1] : (int64_t) iq1 + (nek1 - neq1);
+
+        // k indices
+        const int ik3 = iq3 / rk3;
+        const int ik2 = iq2 / rk2;
+
+        // v indices
+        const int iv3 = iq3 / rv3;
+        const int iv2 = iq2 / rv2;
+
+        const float * pq = (const float *) ((char *) q->data + (iq1*nbq1 + iq2*nbq2 + iq3*nbq3));
+        if (!k_is_f32) {
+            q_to_vec_dot(pq, Q_q, Dk);
+        }
+
+        // online softmax / attention
+        // loop over n_kv and n_head_kv
+        for (int64_t ic = 0; ic < nek1; ++ic) {
+            int64_t dist;
+            if (kp) {
+                const int32_t kpos = kp[ic];
+                if (kpos < 0) {
+                    continue; // empty cell
+                }
+                dist = qpos - (int64_t) kpos;
+            } else {
+                dist = qpos - ic;
+            }
+
+            // sliding-window cutoff: outside [0, window) is -INF
+            if (window > 0 && (dist < 0 || dist >= (int64_t) window)) {
+                continue;
+            }
+
+            const float mv = mp ? GGML_FP16_TO_FP32(mp[ic]) : 0.0f;
+            if (mv == -INFINITY) {
+                continue;
+            }
+
+            float s; // KQ value
+
+            const char * k_data = (const char *) k->data + ( ic*nbk1 + ik2*nbk2 + ik3*nbk3);
+            if (k_is_f32) {
+                ggml_vec_dot_f32(Dk, &s, 0, (const float *) k_data, 0, pq, 0, 1);
+            } else {
+                kq_vec_dot(Dk, &s, 0, k_data, 0, Q_q, 0, 1);
+            }
+
+            s = s*scale; // scale KQ value
+
+            // banded relative-position bias: in-band distances only, no bias outside
+            if (dist >= 0 && dist < rel_extent) {
+                s += ggml_flash_attn_ext_banded_load(rel, rel_row, dist);
+            }
+
+            s += mv; // apply mask
+
+            const float Mold = M;
+
+            float ms = 1.0f; // upon new higher max val, scale VKQ and KQ sum with this value
+            float vs = 1.0f; // post-softmax KQ value, expf(s - M)
+
+            const char * v_data = ((const char *) v->data + (ic*nbv1 + iv2*nbv2 + iv3*nbv3));
+
+            if (s > M) {
+                // s is new maximum, ms < 1.0f, vs == expf(s - s) == 1.0f
+                M = s;
+                ms = expf(Mold - M);
+
+                // V = V*expf(Mold - M)
+                ggml_vec_scale_f32(Dv, VKQ32, ms);
+            } else {
+                // no new maximum, ms == 1.0f, vs != 1.0f
+                vs = expf(s - M);
+            }
+
+            if (v->type == GGML_TYPE_F32) {
+                // V += v*expf(s - M)
+                ggml_vec_mad_f32(Dv, VKQ32, (const float *) v_data, vs);
+            } else {
+                v_to_float(v_data, V32, Dv);
+                ggml_vec_mad_f32(Dv, VKQ32, V32, vs);
+            }
+
+            S = S*ms + vs; // scale and increment sum with partial sum
+        }
+
+        // V /= S
+        const float S_inv = S == 0.0f ? 0.0f : 1.0f/S;
+        ggml_vec_scale_f32(Dv, VKQ32, S_inv);
+
+        // dst indices
+        const int i1 = iq1;
+        const int i2 = iq2;
+        const int i3 = iq3;
+
+        // permute(0, 2, 1, 3)
+        memcpy((char *) dst->data + (i3*ne2*ne1 + i2 + i1*ne1)*nb1, VKQ32, nb1);
+    }
+}
+
+static void ggml_compute_forward_flash_attn_ext_banded(
+        const struct ggml_compute_params * params,
+        struct ggml_tensor * dst) {
+    switch (dst->op_params[3]) {
+        case GGML_PREC_DEFAULT:
+        case GGML_PREC_F32:
+            {
+                // uses F32 accumulators
+                ggml_compute_forward_flash_attn_ext_banded_f32(params, dst);
+            } break;
+        default:
+            {
+                GGML_ABORT("fatal error");
+            }
+    }
+}
+
 // ggml_compute_forward_flash_attn_back
 
 static void ggml_compute_forward_flash_attn_back_f32(
@@ -26870,6 +27225,10 @@ static int ggml_compute_forward(struct ggml_compute_params * params, struct ggml
             {
                 ggml_compute_forward_flash_attn_ext(params, tensor);
             } break;
+        case GGML_OP_FLASH_ATTN_EXT_BANDED:
+            {
+                ggml_compute_forward_flash_attn_ext_banded(params, tensor);
+            } break;
         case GGML_OP_FLASH_ATTN_BACK:
             {
                 int32_t t = ggml_get_op_params_i32(tensor, 0);
@@ -28007,6 +28366,7 @@ static void ggml_compute_backward(struct ggml_context * ctx, struct ggml_tensor 
         case GGML_OP_HC_POST:
         case GGML_OP_MASK_TO_IDX:
         case GGML_OP_LATENT_ATTN:
+        case GGML_OP_FLASH_ATTN_EXT_BANDED:
         case GGML_OP_DS4_COMP:
             {
                 GGML_ABORT("fatal error"); // TODO: not implemented
@@ -28824,6 +29184,7 @@ static int ggml_get_n_tasks(struct ggml_tensor * node, int n_threads) {
         case GGML_OP_ARGSORT_THRESH:
         case GGML_OP_GROUPED_TOPK:
         case GGML_OP_FLASH_ATTN_EXT:
+        case GGML_OP_FLASH_ATTN_EXT_BANDED:
         case GGML_OP_FLASH_ATTN_BACK:
         case GGML_OP_SSM_CONV:
         case GGML_OP_SSM_SCAN:
@@ -29066,6 +29427,15 @@ struct ggml_cplan ggml_graph_plan(const struct ggml_cgraph * cgraph, int n_threa
                     size_t size = iqk_fa_work_buffer_size(node, n_tasks);
                     cur = MAX(cur, size);
 #endif
+                } break;
+            case GGML_OP_FLASH_ATTN_EXT_BANDED:
+                {
+                    const int64_t Dk = node->src[0]->ne[0];
+                    const int64_t Dv = node->src[2]->ne[0];
+                    const int64_t D  = MAX(Dk, Dv);
+
+                    // per thread: f32 VKQ accumulator + f32 V row + converted Q row (+ a cache line)
+                    cur = (3*D + CACHE_LINE_SIZE_F32)*sizeof(float)*n_tasks;
                 } break;
             case GGML_OP_LATENT_ATTN:
                 {
