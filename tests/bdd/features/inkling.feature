@@ -57,19 +57,36 @@ Feature: Serve the Inkling (TML) architecture end to end
     And the KV keys include dense_block_count, d_rel, rel_extent, rel_extent_swa, shortconv_kernel, logit_scale_denom, log_scaling_n_floor, log_scaling_alpha, vocab_size, unpadded_vocab_size, block_count, attention.sliding_window, attention.sliding_window_pattern, attention.head_count_kv, feed_forward_length, expert_feed_forward_length, expert_count, expert_used_count, expert_shared_count, expert_weights_scale, and expert_gating_func
     And no forward pass has run
 
-  @d2 @parity @pending
-  Scenario: CPU greedy generation matches the D0 oracle token-for-token
-    Given the D0 oracle dump "greedy-64x8.json" exists in the INKLING_ORACLE_DIR directory
-    When the model runs greedy generation on CPU for the D0 fixed prompt set
-    Then every generated token ID equals the oracle token IDs
-    And the per-position log-probabilities (logprob, top_logprobs) match the oracle within tolerance
+  # Cross-lineage envelope (D2 amendment, 2026-09-19): the ik-lineage build is
+  # NOT expected to reproduce the D0 oracle token-for-token — 4-decimal
+  # perplexity equality across kernel lineages is unmeetable, so the old
+  # token-for-token and 4-dp assertions are replaced. The D2 gate is an
+  # envelope, pre-registered in the INKLING_ENVELOPE_JSON file (env-bound like
+  # every runner variable here, fail closed when unset): per-metric bound and
+  # ceiling, each with the provenance of the calibration run that produced it.
+  # The feature file pins no calibration figure of its own; the only numbers
+  # here are the sha-pinned oracle values. Token-for-token equality stays a
+  # gate ONLY for builds matching the oracle CPU feature set (GGML_LLAMAFILE,
+  # GGML_CPU_REPACK, declared via INKLING_ORACLE_FEATURES); otherwise the run
+  # records it as a diagnostic. An envelope whose band exceeds its declared
+  # ceiling is surfaced as a finding, not absorbed into the envelope.
 
   @d2 @parity @pending
-  Scenario: 4-chunk perplexity reproduces the oracle per-chunk values
+  Scenario: CPU greedy generation stays within the cross-lineage envelope of the D0 oracle
+    Given the D0 oracle dump "greedy-64x8.json" exists in the INKLING_ORACLE_DIR directory
+    And a pre-registered cross-lineage envelope exists in the INKLING_ENVELOPE_JSON file
+    When the model runs greedy generation on CPU for the D0 fixed prompt set
+    Then the greedy metrics declared in the envelope sit inside their pre-registered bounds
+    And token-for-token equality is asserted only when the build features match the oracle build (GGML_LLAMAFILE, GGML_CPU_REPACK) and is otherwise recorded as a diagnostic, not a gate
+
+  @d2 @parity @pending
+  Scenario: 4-chunk perplexity falls within the envelope around the oracle per-chunk values
     Given the D0 oracle dump "kld-base-4x2048.bin" exists in the INKLING_ORACLE_DIR directory
+    And a pre-registered cross-lineage envelope exists in the INKLING_ENVELOPE_JSON file
     When the model computes perplexity on CPU over the D0 4-chunk split
-    Then the four per-chunk perplexity values equal the oracle 94.3665, 83.6386, 78.6291, 72.6183
-    And the final chunk equals the recorded overall perplexity 72.6183
+    Then the four per-chunk perplexity values fall within the envelope band around the oracle 94.3665, 83.6386, 78.6291, 72.6183
+    And the final chunk stays within the envelope band around the recorded overall perplexity 72.6183
+    And an envelope whose band exceeds its declared ceiling is surfaced as a finding, not absorbed into the envelope
 
   @d3 @cache @pending
   Scenario: The hybrid attention+recurrent cache serves banded SWA windows
