@@ -1389,6 +1389,9 @@ struct vk_op_rope_push_constants {
     uint32_t nb13;
     uint32_t a_offset;
     uint32_t d_offset;
+    // ik flipped rope (op_params[15] == 1): the rotary dims sit at the END of the head, so the
+    // shader rotates [rope_offset, rope_offset + n_dims) and copies [0, rope_offset). 0 = mainline rope.
+    uint32_t rope_offset;
 };
 static_assert(sizeof(vk_op_rope_push_constants) <= 128, "sizeof(vk_op_rope_push_constants) must be <= 128");
 
@@ -11568,6 +11571,10 @@ static vk_op_rope_push_constants ggml_vk_make_rope_constants(const ggml_tensor *
     }
 
     const bool is_imrope = mode == GGML_ROPE_TYPE_IMROPE;
+    // ik flipped rope (deepseek4 q/k/compressor/attn-output ropes keep the rotary dims at the END of the
+    // head): same predicate as ggml_compute_forward_rope_f32 in ggml.c and rope.cu
+    const bool is_flipped = dst->op_params[15] == 1 && mode != GGML_ROPE_TYPE_VISION && (mode & GGML_ROPE_TYPE_MROPE) == 0;
+    const uint32_t rope_offset = is_flipped ? (uint32_t)(src0->ne[0] - n_dims) : 0;
 
     float corr_dims[2];
     ggml_rope_yarn_corr_dims(n_dims, n_ctx_orig, freq_base, beta_fast, beta_slow, corr_dims);
@@ -11593,6 +11600,7 @@ static vk_op_rope_push_constants ggml_vk_make_rope_constants(const ggml_tensor *
         nb01, nb02, nb03,
         nb11, nb12, nb13,
         0, 0, // a_offset, d_offset filled in by init_pushconst_tensor_offsets
+        rope_offset,
     };
 
     return rope;
@@ -17419,6 +17427,10 @@ void * comp_result;
 size_t comp_size;
 size_t comp_nb[GGML_MAX_DIMS];
 size_t check_counter = 0;
+// ARGSORT: CPU copy of the sorted values, so equal keys that come out in a different order (a bitonic
+// sort on the GPU vs the CPU sort) are not reported as a miscompute
+static void * comp_argsort_src = nullptr;
+static size_t comp_argsort_src_nb[GGML_MAX_DIMS];
 static void ggml_vk_check_results_0(ggml_backend_vk_context * ctx, ggml_cgraph * cgraph, int tensor_idx) {
     ggml_tensor * tensor = cgraph->nodes[tensor_idx + ctx->num_additional_fused_ops];
     if (tensor->op == GGML_OP_TRANSPOSE || tensor->op == GGML_OP_SET_ROWS) {
@@ -17510,6 +17522,14 @@ static void ggml_vk_check_results_0(ggml_backend_vk_context * ctx, ggml_cgraph *
             tensor_clone = ggml_flash_attn_ext(ggml_ctx, src_clone[0], src_clone[1], src_clone[2], src_clone[3], params[0], params[1], params[2]);
             if (src_clone[4]) {
                 ggml_flash_attn_ext_add_sinks(tensor_clone, src_clone[4]);
+            }
+            // ik: the reference has to be the node the CPU graph really runs. op_params[4] carries the
+            // GGML_FLASH_ATTN_EXT_IQK_DISABLED hint (deepseek4 sets it because iqk FA has no sinks; a clone
+            // without it runs iqk FA, drops the sinks and reports a bogus avg_err ~0.1) and src[5] is the
+            // mask_to_index selection iqk reads.
+            tensor_clone->op_params[4] = tensor->op_params[4];
+            if (src_clone[5]) {
+                tensor_clone->src[5] = src_clone[5];
             }
         } else if (tensor->op == GGML_OP_MUL_MAT) {
             tensor_clone = ggml_mul_mat(ggml_ctx, src_clone[0], src_clone[1]);
@@ -17616,9 +17636,12 @@ static void ggml_vk_check_results_0(ggml_backend_vk_context * ctx, ggml_cgraph *
                 if (tensor->op == GGML_OP_ROPE) {
                     tensor_clone = ggml_rope_ext(ggml_ctx, src_clone[0], src_clone[1], src_clone[2], n_dims, mode, n_ctx_orig_ggml, freq_base, freq_scale, ext_factor, attn_factor, beta_fast, beta_slow);
                 } else {
-                    GGML_ABORT("ik-port: clone for ggml_rope_ext_back not available (op never emitted by ik graphs)");
+                    // deepseek4 re-tags its attention-output rope as ROPE_BACK (inverse rotation)
+                    tensor_clone = ggml_rope_back(ggml_ctx, src_clone[0], src_clone[1], src_clone[2], n_dims, mode, n_ctx_orig_ggml, freq_base, freq_scale, ext_factor, attn_factor, beta_fast, beta_slow);
                 }
             }
+            // ik flipped rope flag (rotate the LAST n_dims); ggml.c and rope.cu read it, so the reference must too
+            tensor_clone->op_params[15] = tensor->op_params[15];
         } else if (tensor->op == GGML_OP_UNARY) {
             switch (ggml_get_unary_op(tensor)) {
             case GGML_UNARY_OP_EXP:
@@ -17862,6 +17885,17 @@ static void ggml_vk_check_results_0(ggml_backend_vk_context * ctx, ggml_cgraph *
     memcpy(comp_result, tensor_clone->data, comp_size);
     memcpy(comp_nb, tensor_clone->nb, sizeof(size_t) * GGML_MAX_DIMS);
 
+    if (comp_argsort_src != nullptr) {
+        free(comp_argsort_src);
+        comp_argsort_src = nullptr;
+    }
+    if (tensor->op == GGML_OP_ARGSORT && src_clone[0] != nullptr && src_clone[0]->type == GGML_TYPE_F32) {
+        const size_t sz = ggml_nbytes(src_clone[0]);
+        comp_argsort_src = malloc(sz);
+        memcpy(comp_argsort_src, src_clone[0]->data, sz);
+        memcpy(comp_argsort_src_nb, src_clone[0]->nb, sizeof(size_t) * GGML_MAX_DIMS);
+    }
+
     for (auto m : cloned_mallocs) {
         free(m);
     }
@@ -17932,6 +17966,19 @@ static void ggml_vk_check_results_1(ggml_backend_vk_context * ctx, ggml_cgraph *
                         } else if (tensor->type == GGML_TYPE_I32) {
                             correct = *(int32_t *) ((char *) comp_result + i3*comp_nb[3] + i2*comp_nb[2] + i1*comp_nb[1] + i0*comp_nb[0]);
                             result  = *(int32_t *) ((char *) tensor_data + i3*tensor->nb[3] + i2*tensor->nb[2] + i1*tensor->nb[1] + i0*tensor->nb[0]);
+                            // argsort is only defined up to ties: two equal keys may legitimately swap places
+                            if (tensor->op == GGML_OP_ARGSORT && comp_argsort_src != nullptr && result != correct && src0 != nullptr) {
+                                const int64_t ir = (int64_t) result;
+                                const int64_t ic = (int64_t) correct;
+                                if (ir >= 0 && ir < src0->ne[0] && ic >= 0 && ic < src0->ne[0]) {
+                                    const char * row = (const char *) comp_argsort_src + i3*comp_argsort_src_nb[3] + i2*comp_argsort_src_nb[2] + i1*comp_argsort_src_nb[1];
+                                    const float vr = *(const float *) (row + ir*comp_argsort_src_nb[0]);
+                                    const float vc = *(const float *) (row + ic*comp_argsort_src_nb[0]);
+                                    if (vr == vc) {
+                                        result = correct;
+                                    }
+                                }
+                            }
                         } else if (tensor->type == GGML_TYPE_I64) {
                             correct = *(int64_t *) ((char *) comp_result + i3*comp_nb[3] + i2*comp_nb[2] + i1*comp_nb[1] + i0*comp_nb[0]);
                             result  = *(int64_t *) ((char *) tensor_data + i3*tensor->nb[3] + i2*tensor->nb[2] + i1*tensor->nb[1] + i0*tensor->nb[0]);

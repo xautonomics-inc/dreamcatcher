@@ -50,19 +50,21 @@ void rope_norm(const uint i0, const uint i1, const uint i2, const uint i3, rope_
     }
     idst += p.d_offset;
 
-    if (i0 >= p.n_dims) {
+    if (i0 < p.rope_offset || i0 >= p.rope_offset + p.n_dims) {
         rope_data_d[idst + 0] = ROPE_D_TYPE(rope_data_a[ix + 0]);
         rope_data_d[idst + 1] = ROPE_D_TYPE(rope_data_a[ix + 1]);
 
         return;
     }
 
-    const float theta_base = rope_data_pos[i2] * pow(p.theta_scale, i0/2.0f);
+    // ik flipped rope (rope_offset = ne00 - n_dims) rotates the LAST n_dims; the theta index counts from 0
+    const uint j0 = i0 - p.rope_offset;
+    const float theta_base = rope_data_pos[i2] * pow(p.theta_scale, j0/2.0f);
 
-    const float freq_factor = p.has_ff != 0 ? rope_data_ff[i0/2] : 1.0f;
+    const float freq_factor = p.has_ff != 0 ? rope_data_ff[j0/2] : 1.0f;
 
     float cos_theta, sin_theta;
-    rope_yarn(theta_base / freq_factor, i0, cos_theta, sin_theta, p);
+    rope_yarn(theta_base / freq_factor, j0, cos_theta, sin_theta, p);
 
     const float x0 = float(rope_data_a[ix + 0]);
     const float x1 = float(rope_data_a[ix + 1]);
@@ -87,25 +89,29 @@ void rope_neox(const uint i0, const uint i1, const uint i2, const uint i3, rope_
     }
     idst += p.d_offset;
 
-    if (i0 >= p.n_dims) {
+    if (i0 < p.rope_offset || i0 >= p.rope_offset + p.n_dims) {
         rope_data_d[idst + i0/2 + 0] = ROPE_D_TYPE(rope_data_a[ix + i0/2 + 0]);
         rope_data_d[idst + i0/2 + 1] = ROPE_D_TYPE(rope_data_a[ix + i0/2 + 1]);
 
         return;
     }
 
-    const float theta_base = rope_data_pos[i2] * pow(p.theta_scale, i0/2.0f);
+    // ik flipped rope (rope_offset = ne00 - n_dims): ggml.c pairs (rope_offset + j0/2, rope_offset + j0/2 + n_dims/2)
+    // with the theta index j0 counting from 0; ix/idst already carry i0/2 = j0/2 + rope_offset/2
+    const uint j0 = i0 - p.rope_offset;
+    const uint sh = p.rope_offset/2;
+    const float theta_base = rope_data_pos[i2] * pow(p.theta_scale, j0/2.0f);
 
-    const float freq_factor = p.has_ff != 0 ? rope_data_ff[i0/2] : 1.0f;
+    const float freq_factor = p.has_ff != 0 ? rope_data_ff[j0/2] : 1.0f;
 
     float cos_theta, sin_theta;
-    rope_yarn(theta_base / freq_factor, i0, cos_theta, sin_theta, p);
+    rope_yarn(theta_base / freq_factor, j0, cos_theta, sin_theta, p);
 
-    const float x0 = float(rope_data_a[ix + 0]);
-    const float x1 = float(rope_data_a[ix + p.n_dims/2]);
+    const float x0 = float(rope_data_a[ix + sh]);
+    const float x1 = float(rope_data_a[ix + sh + p.n_dims/2]);
 
-    rope_data_d[idst + 0]          = ROPE_D_TYPE(x0*cos_theta - x1*sin_theta);
-    rope_data_d[idst + p.n_dims/2] = ROPE_D_TYPE(x0*sin_theta + x1*cos_theta);
+    rope_data_d[idst + sh]              = ROPE_D_TYPE(x0*cos_theta - x1*sin_theta);
+    rope_data_d[idst + sh + p.n_dims/2] = ROPE_D_TYPE(x0*sin_theta + x1*cos_theta);
 }
 
 
