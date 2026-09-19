@@ -914,7 +914,7 @@ def then_d6_load_and_generation(bdd_context):
     prompt_eval = re.search(r"prompt eval time\s*=\s*[0-9.]+ ms /\s*(\d+) tokens", cli_log)
     if prompt_eval is None or int(prompt_eval.group(1)) < 1:
         failures.append("llama-cli reported no prompt tokens evaluated (no forward pass ran)")
-    eval_runs = re.search(r"(?<!prompt )eval time\s*=\s*[0-9.]+ ms /\s*(\d+) runs", cli_log)
+    eval_runs = re.search(r"(?<!prompt )eval time\s*=\s*[0-9.]+ ms /\s*(\d+) (?:runs|tokens)", cli_log)
     if eval_runs is None or int(eval_runs.group(1)) < 1:
         failures.append(f"llama-cli reported no eval runs: generation did not complete ({D6_N_PREDICT} tokens requested)")
     if error_line := _d6_first_match(D6_LOAD_ERROR_PATTERNS, cli_log):
