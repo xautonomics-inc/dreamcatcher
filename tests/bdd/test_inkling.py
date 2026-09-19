@@ -1,11 +1,12 @@
 """Bind the implemented Inkling scenarios.
 
-Only the two @d2 parity scenarios and the @fail-closed scenario have step
-definitions (steps/inkling_steps.py). The D1/D3/D4a/D4b/D4c/D6 lanes stay
-unbound until their steps exist — a whole-file scenarios() bind here would
-fail collection with StepDefinitionNotFoundError for the whole feature, so
-bind by scenario title. A later whole-file scenarios() call skips these as
-already bound (pytest-bdd dedupes on (feature filename, scenario name)).
+Only the two @d2 parity scenarios, the @d6 @ci synthetic-fixture smoke and
+the @fail-closed scenario have step definitions (steps/inkling_steps.py).
+The D1/D3/D4a/D4b/D4c lanes stay unbound until their steps exist — a
+whole-file scenarios() bind here would fail collection with
+StepDefinitionNotFoundError for the whole feature, so bind by scenario
+title. A later whole-file scenarios() call skips these as already bound
+(pytest-bdd dedupes on (feature filename, scenario name)).
 """
 
 from pytest_bdd import scenario
@@ -36,3 +37,15 @@ def test_inkling_d2_ppl_parity():
 )
 def test_inkling_fail_closed():
     """Fail closed: invalid INKLING_ORACLE_DIR aborts before any launch."""
+
+
+# D6 (@d6 @ci): the CI job bdd-inkling-fixture in .gitlab-ci.yml targets this
+# node id alone. It needs no oracle and no full model — only the in-repo
+# generator plus CPU-built llama-perplexity / llama-cli (LLAMA_PERPLEXITY_BIN
+# / LLAMA_CLI_BIN); without them it skips, and the CI job refuses a skip.
+@scenario(
+    "features/inkling.feature",
+    "The synthetic-GGUF CI fixture smoke-tests arch load and graph",
+)
+def test_inkling_d6_ci_fixture():
+    """D6: the synthetic Inkling fixture loads and its graph runs on CPU."""
