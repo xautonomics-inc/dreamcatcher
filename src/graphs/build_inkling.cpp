@@ -55,10 +55,11 @@ static ggml_tensor * inkling_sconv(
         ggml_tensor  * state_all,    // {n_embd_r, n_state_slots}
         int64_t        off,          // float offset of this stream in the packed cell
         int64_t        d_conv,       // K - 1
-        ggml_tensor  * seq_ids,      // I32 {1, n_tokens}
-        ggml_tensor  * reset_mul) {  // F32 {1}: 0 -> start from a zero state, 1 -> carry the cached state
+        ggml_tensor  * seq_ids,      // I32 {n_state_slots, n_tokens}
+        ggml_tensor  * reset_mul) {  // F32 {1, n_state_slots}: 0 -> start from a zero state, 1 -> carry the cached state
     const int64_t w = x->ne[0];
     const int64_t T = x->ne[1];
+    const int64_t n_state_slots = state_all->ne[1];
 
     GGML_ASSERT(state_all != nullptr);
     GGML_ASSERT(state_all->type == GGML_TYPE_F32);
@@ -70,15 +71,16 @@ static ggml_tensor * inkling_sconv(
     // ggml_ssm_conv wants an f32 kernel; the checkpoint stores these f16/quantised.
     ggml_tensor * wc = ggml_reshape_2d(ctx, ggml_cast(ctx, kernel, GGML_TYPE_F32), d_conv + 1, w);
 
-    // this stream's slice of the packed cell, slot 0 (single-sequence decode)
-    ggml_tensor * state_flat = ggml_view_2d(ctx, state_all, d_conv*w, 1,
+    // this stream's slice of the packed cell, across all state slots
+    ggml_tensor * state_flat = ggml_view_2d(ctx, state_all, d_conv*w, n_state_slots,
             state_all->nb[1], off*esz);
 
     // The reset is an INPUT, not a graph shape: INKLING is in neither llm_arch_is_hybrid nor
     // llm_arch_is_recurrent, so a pos-0 graph is NOT discarded from reuse (llama.cpp reset_previous)
     // and a baked ggml_scale(state, 0) would re-run on every same-shape batch that follows.
+    // reset_mul is {1, n_state_slots}, broadcasting along dim 0.
     ggml_tensor * state_in = ggml_mul(ctx, state_flat, reset_mul);
-    ggml_tensor * states   = ggml_reshape_3d(ctx, state_in, d_conv, w, 1);
+    ggml_tensor * states   = ggml_reshape_3d(ctx, state_in, d_conv, w, n_state_slots);
 
     // fused: conv_raw carries the conv output followed by the updated taps
     ggml_tensor * conv_raw = ggml_ssm_conv(ctx, states, x, wc, seq_ids, nullptr);
@@ -89,12 +91,13 @@ static ggml_tensor * inkling_sconv(
     // built-in residual, no activation (reference: y = x3 + conv_out)
     ggml_tensor * out = ggml_add(ctx, x, conv);
 
-    // write the trailing d_conv columns back into the cache slot
-    ggml_tensor * new_states = ggml_view_2d(ctx, conv_raw, d_conv, w,
-            (d_conv + 1)*ggml_element_size(conv_raw),
-            (1 + w*T)*ggml_element_size(conv_raw));
+    // write the trailing d_conv columns back into the cache slots across all sequences
+    ggml_tensor * new_states = ggml_view_3d(ctx, conv_raw, d_conv, w, n_state_slots,
+            (d_conv + 1)*esz,
+            (d_conv + 1)*w*esz,
+            (1 + w*T)*esz);
     ggml_tensor * new_states_cont = ggml_cont(ctx, new_states);
-    ggml_tensor * new_state_flat  = ggml_reshape_2d(ctx, new_states_cont, d_conv*w, 1);
+    ggml_tensor * new_state_flat  = ggml_reshape_2d(ctx, new_states_cont, d_conv*w, n_state_slots);
     ggml_build_forward_expand(gf, ggml_cpy(ctx, new_state_flat, state_flat));
 
     return out;
@@ -170,14 +173,18 @@ ggml_cgraph * llm_build_context::build_inkling() {
     ggml_tensor * KQ_mask     = build_inp_KQ_mask();
     ggml_tensor * KQ_mask_swa = (hparams.n_swa > 0 && has_swa_layer) ? build_inp_KQ_mask_swa() : nullptr;
 
+    GGML_ASSERT(!kv_self.s_l.empty() && kv_self.s_l[0] != nullptr);
+    const int64_t n_state_slots = kv_self.s_l[0]->ne[1];
+    GGML_ASSERT(n_state_slots > 0);
+
     // sequence ids for ggml_ssm_conv, shared by all four conv sites
-    lctx.inp_s_seq_qnext = ggml_new_tensor_2d(ctx0, GGML_TYPE_I32, 1, n_tokens);
+    lctx.inp_s_seq_qnext = ggml_new_tensor_2d(ctx0, GGML_TYPE_I32, n_state_slots, n_tokens);
     cb(lctx.inp_s_seq_qnext, "inp_s_seq_qnext", -1);
     ggml_set_input(lctx.inp_s_seq_qnext);
     ggml_tensor * seq_ids = lctx.inp_s_seq_qnext;
 
-    // conv-state reset multiplier, filled per batch in llama_set_inputs (0 at pos 0, else 1)
-    lctx.inp_inkling_reset = ggml_new_tensor_1d(ctx0, GGML_TYPE_F32, 1);
+    // conv-state reset multiplier, filled per sequence slot in llama_set_inputs (0 at pos 0, else 1)
+    lctx.inp_inkling_reset = ggml_new_tensor_2d(ctx0, GGML_TYPE_F32, 1, n_state_slots);
     cb(lctx.inp_inkling_reset, "inp_inkling_reset", -1);
     ggml_set_input(lctx.inp_inkling_reset);
     ggml_tensor * reset_mul = lctx.inp_inkling_reset;
