@@ -6390,6 +6390,31 @@ static void llama_set_inputs(llama_context & lctx, const llama_batch & batch) {
         fill_rel_idx(lctx.inp_inkling_rel_idx_swa, hp.inkling_rel_extent_swa);
     }
 
+    // Banded flash-attention (D3) positions: the kernel derives the band index as
+    // q_pos - kv_pos per (token, cell), the same d = p1 - cell.pos the gather above buckets.
+    // Cells with no position read -1 and are skipped by the kernel (the KQ mask -INFs them
+    // too). These are INPUTS, not baked op params, so a reused graph (same shape, moved
+    // kv_head) stays correct.
+    if (lctx.inp_inkling_q_pos) {
+        GGML_ASSERT(ggml_backend_buffer_is_host(lctx.inp_inkling_q_pos->buffer));
+        GGML_ASSERT(batch.pos != nullptr);
+        int32_t * data = (int32_t *) lctx.inp_inkling_q_pos->data;
+        GGML_ASSERT(lctx.inp_inkling_q_pos->ne[0] >= (int64_t) batch.n_tokens);
+        for (int64_t i = 0; i < (int64_t) batch.n_tokens; ++i) {
+            data[i] = (int32_t) batch.pos[i];
+        }
+    }
+    if (lctx.inp_inkling_kv_pos) {
+        GGML_ASSERT(ggml_backend_buffer_is_host(lctx.inp_inkling_kv_pos->buffer));
+        int32_t * data = (int32_t *) lctx.inp_inkling_kv_pos->data;
+        const int64_t n_kv_dst = lctx.inp_inkling_kv_pos->ne[0];
+        GGML_ASSERT(n_kv_dst <= (int64_t) lctx.kv_self.cells.size());
+        for (int64_t j = 0; j < n_kv_dst; ++j) {
+            const auto & cell = lctx.kv_self.cells[j];
+            data[j] = cell.pos >= 0 ? (int32_t) cell.pos : -1;
+        }
+    }
+
     // padded vocab rows get -inf so samplers never emit a padded id
     if (lctx.inp_inkling_vocab_mask) {
         const auto & hp = lctx.model.hparams;
