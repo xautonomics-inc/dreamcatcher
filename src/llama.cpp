@@ -6308,25 +6308,48 @@ static void llama_set_inputs(llama_context & lctx, const llama_batch & batch) {
 
     if (lctx.inp_s_seq_qnext) {
         const int64_t n_tokens = batch.n_tokens;
+        const int64_t ne0 = lctx.inp_s_seq_qnext->ne[0];
 
         GGML_ASSERT(ggml_backend_buffer_is_host(lctx.inp_s_seq_qnext->buffer));
         int32_t * data = (int32_t *) lctx.inp_s_seq_qnext->data;
 
         for (int64_t j = 0; j < n_tokens; ++j) {
-            // qwen3next and openPangu use a single local recurrent state slot.
-            data[j] = 0;
+            if (lctx.model.arch == LLM_ARCH_INKLING) {
+                int32_t seq = (batch.seq_id && batch.seq_id[j]) ? batch.seq_id[j][0] : 0;
+                if (seq < 0 || seq >= ne0) {
+                    seq = 0;
+                }
+                for (int64_t s = 0; s < ne0; ++s) {
+                    data[j*ne0 + s] = seq;
+                }
+            } else {
+                // qwen3next and openPangu use a single local recurrent state slot.
+                data[j] = 0;
+            }
         }
     }
 
     // ---- inkling (private arch) inputs ----
 
     // conv-state reset: 0 zeroes the packed short-conv state before this batch, 1 carries it.
-    // Per BATCH (pos of the first token), the same rule the baked reset used; per-sequence
-    // addressing is #51.
+    // Per-sequence addressing (#51): sequence slot s is reset to 0 if any token j in the batch
+    // belonging to sequence s has pos == 0, else 1.
     if (lctx.inp_inkling_reset) {
         GGML_ASSERT(ggml_backend_buffer_is_host(lctx.inp_inkling_reset->buffer));
-        const bool fresh = batch.pos && batch.pos[0] == 0;
-        ((float *) lctx.inp_inkling_reset->data)[0] = fresh ? 0.0f : 1.0f;
+        float * reset = (float *) lctx.inp_inkling_reset->data;
+        const int64_t n_slots = lctx.inp_inkling_reset->ne[1];
+        for (int64_t s = 0; s < n_slots; ++s) {
+            reset[s] = 1.0f;
+        }
+        for (int64_t j = 0; j < (int64_t) batch.n_tokens; ++j) {
+            const llama_pos pos = batch.pos ? batch.pos[j] : (batch.all_pos_0 + (llama_pos) j*batch.all_pos_1);
+            if (pos == 0) {
+                const llama_seq_id seq = (batch.seq_id && batch.seq_id[j]) ? batch.seq_id[j][0] : 0;
+                if (seq >= 0 && seq < n_slots) {
+                    reset[seq] = 0.0f;
+                }
+            }
+        }
     }
 
     // log-N attention scale: tau = 1 + alpha*log(max((pos+1)/n_floor, 1)); applied to q and to
