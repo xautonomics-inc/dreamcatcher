@@ -30,11 +30,29 @@
 // fused_mmad are both on); a client run with -no-fmoe / -no-mmad needs the
 // matching switch here.
 //
+// Not every architecture builds its routed tail through llm_build_moe_ffn.
+// Inkling (src/graphs/build_inkling.cpp) routes over a joint softmax across
+// routed AND shared experts and applies the routed tail directly, unfused:
+//
+//   --moe-form inkling
+//     gate = mul_mat_id(gate_exps, hidden, ids)
+//     up   = mul_mat_id(up_exps,   hidden, ids)
+//     h    = mul(silu(gate), up)
+//     e    = mul(mul_mat_id(down_exps, h, ids), weights)
+//     out  = e[0] + e[1] + ... + e[k-1]        (one add per expert, in order)
+//
+// --fmoe / --mmad do not apply to that form. --moe-form auto (the default)
+// picks it when the GGUF's general.architecture is "inkling" and the
+// llm_build_moe_ffn form otherwise, so a server started on an Inkling file
+// mirrors the right tail without an extra switch. The shared experts are
+// never loaded here in either form: the server finds tensors by the
+// ffn_*_exps names only, and the client keeps ffn_*_shexp in-process.
+//
 // Usage:
 //   llama-expert-server --role expert-server --model M.gguf \
 //       --expert-layers 1-47 --listen 9666 [--threads 32] [--host 0.0.0.0]
-//       [--fmoe 0|1] [--mmad 0|1] [--swiglu-limit F] [--no-prewarm]
-//       [--device cpu|gpu] [--gpu-chunk N]
+//       [--moe-form auto|moe_ffn|inkling] [--fmoe 0|1] [--mmad 0|1]
+//       [--swiglu-limit F] [--no-prewarm] [--device cpu|gpu] [--gpu-chunk N]
 
 #include "ggml.h"
 #include "ggml-alloc.h"
@@ -69,6 +87,12 @@ static double now_ms() {
     return std::chrono::duration<double, std::milli>(
             std::chrono::steady_clock::now().time_since_epoch()).count();
 }
+
+// Which client-side routed-expert tail this server mirrors (see the header).
+enum moe_form {
+    MOE_FORM_MOE_FFN,   // llm_build_moe_ffn: --fmoe / --mmad select the fused variants
+    MOE_FORM_INKLING,   // build_inkling: separate mul_mat_id, mul(silu(gate), up), per-expert adds
+};
 
 struct expert_layer {
     ggml_tensor * gate_exps = nullptr; // [n_embd, n_ff_exp, n_expert]
@@ -125,6 +149,7 @@ int main(int argc, char ** argv) {
     float       swiglu_limit = 0.0f;    // nonzero only on the few archs that carry limits
     int         gpu_chunk    = 0;       // --gpu-chunk: layers per GPU buffer (0 = one buffer for all)
     bool        use_gpu      = false;   // --device gpu: expert compute on the first non-CPU backend
+    std::string moe_form_arg = "auto";  // --moe-form: auto (from general.architecture) | moe_ffn | inkling
 
     for (int i = 1; i < argc; ++i) {
         std::string a = argv[i];
@@ -142,6 +167,7 @@ int main(int argc, char ** argv) {
         else if (a == "--fmoe")               use_fmoe    = atoi(nx("--fmoe")) != 0;
         else if (a == "--mmad")               use_mmad    = atoi(nx("--mmad")) != 0;
         else if (a == "--swiglu-limit")       swiglu_limit = (float) atof(nx("--swiglu-limit"));
+        else if (a == "--moe-form")           moe_form_arg = nx("--moe-form");
         else if (a == "--device")             { std::string d = nx("--device");
                                                 if (d == "gpu") use_gpu = true;
                                                 else if (d != "cpu") { fprintf(stderr, "expert-server: --device must be cpu or gpu\n"); return 1; } }
@@ -152,8 +178,12 @@ int main(int argc, char ** argv) {
     if (model_path.empty() || listen_port <= 0 || layers_spec.empty()) {
         fprintf(stderr, "usage: llama-expert-server --role expert-server --model M.gguf "
                         "--expert-layers a-b[,c,...] --listen PORT [--threads N] [--host H] "
-                        "[--fmoe 0|1] [--mmad 0|1] [--swiglu-limit F] [--device cpu|gpu] "
-                        "[--gpu-chunk N] [--no-prewarm]\n");
+                        "[--moe-form auto|moe_ffn|inkling] [--fmoe 0|1] [--mmad 0|1] "
+                        "[--swiglu-limit F] [--device cpu|gpu] [--gpu-chunk N] [--no-prewarm]\n");
+        return 1;
+    }
+    if (moe_form_arg != "auto" && moe_form_arg != "moe_ffn" && moe_form_arg != "inkling") {
+        fprintf(stderr, "expert-server: --moe-form must be auto, moe_ffn or inkling (got '%s')\n", moe_form_arg.c_str());
         return 1;
     }
 
@@ -236,6 +266,23 @@ int main(int argc, char ** argv) {
         }
     }
 
+    // ---- which routed tail to mirror ---------------------------------------
+    std::string arch;
+    {
+        const int aid = gguf_find_key(shards[0].gguf, "general.architecture");
+        if (aid >= 0 && gguf_get_kv_type(shards[0].gguf, aid) == GGUF_TYPE_STRING) {
+            arch = gguf_get_val_str(shards[0].gguf, aid);
+        }
+    }
+    moe_form form = MOE_FORM_MOE_FFN;
+    if (moe_form_arg == "inkling" || (moe_form_arg == "auto" && arch == "inkling")) {
+        form = MOE_FORM_INKLING;
+    }
+    if (moe_form_arg == "auto") {
+        fprintf(stderr, "expert-server: general.architecture '%s' -> --moe-form %s\n",
+                arch.c_str(), form == MOE_FORM_INKLING ? "inkling" : "moe_ffn");
+    }
+
     // where a tensor's bytes live in the file, so GPU mode can read them explicitly
     std::map<const ggml_tensor *, std::pair<int, size_t>> src_of;   // tensor -> (fd, absolute offset)
 
@@ -282,6 +329,11 @@ int main(int argc, char ** argv) {
         fprintf(stderr, "expert-server: --expert-layers selected no layers\n");
         return 1;
     }
+    if (form == MOE_FORM_INKLING) {
+        // build_inkling never fuses: neither switch has a client-side counterpart
+        use_fmoe = false;
+        use_mmad = false;
+    }
     if (use_fmoe && layers[0].up_exps && layers[0].gate_exps &&
             layers[0].up_exps->type != layers[0].gate_exps->type) {
         // the client falls back to the separate path in exactly this case
@@ -290,10 +342,10 @@ int main(int argc, char ** argv) {
     }
 
     fprintf(stderr, "expert-server: %d layers, n_embd %" PRId64 ", n_ff_exp %" PRId64 ", n_expert %" PRId64
-                    ", %.2f GiB expert weights (%s, %s, fmoe %d, mmad %d)\n",
+                    ", %.2f GiB expert weights (%s, %s, form %s, fmoe %d, mmad %d)\n",
             n_loaded, n_embd, n_ff_exp, n_expert, bytes / (1024.0*1024.0*1024.0),
             ggml_type_name(exps_type), prewarm ? "prewarming" : "cold mmap",
-            (int) use_fmoe, (int) use_mmad);
+            form == MOE_FORM_INKLING ? "inkling" : "moe_ffn", (int) use_fmoe, (int) use_mmad);
 
     if (prewarm && !use_gpu) {
         // fault the expert pages in now rather than on the first request
@@ -518,7 +570,7 @@ int main(int argc, char ** argv) {
                 ? (size_t) 512 * 1024 + 128 * ggml_tensor_overhead() + ggml_graph_overhead()
                 : n_hid * sizeof(float)                                   // hidden
                 + n_ids * (sizeof(int32_t) + sizeof(float))               // ids + weights
-                + 3 * (size_t) n_ff_exp * n_ids * sizeof(float)           // up, gate, act
+                + 4 * (size_t) n_ff_exp * n_ids * sizeof(float)           // up, gate, silu, act
                 + 2 * (size_t) c_embd   * n_ids * sizeof(float)           // down, weighted
                 + (size_t) (n_topk + 4) * n_hid * sizeof(float)           // adds chain slack
                 + (size_t) 512 * 1024 + 128 * ggml_tensor_overhead();
@@ -531,6 +583,29 @@ int main(int argc, char ** argv) {
             ggml_tensor * weights = ggml_new_tensor_3d(ctx, GGML_TYPE_F32, 1, n_topk, n_tok);
             ggml_set_input(hidden); ggml_set_input(ids); ggml_set_input(weights);
 
+            ggml_tensor * moe_out;
+            if (form == MOE_FORM_INKLING) {
+                // op-for-op mirror of build_inkling's routed-expert tail
+                // (src/graphs/build_inkling.cpp): same ops, same order, same
+                // shapes, so the same CPU kernels produce the same bytes.
+                ggml_tensor * gate = ggml_mul_mat_id(ctx, L.gate_exps, hidden, ids);  // [n_ff, k, T]
+                ggml_tensor * up   = ggml_mul_mat_id(ctx, L.up_exps,   hidden, ids);  // [n_ff, k, T]
+                ggml_tensor * h    = ggml_mul(ctx, ggml_silu(ctx, gate), up);          // [n_ff, k, T]
+
+                ggml_tensor * experts = ggml_mul_mat_id(ctx, L.down_exps, h, ids);    // [n_embd, k, T]
+                experts = ggml_mul(ctx, experts, weights);                            // [n_embd, k, T]
+
+                moe_out = nullptr;
+                for (int i = 0; i < n_topk; ++i) {
+                    ggml_tensor * e = ggml_view_2d(ctx, experts, c_embd, n_tok,
+                            experts->nb[2], (size_t) i * experts->nb[1]);
+                    moe_out = moe_out ? ggml_add(ctx, moe_out, e) : e;
+                }
+                if (!ggml_is_contiguous(moe_out)) {
+                    // k == 1 leaves a strided view; the reply is a flat [n_embd, T]
+                    moe_out = ggml_cont(ctx, moe_out);
+                }
+            } else {
             // op-for-op mirror of llm_build_moe_ffn's routed-expert tail
             ggml_tensor * par;
             if (use_fmoe) {
@@ -544,13 +619,13 @@ int main(int argc, char ** argv) {
 
             ggml_tensor * down = ggml_mul_mat_id(ctx, L.down_exps, par, ids);        // [n_embd, k, T]
 
-            ggml_tensor * moe_out;
             if (use_mmad) {
                 moe_out = ggml_mul_multi_add(ctx, down, weights);                    // [n_embd, T]
             } else {
                 ggml_tensor * wexp = ggml_mul(ctx, down, weights);                   // [n_embd, k, T]
                 moe_out = ggml_multi_add(ctx,
                         ggml_view_2d(ctx, wexp, c_embd, n_tok, wexp->nb[2], 0), n_topk);
+            }
             }
             ggml_set_output(moe_out);
 

@@ -1,6 +1,7 @@
 #include "../llama-build-context.h"
 #include "../llama-model.h"
 #include "../llama-context.h"
+#include "../llama-experts-remote.h"
 
 #include <vector>
 
@@ -495,7 +496,26 @@ ggml_cgraph * llm_build_context::build_inkling() {
             // helper derives its own weights from [n_expert, n_tokens] probs and cannot
             // express inkling's softmax(logsigmoid(.)) taken jointly over routed+shared.
             ggml_tensor * moe_out = nullptr;
-            {
+            if (llama_experts_remote_get_cfg().layer_covered(il)) {
+                // --- expert-tensor disaggregation (D4c) --------------------------
+                // An expert-server owns this layer's routed experts: ship { hidden,
+                // top-k ids, top-k weights } and receive the accumulated routed-expert
+                // output in place of the tail below. The router, the top-k selection
+                // and the joint softmax(logsigmoid) weights above ran locally through
+                // the untouched ops, the shared experts further down stay local, and
+                // the server mirrors the routed tail op-for-op on the same CPU kernels
+                // (expert-server --moe-form inkling), so the split is bit-exact
+                // against the in-process run. The exps tensors were TENSOR_SKIPped at
+                // load (create_tensors_helper::create_tensor), so they are null here
+                // and must not be touched. Same custom op and contract as the
+                // llm_build_moe_ffn intercept: a = hidden [n_embd, n_tokens] f32,
+                // b = ids [n_expert_used, n_tokens] i32, c = weights [1, n_expert_used, n_tokens].
+                moe_out = ggml_map_custom3(ctx0, ffn_in, selected, weights,
+                        llama_experts_remote_custom_cb, 1, (void *)(intptr_t) il);
+                cb(moe_out, "inkling_moe_out_remote", il);
+            } else {
+                GGML_ASSERT(layer.ffn_gate_exps && layer.ffn_up_exps && layer.ffn_down_exps &&
+                        "inkling: routed expert tensors missing on a layer no expert-server covers");
                 ggml_tensor * gate = llm_build_lora_mm_id(lctx, ctx0, layer.ffn_gate_exps, xr, selected);
                 ggml_tensor * up   = llm_build_lora_mm_id(lctx, ctx0, layer.ffn_up_exps,   xr, selected);
                 ggml_tensor * h    = ggml_mul(ctx0, ggml_silu(ctx0, gate), up);
