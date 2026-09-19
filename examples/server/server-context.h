@@ -74,6 +74,7 @@ struct server_slot {
     std::vector<int32_t> i_batch_dft;
 
     std::vector<completion_token_output> generated_token_probs;
+    std::vector<llama_token> generated_tokens;   // every sampled id in order, for "return_tokens"
 
 
     bool infill = false;
