@@ -138,6 +138,10 @@ def _resolve_envelope(bdd_context) -> None:
     state: dict = {"data": None, "unmet": None}
     raw = os.environ.get("INKLING_ENVELOPE_JSON")
     if not raw:
+        default_path = Path(__file__).resolve().parent.parent / "fixtures" / "inkling-envelope.json"
+        if default_path.is_file():
+            raw = str(default_path)
+    if not raw:
         state["unmet"] = "INKLING_ENVELOPE_JSON is not bound"
     elif not (path := Path(raw)).is_file():
         state["unmet"] = f"INKLING_ENVELOPE_JSON {raw} is not a readable file"
