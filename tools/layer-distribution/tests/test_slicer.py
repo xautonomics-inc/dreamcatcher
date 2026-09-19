@@ -336,3 +336,98 @@ def test_slice_big_endian_without_tensor_endianess_refuses(
         ValueError, match=r"Big-endian GGUF source.*cannot be sliced.*tensor_endianess"
     ):
         slice_model(str(model_path), out_dir)
+
+
+def test_slice_inkling_dense_block_count_preservation(tmp_path: Path) -> None:
+    """Verify Inkling models with arch.dense_block_count are read and emitted correctly.
+
+    1. Slicer reads source inkling.dense_block_count when leading_dense_block_count is absent.
+    2. Slicer emits inkling.dense_block_count (not inkling.leading_dense_block_count) in sliced GGUFs.
+    3. Dense count is properly rebased: blocks within dense range have count > 0,
+       blocks beyond dense range have count == 0.
+    """
+    import gguf
+
+    model_path = tmp_path / "inkling-model.gguf"
+    w = GGUFWriter(model_path, "inkling")
+    n_blocks = 4
+    dense_count = 2
+    tensor_dim = 4
+    w.add_uint32("inkling.block_count", n_blocks)
+    w.add_uint32("inkling.context_length", 64)
+    w.add_uint32("inkling.embedding_length", tensor_dim)
+    w.add_float32("inkling.attention.layer_norm_rms_epsilon", 1e-5)
+    w.add_uint32("inkling.attention.head_count", 1)
+    w.add_uint32("inkling.feed_forward_length", tensor_dim)
+    w.add_uint32("inkling.dense_block_count", dense_count)
+    w.add_uint32("inkling.nextn_predict_layers", 0)
+    w.add_string("general.name", "synthetic-inkling-model")
+
+    n_vocab = 256 + 4
+    w.add_tokenizer_model("llama")
+    tokens = [f"<0x{i:02X}>" for i in range(256)] + ["P", "i", "n", "g"]
+    w.add_token_list(tokens)
+    w.add_token_scores([0.0] * n_vocab)
+    w.add_token_types([2] * 256 + [1] * 4)
+    w.add_bos_token_id(256)
+    w.add_eos_token_id(256)
+    w.add_unk_token_id(256)
+
+    d_embd = np.arange(n_vocab * tensor_dim, dtype=np.float32).reshape((n_vocab, tensor_dim))
+    w.add_tensor_info("token_embd.weight", d_embd.shape, d_embd.dtype, d_embd.nbytes)
+    block_tensors = []
+    for i in range(n_blocks):
+        mat = np.arange(tensor_dim * tensor_dim, dtype=np.float32).reshape((tensor_dim, tensor_dim)) * (i + 2)
+        vec = np.ones((tensor_dim,), dtype=np.float32) * (i + 2)
+        for name, arr in (
+            ("attn_norm", vec), ("attn_q", mat), ("attn_k", mat),
+            ("attn_v", mat), ("attn_output", mat), ("ffn_norm", vec),
+            ("ffn_gate", mat), ("ffn_down", mat), ("ffn_up", mat),
+        ):
+            w.add_tensor_info(f"blk.{i}.{name}.weight", arr.shape, arr.dtype, arr.nbytes)
+            block_tensors.append(arr)
+
+    d_out = np.arange(tensor_dim, dtype=np.float32) * 10
+    w.add_tensor_info("output_norm.weight", d_out.shape, d_out.dtype, d_out.nbytes)
+    d_log = np.arange(tensor_dim * n_vocab, dtype=np.float32).reshape((n_vocab, tensor_dim))
+    w.add_tensor_info("output.weight", d_log.shape, d_log.dtype, d_log.nbytes)
+
+    w.write_header_to_file()
+    w.write_kv_data_to_file()
+    w.write_ti_data_to_file()
+    w.write_tensor_data(d_embd)
+    for t in block_tensors:
+        w.write_tensor_data(t)
+    w.write_tensor_data(d_out)
+    w.write_tensor_data(d_log)
+    w.close()
+
+    out_dir = tmp_path / "inkling-library"
+    manifest = slice_model(str(model_path), out_dir)
+
+    # Verify blk-00000.gguf (layer 0, within dense range [0, 2))
+    r0 = gguf.GGUFReader(str(out_dir / "blk-00000.gguf"))
+    assert "inkling.dense_block_count" in r0.fields
+    assert "inkling.leading_dense_block_count" not in r0.fields
+    f0 = r0.fields["inkling.dense_block_count"]
+    assert f0.parts[f0.data[0]][0] == 1  # rebased: 1 dense block in [0, 1)
+
+    # Verify blk-00001.gguf (layer 1, within dense range [0, 2))
+    r1 = gguf.GGUFReader(str(out_dir / "blk-00001.gguf"))
+    assert "inkling.dense_block_count" in r1.fields
+    assert "inkling.leading_dense_block_count" not in r1.fields
+    f1 = r1.fields["inkling.dense_block_count"]
+    assert f1.parts[f1.data[0]][0] == 1
+
+    # Verify blk-00002.gguf (layer 2, outside dense range [0, 2))
+    r2 = gguf.GGUFReader(str(out_dir / "blk-00002.gguf"))
+    assert "inkling.dense_block_count" in r2.fields
+    assert "inkling.leading_dense_block_count" not in r2.fields
+    f2 = r2.fields["inkling.dense_block_count"]
+    assert f2.parts[f2.data[0]][0] == 0  # rebased: 0 dense blocks in [2, 3)
+
+    # Verify full library verification passes
+    report = verify(out_dir, manifest)
+    assert report.passed is True
+    assert report.hash_verified is True
+

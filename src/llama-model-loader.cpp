@@ -613,9 +613,16 @@ llama_model_loader::llama_model_loader(const std::string & fname, int ncmoe, boo
         const int32_t source_blk_count = parts[0].source_blk_count;
 
         // window-shape keys, summed across part files
-        static const enum llm_kv shape_kv[3] = { LLM_KV_BLOCK_COUNT, LLM_KV_LEADING_DENSE_BLOCK_COUNT, LLM_KV_NEXTN_PREDICT_LAYERS };
-        int64_t sum_shape[3]  = { 0, 0, 0 };
-        bool    have_shape[3] = { false, false, false };
+        static const enum llm_kv shape_kv[4] = {
+            LLM_KV_BLOCK_COUNT,
+            LLM_KV_LEADING_DENSE_BLOCK_COUNT,
+            LLM_KV_NEXTN_PREDICT_LAYERS,
+            LLM_KV_INKLING_DENSE_BLOCK_COUNT,
+        };
+        static const size_t n_shape_kv = sizeof(shape_kv) / sizeof(shape_kv[0]);
+        int64_t sum_shape[4]  = { 0, 0, 0, 0 };
+        bool    have_shape[4] = { false, false, false, false };
+
 
         auto gguf_get_int = [](const gguf_context * g, int kid) -> int64_t {
             switch (gguf_get_kv_type(g, kid)) {
@@ -659,7 +666,7 @@ llama_model_loader::llama_model_loader(const std::string & fname, int ncmoe, boo
             files.emplace_back(new llama_file(fname_part, "rb"));
             contexts.emplace_back(ctx);
 
-            for (int s = 0; s < 3; ++s) {
+            for (size_t s = 0; s < n_shape_kv; ++s) {
                 const std::string key = llm_kv(shape_kv[s]);
                 const int kid = gguf_find_key(meta_part, key.c_str());
                 if (kid >= 0) {
@@ -721,7 +728,7 @@ llama_model_loader::llama_model_loader(const std::string & fname, int ncmoe, boo
 
         // inject the summed window-shape values as internal overrides (an explicit
         // user override for the same key wins)
-        for (int s = 0; s < 3; ++s) {
+        for (size_t s = 0; s < n_shape_kv; ++s) {
             if (!have_shape[s]) {
                 continue;
             }
@@ -737,8 +744,9 @@ llama_model_loader::llama_model_loader(const std::string & fname, int ncmoe, boo
             kv_overrides.emplace(key, o);
         }
 
+        const int64_t n_dense = have_shape[1] ? sum_shape[1] : (have_shape[3] ? sum_shape[3] : 0);
         LLAMA_LOG_INFO("%s: assembled %zu parts: block_count=%d leading_dense_block_count=%d nextn_predict_layers=%d (%zu tensors)\n",
-                __func__, n_parts, (int) sum_shape[0], (int) sum_shape[1], (int) sum_shape[2], weights.size());
+                __func__, n_parts, (int) sum_shape[0], (int) n_dense, (int) sum_shape[2], weights.size());
     } else {
         meta = gguf_init_from_file(fname.c_str(), params);
         if (!meta) {
