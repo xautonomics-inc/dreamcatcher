@@ -23,6 +23,7 @@ tests/bdd/
 │   ├── layer-library.feature  # Slicing, Blake2b-128 hashing, distribution planner
 │   ├── expert-server.feature  # Remote MoE handshake, parity, routing, failures
 │   ├── gslot-runtime.feature  # Compute leases, handoff, contention, fail-open
+│   ├── inkling.feature        # Inkling arch lanes D1-D6; D6 = CPU synthetic-fixture smoke (CI)
 │   ├── release-checks.feature # Serve smoke, coherence, checksums, manifest test
 │   ├── serve-library.feature  # llama-server --model-dir serving and windowing
 │   ├── stage-ring.feature     # Multi-host pipeline rings and handoffs
@@ -31,6 +32,7 @@ tests/bdd/
 │   ├── common_steps.py        # Shared library and HTTP steps
 │   ├── expert_server_steps.py # Real expert-server and expert-check processes
 │   ├── gslot_runtime_steps.py # Real gslot daemon and C++ client-header probe
+│   ├── inkling_steps.py       # D2 envelope gate; D6 in-step synthetic GGUF + llama-perplexity/llama-cli smoke
 │   ├── layer_library_steps.py # Slicer and distribution planner steps
 │   ├── release_checks_steps.py # Real release scripts and manifest test binary
 │   ├── serve_library_steps.py # Live llama-server process checks
@@ -79,6 +81,9 @@ Scenario steps support the following environment overrides:
 | :--- | :--- | :--- |
 | `LLAMA_SERVER_BIN` | Absolute path to built `llama-server` | `build/bin/llama-server` |
 | `LLAMA_STAGE_RUNNER_BIN` | Absolute path to built `llama-stage-runner` | `build/bin/llama-stage-runner` |
+| `LLAMA_PERPLEXITY_BIN` | Absolute path to built `llama-perplexity` (Inkling D6 fixture smoke) | `build/bin/llama-perplexity`, then `PATH` |
+| `LLAMA_CLI_BIN` | Absolute path to built `llama-cli` (Inkling D6 fixture smoke) | `build/bin/llama-cli`, then `PATH` |
+| `BDD_INKLING_D6_LOG_DIR` | Directory where the D6 smoke persists the loader/graph logs of each binary run | Unset; logs stay in the pytest tmp dir |
 | `LLAMA_EXPERT_SERVER_BIN` | Absolute path to built `llama-expert-server` | `build/bin/llama-expert-server`, then `PATH` |
 | `LLAMA_EXPERT_CHECK_BIN` | Absolute path to built `llama-expert-check` | `build/bin/llama-expert-check`, then `PATH` |
 | `BDD_MOE_MODEL` | Path to a real MoE GGUF used by expert-server scenarios | Unbound; scenarios skip |
