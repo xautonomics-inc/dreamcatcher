@@ -112,6 +112,22 @@ of matching the *client's* op sequence, so the server grows two switches,
 client can turn them off with its existing flags). The wire protocol is
 unchanged and stays interoperable with the source lineage at version 1.
 
+Not every architecture in this fork builds its routed tail through
+`llm_build_moe_ffn`. Inkling (`src/graphs/build_inkling.cpp`, lane D4c)
+routes over a joint softmax across routed *and* shared experts and applies
+the routed tail directly and unfused: `mul_mat_id` gate and up,
+`mul(silu(gate), up)`, `mul_mat_id` down, `mul(., weights)`, then one
+`ggml_add` per selected expert. Neither the `--fmoe` nor the `--mmad` form
+reproduces those bytes (the fused SILU and `multi_add` round differently),
+so the server carries a third tail, `--moe-form inkling`, that mirrors
+`build_inkling` op for op. `--moe-form auto` (the default) selects it from
+the GGUF's `general.architecture` and falls back to the `llm_build_moe_ffn`
+form otherwise, so a server started on an Inkling file mirrors the right
+tail without an extra switch. On the client side `build_inkling` carries
+the same `ggml_map_custom3` intercept as `llm_build_moe_ffn` (section 5);
+the shared experts stay in-process, and the server never loads them (it
+resolves tensors by the `ffn_*_exps` names only).
+
 ### 8. The exactness harness
 
 `expert-check` is a thin greedy-decode harness that prints, per step, the
@@ -198,6 +214,23 @@ compare equal byte for byte (4.5 MiB).
 across three shards, all 48 layers served remotely. The attention side
 skipped 144 tensors (55.4 GiB) and loaded in 4.7 s instead of 67.7 s.
 Twelve decode steps, 11.4 MiB of raw logits: byte-identical.
+
+**Token exactness, Inkling (D4c).** The synthetic Inkling fixture from
+`tools/make-inkling-test-gguf.py` (2 layers, 1 dense + 1 MoE; 16 experts /
+6 used / 2 shared; f32), the MoE layer served over loopback with
+`--moe-form auto` (resolved to `inkling` from the header). Twelve greedy
+steps: token ids and per-step logits hashes identical to the in-process
+run, raw logits dumps byte-identical (49152 bytes), under both the banded
+(`-fa on`) and the masked (`-fa off`) attention paths; 13 EXPERT_CALLs
+answered (1 prefill + 12 decodes), the server reporting a 16-expert bank
+(the 2 shared experts never leave the client). Negative control: the same
+run with the server forced to `--moe-form moe_ffn` differs from step 0 on
+(same token ids, different logits) - which is also what a server without
+`--moe-form` produces against the patched client. The BDD scenario
+`@d4c` in `tests/bdd/features/inkling.feature` encodes the gate
+(`tests/bdd/steps/inkling_remote_experts_steps.py`). Not yet run on
+Inkling-Small itself (a booked window): the quantised expert types go
+through the same `mul_mat_id` kernel on both sides, but that is unverified.
 
 **Multi-endpoint (P2).** The same small MoE split across two expert servers,
 layers 0-13 and 14-27: byte-identical logits again. A deliberately

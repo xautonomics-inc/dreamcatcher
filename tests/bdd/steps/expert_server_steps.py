@@ -115,11 +115,16 @@ def _run_check(
         "0",
     ]
     command.extend(shlex.split(client_arguments))
+    # The TEXT line echoes decoded pieces, which need not be valid UTF-8 (a
+    # byte-level vocab such as the synthetic Inkling fixture emits raw bytes);
+    # the TOK lines this harness parses are ASCII, so decode leniently rather
+    # than let one stray byte abort the comparison.
     completed = subprocess.run(
         command,
         env=env,
         capture_output=True,
-        text=True,
+        encoding="utf-8",
+        errors="replace",
         timeout=float(os.environ.get("BDD_EXPERT_TIMEOUT", "900")),
         check=False,
     )
