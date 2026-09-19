@@ -91,6 +91,9 @@ Scenario steps support the following environment overrides:
 | `BDD_EXPERT_PROMPT` | Deterministic prompt used for local/remote parity | `The capital of France is` |
 | `BDD_EXPERT_TOKENS` | Number of generated tokens compared for parity | `12` |
 | `BDD_EXPERT_TIMEOUT` | Timeout in seconds for each expert-check process | `900` |
+| `INKLING_REMOTE_EXPERTS_MODEL` | Inkling GGUF for the `@d4c` remote-experts scenario (e.g. Inkling-Small in a booked window) | Unbound; the tiny synthetic fixture is generated in-step by `tools/make-inkling-test-gguf.py` (needs numpy, pyyaml) |
+| `INKLING_REMOTE_EXPERTS_CLIENT_ARGS` | Extra `llama-expert-check` arguments for BOTH the in-process and the remote `@d4c` run (e.g. `-fa off`) | Empty |
+| `INKLING_REMOTE_EXPERTS_SERVER_ARGS` | Extra `llama-expert-server` arguments for the `@d4c` run; negative control only (`--moe-form moe_ffn` must fail the byte gate) | Empty; `--moe-form auto` |
 | `BDD_SERVER_URL` | Owned live `llama-server` used by serve smoke checks | Unbound; scenarios skip |
 | `BDD_REASONING_ONLY_URL` | Owned fixture endpoint for reasoning-only smoke behavior | Unbound; scenario skips |
 | `BDD_LIB_DIR` | Directory of pre-sliced layer library | Auto-generated synthetic library |
