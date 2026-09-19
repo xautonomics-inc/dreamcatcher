@@ -1,9 +1,17 @@
 #!/usr/bin/env python3
-"""Build a synthetic Inkling-arch GGUF for the D1 load-only smoke.
+"""Build a synthetic Inkling-arch GGUF for the D1 load smoke and the D2 two-build ppl diff.
 
 Sized small (2 layers: 1 dense lead + 1 MoE) but with the exact metadata keys
 and tensor shapes the reference loader expects, so llama-cli --load can verify
-that every Inkling tensor is created with the right shape/type on CPU.
+that every Inkling tensor is created with the right shape/type on CPU, and
+llama-perplexity can diff two builds on ~20 MB instead of the 152 GB model.
+
+The header values are chosen so the fixture exercises the code paths the real
+model uses, not just fixture-shaped defaults: expert_weights_scale 8.0 and
+expert_gating_func 2 as in the real header, a log-N floor small enough that tau
+departs from 1.0 inside one 2048-token chunk, add_bos_token false, and three
+distinct sliding-window / relative-extent values so the global and SWA index
+tensors are not interchangeable.
 """
 import hashlib
 import sys
@@ -23,8 +31,14 @@ N_HEAD      = 8
 N_HEAD_KV   = 2   # GQA 4:1, the ratio the real model uses (32/8)
 HEAD_DIM    = 32  # n_embd / n_head
 D_REL       = 16
-REL_EXTENT  = 512
-REL_EXTENT_SWA = 512
+# Three DISTINCT window/extent values (real model: n_swa 512, rel_extent_swa 512, rel_extent 1024).
+# They used to be all 512, so swapping the global and SWA relative-index tensors, or using n_swa
+# where rel_extent_swa belongs, changed nothing. Now the two attn_rel_proj shapes differ (a swap
+# fails to load), the SWA mask width differs from both bias extents, and the global layer's
+# 64-bucket bias runs into the zero pad column well inside a 2048-token chunk.
+N_SWA          = 32   # inkling.attention.sliding_window: the SWA mask width
+REL_EXTENT     = 64   # global (non-SWA) layer bias buckets
+REL_EXTENT_SWA = 48   # SWA layer bias buckets; > N_SWA so every visible SWA cell has a learned bias
 SHORTCONV_K = 4
 DENSE_LEAD  = 1          # blk.0 dense, blk.1 MoE
 N_EXPERT    = 16
@@ -35,6 +49,15 @@ N_FF_DENSE  = 512
 UNPADDED_VOCAB = 1000
 LOGIT_SCALE_DENOM = 8.0
 SWA_PATTERN = [1, 0]     # blk.0 local(SWA), blk.1 global
+# Routing/scaling constants copied from the real header (Inkling-Small-UD-Q4_K_M, 2026-09-19):
+# expert_weights_scale 8.0, expert_gating_func 2 (sigmoid), log_scaling_alpha 0.1. With the old
+# scale of 1.0 a dropped ggml_scale was invisible; with n_floor 0 the tau input was never even
+# built, in either build. n_floor is shrunk from the real 128000 so tau = 1 + alpha*log((pos+1)/
+# n_floor) leaves 1.0 at pos 32 and reaches ~1.42 by pos 2047, i.e. inside one ppl chunk.
+EXPERT_WEIGHTS_SCALE = 8.0
+EXPERT_GATING_FUNC   = 2      # LLM_EXPERT_GATING_FUNC_TYPE_SIGMOID; loader reads it, graph hardcodes sigmoid
+LOG_N_FLOOR = 32
+LOG_ALPHA   = 0.1
 
 writer = gguf.GGUFWriter(str(OUT), "inkling")
 
@@ -52,8 +75,9 @@ writer.add_uint32("inkling.expert_count", N_EXPERT)
 writer.add_uint32("inkling.expert_used_count", N_EXPERT_USED)
 writer.add_uint32("inkling.expert_shared_count", N_SHEXP)
 writer.add_uint32("inkling.expert_feed_forward_length", N_FF_EXP)
-writer.add_float32("inkling.expert_weights_scale", 1.0)
-writer.add_uint32("inkling.attention.sliding_window", REL_EXTENT_SWA)
+writer.add_float32("inkling.expert_weights_scale", EXPERT_WEIGHTS_SCALE)
+writer.add_uint32("inkling.expert_gating_func", EXPERT_GATING_FUNC)
+writer.add_uint32("inkling.attention.sliding_window", N_SWA)
 writer.add_array("inkling.attention.sliding_window_pattern", SWA_PATTERN)
 writer.add_uint32("inkling.d_rel", D_REL)
 writer.add_uint32("inkling.rel_extent", REL_EXTENT)
@@ -61,8 +85,8 @@ writer.add_uint32("inkling.rel_extent_swa", REL_EXTENT_SWA)
 writer.add_uint32("inkling.shortconv_kernel", SHORTCONV_K)
 writer.add_uint32("inkling.dense_block_count", DENSE_LEAD)
 writer.add_float32("inkling.logit_scale_denom", LOGIT_SCALE_DENOM)
-writer.add_uint32("inkling.log_scaling_n_floor", 0)
-writer.add_float32("inkling.log_scaling_alpha", 0.0)
+writer.add_uint32("inkling.log_scaling_n_floor", LOG_N_FLOOR)
+writer.add_float32("inkling.log_scaling_alpha", LOG_ALPHA)
 writer.add_uint32("inkling.unpadded_vocab_size", UNPADDED_VOCAB)
 
 # tokenizer metadata (minimal BPE-ish to satisfy vocab init)
@@ -94,14 +118,14 @@ writer.add_array("tokenizer.ggml.token_type", [gguf.TokenType.NORMAL] * N_VOCAB)
 # does the real work; these exist to satisfy the loader without shaping tokenization.
 writer.add_array("tokenizer.ggml.merges",
                  [f"{tokens[200+i]} {tokens[201+i]}" for i in range(8)])
-# BOS/EOS ids so the fixture can drive a real forward pass, not just a load.
-# Without a BOS the synthetic vocab ("tok0".."tokN", not byte-level BPE) tokenizes
-# nothing and llama-cli exits with "input is empty" before any graph runs -- which
-# is fine for the D1 load gate but useless for D2, where the point is to execute
-# the graph. With a BOS, an empty prompt still yields one token.
+# BOS/EOS ids are defined, but add_bos_token is FALSE like the real model (its header carries
+# add_bos_token=false with bos==eos==200006). It used to be true: every ppl chunk then opened
+# with a BOS the real model never sees, and any add_bos-dependent logic went untested. The
+# byte-level vocab above already guarantees ordinary text tokenizes, so nothing depends on a
+# free BOS token any more; llama-cli just needs a non-empty prompt.
 writer.add_uint32("tokenizer.ggml.bos_token_id", 1)
 writer.add_uint32("tokenizer.ggml.eos_token_id", 2)
-writer.add_bool("tokenizer.ggml.add_bos_token", True)
+writer.add_bool("tokenizer.ggml.add_bos_token", False)
 writer.add_bool("tokenizer.ggml.add_eos_token", False)
 
 # --- tensors ---
