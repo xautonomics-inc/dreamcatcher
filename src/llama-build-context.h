@@ -443,6 +443,7 @@ struct llm_build_context {
     ggml_cgraph * build_seedoss();
 
     ggml_cgraph * build_laguna();
+    ggml_cgraph * build_inkling();
 
     ggml_cgraph * build_step35();
 
@@ -504,7 +505,8 @@ struct llm_build_context {
                     float     kq_scale,
          const llm_build_cb & cb, int il, ggml_tensor * sinks = nullptr, int n_swa = 0, int kv_il = -1,
          ggml_tensor ** k_cache_view = nullptr, ggml_tensor ** v_cache_view = nullptr,
-                    int32_t   swa_head = -1);
+                    int32_t   swa_head = -1,
+         ggml_tensor * kq_b = nullptr);
 
     static ggml_tensor * llm_build_ffn(ggml_context * ctx, llama_context & lctx, ggml_tensor * ffn_norm,
          ggml_tensor * cur,

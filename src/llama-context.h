@@ -83,6 +83,9 @@ struct llama_kv_cache {
     // openPangu s_l holds position-strict MoME conv state, not per-sequence recurrent slots: qnext
     // seq ops and generic serialization skip it, the openPangu state layouts carry it instead.
     bool s_l_position_strict = false;
+    // s_l holds the sequence TAIL (Inkling's last K-1 conv inputs), so seq_rm must refuse to drop a
+    // tail while keeping a prefix; full clears and mid-range removals (context shift) stay allowed.
+    bool s_l_seq_tail_state  = false;
 
     // Note: The value of head isn't only used to optimize searching
     // for a free KV slot. llama_decode_internal also uses it, so it
@@ -630,6 +633,14 @@ struct llama_context {
     struct ggml_tensor * inp_s_seq;       // I32 [n_kv, n_batch]
     struct ggml_tensor * inp_s_seq_qnext; // I32 [1, n_batch]
     struct ggml_tensor * inp_ple_rows = nullptr; // I32 [ple_n_heads * n_batch], qwen4exp n-gram rows
+    // inkling (private arch): log-N attention scale, relative-position gather indices,
+    // padded-vocab mask, and the constant shared-expert id table for mul_mat_id
+    struct ggml_tensor * inp_inkling_tau         = nullptr; // F32 [1, 1, n_batch]
+    struct ggml_tensor * inp_inkling_rel_idx     = nullptr; // I32 [n_kv, n_batch]
+    struct ggml_tensor * inp_inkling_rel_idx_swa = nullptr; // I32 [n_kv, n_batch]
+    struct ggml_tensor * inp_inkling_vocab_mask  = nullptr; // F32 [n_vocab]
+    struct ggml_tensor * inp_inkling_shexp_idx   = nullptr; // I32 [n_expert_shared, n_batch]
+    struct ggml_tensor * inp_inkling_reset       = nullptr; // F32 [1]: 0 on a pos-0 batch (fresh conv state), else 1
     struct ggml_tensor * inp_pos_bucket;    // I32 [n_batch|n_kv, n_batch]
     struct ggml_tensor * inp_embd_enc;      // F32 [n_embd, n_outputs_enc]
     struct ggml_tensor * inp_KQ_mask_cross; // F32 [n_outputs_enc, n_batch]

@@ -2059,7 +2059,8 @@ static ggml_tensor * llm_build_kqv(
                     int       il,
                 ggml_tensor * sinks = nullptr, int n_swa = 0, int kv_il = -1,
                 ggml_tensor ** k_cache_view = nullptr, ggml_tensor ** v_cache_view = nullptr,
-                    int32_t kv_view_offset = 0) {
+                    int32_t kv_view_offset = 0,
+                ggml_tensor * kq_b = nullptr) {
     const llama_model   & model   = lctx.model;
     const llama_hparams & hparams = lctx.model.hparams;
     const llama_cparams & cparams = lctx.cparams;
@@ -2217,6 +2218,15 @@ static ggml_tensor * llm_build_kqv(
                 kq = ggml_softcap(ctx, kq, hparams.f_attn_out_scale / hparams.f_attn_logit_softcapping, hparams.f_attn_logit_softcapping);
             }
 
+            // Additive per-(kv, token, HEAD) attention bias (inkling's content-relative
+            // bias). It cannot ride kq_mask: ggml requires mask->ne[2] == 1 (head
+            // broadcast), while this bias is per-head. Applied to kq BEFORE the softmax,
+            // and deliberately NOT scaled by kq_scale -- the caller pre-scales q instead.
+            if (kq_b) {
+                GGML_ASSERT(!hparams.attn_soft_cap && "kq_b with attn_soft_cap is not supported");
+                kq = ggml_add(ctx, kq, kq_b);
+            }
+
             if (hparams.attn_soft_cap) {
                 //kq = ggml_softcap(ctx, kq, 1.0f / hparams.f_attn_logit_softcapping, hparams.f_attn_logit_softcapping);
                 kq = ggml_softcap_max(ctx, kq, kq_mask, kq_scale, hparams.f_max_alibi_bias,
@@ -2254,6 +2264,7 @@ static ggml_tensor * llm_build_kqv(
                 int i02 = i12/r2k;
                 auto k_i = ggml_view_3d(ctx, k, k->ne[0], k->ne[1], this_ne12, k->nb[1], k->nb[2], k->nb[2]*i02);
                 auto q_i = ggml_view_3d(ctx, q, q->ne[0], q->ne[1], this_ne12, q->nb[1], q->nb[2], q->nb[2]*i12);
+                GGML_ASSERT(!kq_b && "kq_b is not supported on the chunked KQ path");
                 auto kq_i = ggml_mul_mat(ctx, k_i, q_i);
                 if (model.arch == LLM_ARCH_PHI2 || model.arch == LLM_ARCH_PHI3 || model.arch == LLM_ARCH_GPTNEOX || model.arch == LLM_ARCH_QWEN2 ||
                     model.arch == LLM_ARCH_COHERE2 || model.arch == LLM_ARCH_COHERE2_MOE || model.arch == LLM_ARCH_COMMAND_R || model.arch == LLM_ARCH_GLM4 || model.arch == LLM_ARCH_GLM4_MOE) {
@@ -2322,7 +2333,8 @@ ggml_tensor * llm_build_context::llm_build_kv(
                     float     kq_scale,
          const llm_build_cb & cb, int il, ggml_tensor * sinks, int n_swa, int kv_il,
          ggml_tensor ** k_cache_view, ggml_tensor ** v_cache_view,
-                    int32_t   swa_head) {
+                    int32_t   swa_head,
+         ggml_tensor * kq_b) {
     const llama_hparams & hparams = lctx.model.hparams;
     const llama_cparams & cparams = lctx.cparams;
 
@@ -2363,7 +2375,7 @@ ggml_tensor * llm_build_context::llm_build_kv(
     }
 
     auto cur = llm_build_kqv(ctx, lctx, kv, graph, wo, wo_b, q_cur, kq_mask, n_tokens, n_kv_view, kq_scale, cb, il, sinks, n_swa, kv_il,
-            k_cache_view, v_cache_view, kv_view_offset);
+            k_cache_view, v_cache_view, kv_view_offset, kq_b);
     cb(cur, "kqv_out", il);
 
     return cur;
@@ -3114,6 +3126,10 @@ ggml_cgraph * llm_build_context::llama_build_graph(
         case LLM_ARCH_STEP35:
             {
                 result = llm.build_step35();
+            } break;
+        case LLM_ARCH_INKLING:
+            {
+                result = llm.build_inkling();
             } break;
         case LLM_ARCH_LAGUNA:
             {
