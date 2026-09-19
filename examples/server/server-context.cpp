@@ -517,6 +517,7 @@ void server_slot::reset() {
     rewind_status = false;
 
     generated_token_probs.clear();
+    generated_tokens.clear();
     checkpoint_pos = -1;
     image_just_processed = false;
     do_checkpoint = false;
@@ -2163,6 +2164,9 @@ bool server_context::process_token(completion_token_output& result, server_slot&
     // remember which tokens were sampled - used for repetition penalties during sampling
     const std::string token_str = result.text_to_send;
     slot.sampled = result.tok;
+    // Recorded here, unconditionally: the text path below skips add_token_string for a token
+    // that leaves generated_text ending mid-UTF-8, so generated_token_probs is NOT complete.
+    slot.generated_tokens.push_back(result.tok);
 
     // search stop word and delete it
     slot.last_gentxt_size = slot.generated_text.size();
@@ -2554,16 +2558,11 @@ void server_context::send_final_response(server_slot& slot) {
     }
 
     // Generated token ids, on request -- the same field mainline emits for "return_tokens".
-    // generated_token_probs holds EVERY sampled token (server_slot::add_token_string is
-    // unconditional), so this is complete even when n_probs == 0 and no
-    // completion_probabilities are emitted. Off by default: no existing client asked for it.
+    // slot.generated_tokens is pushed for every sampled token in process_token, before the
+    // incomplete-UTF-8 gate; generated_token_probs is not (it misses tokens whose piece splits
+    // a multi-byte char), so it must not be the source. Off by default.
     if (slot.params.return_tokens) {
-        std::vector<llama_token> ids;
-        ids.reserve(slot.generated_token_probs.size());
-        for (const auto & t : slot.generated_token_probs) {
-            ids.push_back(t.tok);
-        }
-        res->data["tokens"] = ids;
+        res->data["tokens"] = slot.generated_tokens;
     }
 
     if (slot.oaicompat) {
@@ -4591,8 +4590,15 @@ inline void rewind_context(server_slot& slot, int32_t ban_pos) {
     slot.cache_tokens.keep_first(n_keep_cache);
     slot.n_past = slot.cache_tokens.n_tokens();
 
-    // Remove from KV cache
-    llama_kv_cache_seq_rm(slot.ctx, slot.id, slot.cache_tokens.pos_next(slot.n_past), -1);
+    // Remove from KV cache. A cache whose per-sequence state is the sequence tail (Inkling's
+    // short-conv state) refuses to drop a tail while keeping a prefix; then the only correct
+    // move is to start the sequence over -- the same fallback mainline takes.
+    if (!llama_kv_cache_seq_rm(slot.ctx, slot.id, slot.cache_tokens.pos_next(slot.n_past), -1)) {
+        SLT_WRN(slot, "%s", "cache refused the tail truncation; clearing the sequence and re-decoding the prompt\n");
+        llama_kv_cache_seq_rm(slot.ctx, slot.id, -1, -1);
+        slot.cache_tokens.clear();
+        slot.n_past = 0;
+    }
 
     // Truncate buffer
     slot.token_buffer.resize(n_keep_buffer);

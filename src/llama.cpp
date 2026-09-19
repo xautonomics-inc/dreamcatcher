@@ -1609,7 +1609,15 @@ static bool llama_kv_cache_init(
                 ggml_tensor * s_conv = ggml_new_tensor_2d(ctx, GGML_TYPE_F32, conv_ne, qnext_state_slots);
                 ggml_format_name(s_conv, "cache_s_l%d", i);
                 cache.s_l[i] = s_conv;
-                cache.s_l_position_strict = true;
+                // NOT position-strict: that flag guards openPangu's baked-RoPE latent rows and makes
+                // llama_kv_cache_seq_add/seq_div assert (any server chat that fills the context would
+                // abort) and hides the state from llama_state_seq_get/set_data. Inkling has no RoPE,
+                // its relative bias and SWA mask are distance-only, and the conv state is the last
+                // K-1 inputs of the sequence -- shifting positions is numerically safe. What is NOT
+                // safe is dropping the sequence TAIL while keeping a prefix (the state would belong
+                // to tokens no longer in the cache); s_l_seq_tail_state makes seq_rm refuse that.
+                cache.s_l_position_strict = false;
+                cache.s_l_seq_tail_state  = true;
             }
 
             if (split_cache_i) {
@@ -2466,6 +2474,27 @@ static bool llama_kv_cache_seq_rm(
                         __func__, p0, cache.pos_base_swa, cache.window_swa, p0);
                 return false;
             }
+        }
+    }
+
+    // The packed short-conv state is the sequence tail, not a per-position record. Dropping the
+    // tail of a sequence while keeping an earlier prefix would leave a state that belongs to
+    // tokens no longer in the cache, so refuse and let the caller re-decode from the prefix
+    // (mainline's recurrent memory refuses partial removal the same way). Mid-range removals
+    // keep the tail and are fine; so are full clears.
+    if (cache.s_l_seq_tail_state && seq_id >= 0 && p0 > 0) {
+        llama_pos seq_max = -1;
+        bool keeps_prefix = false;
+        for (uint32_t i = 0; i < cache.size; ++i) {
+            if (cache.cells[i].pos >= 0 && cache.cells[i].has_seq_id(seq_id)) {
+                seq_max = std::max(seq_max, cache.cells[i].pos);
+                keeps_prefix = keeps_prefix || cache.cells[i].pos < p0;
+            }
+        }
+        if (keeps_prefix && seq_max >= p0 && p1 > seq_max) {
+            LLAMA_LOG_WARN("%s: refusing to drop the tail [%d, %d) of seq %d: the conv state is that tail; "
+                    "re-decode from position %d instead\n", __func__, p0, seq_max + 1, seq_id, p0);
+            return false;
         }
     }
 
@@ -6290,6 +6319,15 @@ static void llama_set_inputs(llama_context & lctx, const llama_batch & batch) {
     }
 
     // ---- inkling (private arch) inputs ----
+
+    // conv-state reset: 0 zeroes the packed short-conv state before this batch, 1 carries it.
+    // Per BATCH (pos of the first token), the same rule the baked reset used; per-sequence
+    // addressing is #51.
+    if (lctx.inp_inkling_reset) {
+        GGML_ASSERT(ggml_backend_buffer_is_host(lctx.inp_inkling_reset->buffer));
+        const bool fresh = batch.pos && batch.pos[0] == 0;
+        ((float *) lctx.inp_inkling_reset->data)[0] = fresh ? 0.0f : 1.0f;
+    }
 
     // log-N attention scale: tau = 1 + alpha*log(max((pos+1)/n_floor, 1)); applied to q and to
     // the relative-position logits on GLOBAL (non-SWA) layers only.

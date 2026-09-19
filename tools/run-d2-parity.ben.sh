@@ -10,6 +10,8 @@
 #              recorded banded greedy-64x8.json -- is what D2's tokens must match. Writes $REFM/.
 #   parity     This tree's D2 build on Q4_K_M, -fa 0: greedy token-for-token vs $REFM, and the four
 #              per-chunk ppl values vs the masked-path capture from the 2026-09-18 01:57 window.
+#   kld        Cross-lineage measure: this build's masked logits vs the banded D0 base (KLD/top-1),
+#              from a sha-guarded working copy; comparand = the reference's own masked path.
 #
 # PRECONDITION (booked window): resident model servers quieted; MemAvailable >= 160 GiB.
 # Never runs alongside a build. Stops its own processes on exit. Fails closed.
@@ -45,10 +47,13 @@ LOG=$OUT/d2.log
 exec > >(tee -a "$LOG") 2>&1
 
 SP=""; WD=""
+# Every process this runner starts records its PID in $OUT/pids; the watchdog and cleanup kill ONLY
+# those. nvidia is shared -- a host-global pkill here would take down other agents' servers.
+kill_pids() { [ -s "$OUT/pids" ] && for p in $(cat "$OUT/pids"); do kill -0 "$p" 2>/dev/null && kill -TERM "$p"; done; true; }
 cleanup() {
   [ -n "$WD" ] && kill "$WD" 2>/dev/null
   if [ -n "$SP" ] && kill -0 "$SP" 2>/dev/null; then kill -TERM "$SP"; wait "$SP" 2>/dev/null; echo "[cleanup] server stopped"; fi
-  pkill -f "[l]lama-perplexity -m $MDIR" 2>/dev/null || true
+  kill_pids
 }
 trap cleanup EXIT INT TERM
 memlog() { awk -v t="$(date -u +%T)" -v l="$1" '/^MemAvailable:/{printf "%s mem %s: %.1f GiB\n", t, l, $2/1048576}' /proc/meminfo | tee -a "$OUT/memavailable.log"; }
@@ -58,7 +63,7 @@ watchdog() {
       echo "$(date -u +%T) wd $((kb/1048576)) GiB" >> "$OUT/memavailable.log"
       if [ "$kb" -lt "$MEM_ABORT_KB" ]; then
         echo "$(date -u +%T) WATCHDOG ABORT: MemAvailable $((kb/1048576)) GiB < 12 GiB" | tee -a "$LOG"
-        pkill -x llama-server; pkill -x llama-perplexity; exit 1
+        kill_pids; exit 1
       fi
       sleep 30
     done ) &
@@ -76,8 +81,9 @@ precond() {
 chunks() { grep -oE '\[1\][0-9.]+,\[2\][0-9.]+,\[3\][0-9.]+,\[4\][0-9.]+,' "$1" | tail -1; }
 
 ppl_run() {  # ppl_run <binary> <model> <extra-args> <logfile>
-  "$1" -m "$2" -ngl 0 -t $THREADS -f "$WIKI" -c 2048 -b 2048 --chunks 4 $3 > "$4" 2>&1
-  echo "  ppl rc=$? -> $4"
+  "$1" -m "$2" -ngl 0 -t $THREADS -f "$WIKI" -c 2048 -b 2048 --chunks 4 $3 > "$4" 2>&1 &
+  local pp=$!; echo $pp >> "$OUT/pids"; wait $pp; local rc=$?
+  echo "  ppl rc=$rc -> $4"
   echo "  chunks: $(chunks "$4")"
 }
 
@@ -90,7 +96,7 @@ run_greedy() {
   echo "--- greedy: server=$(sha256sum "$bin" | cut -c1-12) port=$port -> $out"
   "$bin" -m "$M_Q4" -ngl 0 -t $THREADS -c 4096 -np 1 --jinja $FA_OFF \
       --host 127.0.0.1 --port $port > "$out.server.log" 2>&1 &
-  SP=$!
+  SP=$!; echo $SP >> "$OUT/pids"
   for _ in $(seq 1 360); do
     curl -sf http://127.0.0.1:$port/health >/dev/null 2>&1 && break
     kill -0 $SP 2>/dev/null || { echo "SERVER-DIED"; tail -30 "$out.server.log"; return 3; }
@@ -187,14 +193,39 @@ parity)
   ( cd "$OUT" && sha256sum d2-greedy-64x8.json ppl.log > SHA256SUMS ) 2>/dev/null
   echo
   if [ $grc -eq 0 ] && [ $prc -eq 0 ]; then
-    echo "=== D2 PARITY PASS (greedy token-for-token AND 4/4 ppl chunks vs the masked-path reference) out=$OUT"
+    echo "=== D2 PARITY PASS: token-exact + 4-dp ppl gate as ENCODED in tests/bdd/features/inkling.feature (@d2) out=$OUT"
   else
-    echo "=== D2 PARITY FAIL (greedy rc=$grc, ppl rc=$prc) out=$OUT"
-    echo "    Both comparands are the reference's MASKED path, matching what D2 runs."
+    echo "=== D2 PARITY FAIL on the token-exact + 4-dp ppl gate as ENCODED in tests/bdd/features/inkling.feature (@d2) out=$OUT"
+    echo "    Both comparands are the reference's MASKED path, matching what D2 runs. This gate is a"
+    echo "    same-kernel assumption; the cross-lineage measure is the KLD envelope -- run '$0 kld'."
   fi
   [ $grc -eq 0 ] && [ $prc -eq 0 ]
   ;;
+# ---------------------------------------------------------------- kld
+kld)
+  # The cross-lineage measure: KLD / top-1 agreement of this build's MASKED logits against the banded
+  # D0 base, computed from a sha-guarded WORKING COPY. In this fork --kl-divergence-base used alone
+  # SAVES (overwrites) -- it must never point at the oracle directory. Comparand for the number is the
+  # reference's OWN masked path vs the same base, recorded 2026-09-18 22:10 UTC
+  # (d2-parity-20260918T2151/kld-refmasked-vs-banded.log):
+  #   Same top p 83.504 +/- 0.580 %   RMS dp 10.006 +/- 0.503 %   Mean dp -0.562 +/- 0.156 %
+  BASE_ORIG=$ORACLE/kld-base-4x2048.bin
+  BASE_WANT=aeab11429a2567db2b36f210754a444ce97f6a9fa851bf0389b236129838b505
+  BASE=$D2/kld-base-banded.bin
+  sha() { sha256sum "$1" | cut -d' ' -f1; }
+  echo "=== D2 KLD $(date -u +%FT%TZ) host=$(hostname) ppl=$(sha256sum $B/llama-perplexity | cut -c1-12)"
+  precond "$M_Q4" "$WIKI" "$B/llama-perplexity" "$BASE_ORIG"
+  [ "$(sha $BASE_ORIG)" = "$BASE_WANT" ] || { echo "PRECONDITION-FAIL: oracle base sha mismatch -- do not proceed"; exit 2; }
+  cp -p "$BASE_ORIG" "$BASE"; echo "  working copy: $BASE"
+  watchdog
+  ppl_run "$B/llama-perplexity" "$M_Q4" "$FA_OFF --kl-divergence --kl-divergence-base $BASE" "$OUT/kld-mine-vs-banded.log"
+  memlog after-kld
+  grep -aE "Mean +.p|RMS .p|Same top p" "$OUT/kld-mine-vs-banded.log" | sed 's/^/  mine vs banded: /'
+  echo "  ref masked vs banded (recorded): Same top p 83.504 +/- 0.580 %, RMS dp 10.006 +/- 0.503 %, Mean dp -0.562 +/- 0.156 %"
+  post=CHANGED; [ "$(sha $BASE_ORIG)" = "$BASE_WANT" ] && post=OK; echo "  guard post: oracle=$post"
+  ( cd "$OUT" && sha256sum kld-mine-vs-banded.log > SHA256SUMS ) 2>/dev/null
+  ;;
 *)
-  echo "usage: $0 [precheck|refgreedy|parity]"; exit 64;;
+  echo "usage: $0 [precheck|refgreedy|parity|kld]"; exit 64;;
 esac
 echo "=== D2 $MODE DONE $(date -u +%FT%TZ) out=$OUT"
