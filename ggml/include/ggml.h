@@ -670,6 +670,7 @@ extern "C" {
         GGML_OP_CONV_2D_DW,
 
         GGML_OP_FLASH_ATTN_EXT,
+        GGML_OP_FLASH_ATTN_EXT_BANDED,
         GGML_OP_FLASH_ATTN_BACK,
         GGML_OP_SSM_CONV,
         GGML_OP_SSM_SCAN,
@@ -2524,6 +2525,30 @@ extern "C" {
             float                 scale,
             float                 max_bias,
             float                 softcap);
+
+    // Banded (sliding-window relative-position bias) flash attention.
+    //
+    // Same layout as ggml_flash_attn_ext. The relative-position bias is read from the
+    // rel_logits band instead of a full additive bias tensor broadcast over n_kv:
+    //
+    //   score(q, k) = q.k * scale + rel_logits[dist, head, q_row, batch_or_0]
+    //
+    // where dist = q_row + (n_kv - n_q) - k_col is the distance from the query to the
+    // key (the FA convention that aligns a short decode Q block to the tail of K).
+    // Entries outside [0, rel_extent) contribute no bias; the band is expected to
+    // encode the sliding-window cutoff as -INF beyond the window.
+    //
+    // rel_logits: [rel_extent, n_head, n_q_max, 1 or n_batch] (F32, F16, or BF16)
+    // mask:       optional, same constraints as ggml_flash_attn_ext (F16).
+    GGML_API struct ggml_tensor * ggml_flash_attn_ext_banded(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * q,
+            struct ggml_tensor  * k,
+            struct ggml_tensor  * v,
+            struct ggml_tensor  * mask,
+            struct ggml_tensor  * rel_logits,
+            float                 scale,
+            int64_t               rel_extent);
 
     // Backend hint stored in ggml_flash_attn_ext op_params slot 4.
     // Negative values request the generic implementation instead of IQK FA.

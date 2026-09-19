@@ -4405,6 +4405,7 @@ static const char * GGML_OP_NAME[GGML_OP_COUNT] = {
     "CONV_2D_DW",
 
     "FLASH_ATTN_EXT",
+    "FLASH_ATTN_EXT_BANDED",
     "FLASH_ATTN_BACK",
     "SSM_CONV",
     "SSM_SCAN",
@@ -26870,6 +26871,10 @@ static int ggml_compute_forward(struct ggml_compute_params * params, struct ggml
             {
                 ggml_compute_forward_flash_attn_ext(params, tensor);
             } break;
+        case GGML_OP_FLASH_ATTN_EXT_BANDED:
+            {
+                ggml_compute_forward_flash_attn_ext_banded(params, tensor);
+            } break;
         case GGML_OP_FLASH_ATTN_BACK:
             {
                 int32_t t = ggml_get_op_params_i32(tensor, 0);
@@ -28007,6 +28012,7 @@ static void ggml_compute_backward(struct ggml_context * ctx, struct ggml_tensor 
         case GGML_OP_HC_POST:
         case GGML_OP_MASK_TO_IDX:
         case GGML_OP_LATENT_ATTN:
+        case GGML_OP_FLASH_ATTN_EXT_BANDED:
         case GGML_OP_DS4_COMP:
             {
                 GGML_ABORT("fatal error"); // TODO: not implemented
@@ -28824,6 +28830,7 @@ static int ggml_get_n_tasks(struct ggml_tensor * node, int n_threads) {
         case GGML_OP_ARGSORT_THRESH:
         case GGML_OP_GROUPED_TOPK:
         case GGML_OP_FLASH_ATTN_EXT:
+        case GGML_OP_FLASH_ATTN_EXT_BANDED:
         case GGML_OP_FLASH_ATTN_BACK:
         case GGML_OP_SSM_CONV:
         case GGML_OP_SSM_SCAN:
@@ -29066,6 +29073,14 @@ struct ggml_cplan ggml_graph_plan(const struct ggml_cgraph * cgraph, int n_threa
                     size_t size = iqk_fa_work_buffer_size(node, n_tasks);
                     cur = MAX(cur, size);
 #endif
+                } break;
+            case GGML_OP_FLASH_ATTN_EXT_BANDED:
+                {
+                    const int64_t D = node->src[0]->ne[0];
+
+                    // per thread: V tile (K_max*D dequantized to f32) + K tile scratch
+                    const int64_t K_max = 128;
+                    cur = (int64_t)(2*K_max*D + 3*D)*sizeof(float)*n_tasks;
                 } break;
             case GGML_OP_LATENT_ATTN:
                 {
