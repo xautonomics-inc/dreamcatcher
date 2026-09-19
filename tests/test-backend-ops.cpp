@@ -1316,15 +1316,16 @@ struct test_rope : public test_case {
     float af; // attn_factor
     bool ff;
     int v; // view (1 : non-contiguous a)
+    bool flipped; // ik op_params[15] == 1: rotate the LAST n_dims of the head (deepseek4)
 
     std::string vars() override {
-        return VARS_TO_STR10(type, ne_a, n_dims, mode, n_ctx, fs, ef, af, ff, v);
+        return VARS_TO_STR10(type, ne_a, n_dims, mode, n_ctx, fs, ef, af, ff, v) + ",flipped=" + std::to_string(flipped);
     }
 
     test_rope(ggml_type type = GGML_TYPE_F32,
             std::array<int64_t, 4> ne_a = {10, 10, 10, 1},
-            int n_dims = 10, int mode = 0, int n_ctx = 512, float fs = 1.0f, float ef = 0.0f, float af = 0.0f, bool ff = false, int v = 0)
-        : type(type), ne_a(ne_a), n_dims(n_dims), mode(mode), n_ctx(n_ctx), fs(fs), ef(ef), af(af), ff(ff), v(v) {}
+            int n_dims = 10, int mode = 0, int n_ctx = 512, float fs = 1.0f, float ef = 0.0f, float af = 0.0f, bool ff = false, int v = 0, bool flipped = false)
+        : type(type), ne_a(ne_a), n_dims(n_dims), mode(mode), n_ctx(n_ctx), fs(fs), ef(ef), af(af), ff(ff), v(v), flipped(flipped) {}
 
     ggml_tensor * build_graph(ggml_context * ctx) override {
         ggml_tensor * a;
@@ -1338,6 +1339,9 @@ struct test_rope : public test_case {
         ggml_tensor * pos = ggml_new_tensor_1d(ctx, GGML_TYPE_I32, ne_a[2]);
         ggml_tensor * freq = ff ? ggml_new_tensor_1d(ctx, GGML_TYPE_F32, n_dims/2) : nullptr;
         ggml_tensor * out = ggml_rope_ext(ctx, a, pos, freq, n_dims, mode, 0, 10000.0f, fs, ef, af, 1.0f, 1.0f);
+        if (flipped) {
+            out->op_params[15] = 1;
+        }
         return out;
     }
 
@@ -1799,9 +1803,10 @@ struct test_flash_attn_ext : public test_case {
     const ggml_prec prec;
     const ggml_type type_K;
     const ggml_type type_V;
+    const bool sinks; // attention sinks (src[4]), as deepseek4 emits
 
     std::string vars() override {
-        return VARS_TO_STR12(hsk, hsv, nh, nr2, kv, nb, mask, max_bias, softcap, prec, type_K, type_V);
+        return VARS_TO_STR12(hsk, hsv, nh, nr2, kv, nb, mask, max_bias, softcap, prec, type_K, type_V) + ",sinks=" + std::to_string(sinks);
     }
 
     double max_nmse_err() override {
@@ -1810,9 +1815,9 @@ struct test_flash_attn_ext : public test_case {
 
     test_flash_attn_ext(int64_t hsk = 128, int64_t hsv = 128, int64_t nh = 32, int64_t nr2 = 1, int64_t kv = 96, int64_t nb = 8,
                         bool mask = true, float max_bias = 0.0f, float softcap = 0.0f, ggml_prec prec = GGML_PREC_F32,
-                        ggml_type type_K = GGML_TYPE_F16, ggml_type type_V = GGML_TYPE_F16)
+                        ggml_type type_K = GGML_TYPE_F16, ggml_type type_V = GGML_TYPE_F16, bool sinks = false)
         : hsk(hsk), hsv(hsv), nh(nh), nr2(nr2), kv(kv), nb(nb), mask(mask), max_bias(max_bias), softcap(softcap),
-          prec(prec), type_K(type_K), type_V(type_V) {}
+          prec(prec), type_K(type_K), type_V(type_V), sinks(sinks) {}
 
     ggml_tensor * build_graph(ggml_context * ctx) override {
         const int64_t hsk_padded = GGML_PAD(hsk, ggml_blck_size(type_K));
@@ -1836,6 +1841,13 @@ struct test_flash_attn_ext : public test_case {
 
         ggml_tensor * out = ggml_flash_attn_ext(ctx, q, k, v, m, 1.0f/sqrtf(hsk), max_bias, softcap);
         ggml_flash_attn_ext_set_prec(out, prec);
+        if (sinks) {
+            ggml_tensor * sk = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, nh*nr2);
+            ggml_set_name(sk, "s");
+            ggml_flash_attn_ext_add_sinks(out, sk);
+            // iqk FA has no sinks; the CPU reference must take the generic path, as the deepseek4 graph does
+            out->op_params[4] = GGML_FLASH_ATTN_EXT_IQK_DISABLED;
+        }
         ggml_set_name(out, "out");
 
         return out;
@@ -1845,6 +1857,9 @@ struct test_flash_attn_ext : public test_case {
         for (ggml_tensor * t = ggml_get_first_tensor(ctx); t != NULL; t = ggml_get_next_tensor(ctx, t)) {
             if (strcmp(t->name, "m") == 0) {
                 init_tensor_kq_mask(t);
+            } else if (strcmp(t->name, "s") == 0) {
+                // large enough that a kernel which drops the sink term fails the NMSE bound
+                init_tensor_uniform(t, 2.0f, 6.0f);
             } else {
                 init_tensor_uniform(t);
             }
@@ -2581,6 +2596,18 @@ static bool test_backend(ggml_backend_t backend, test_mode mode, const char * op
     test_cases.emplace_back(new test_soft_max(GGML_TYPE_F32, {32, 2, 32, 1}, true,  0.1f, 0.0f));
     test_cases.emplace_back(new test_soft_max(GGML_TYPE_F32, {32, 2, 32, 1}, true,  0.1f, 8.0f));
 
+    // ik flipped rope (op_params[15] == 1: rotate the LAST n_dims), the form deepseek4 emits on every
+    // q/k/compressor/attn-output rope (neox, 512-wide head, 64 rotary dims, yarn); plus the norm variant
+    for (int mode : { 0, 2 }) {
+        for (float fs : { 1.0f, 0.0625f }) {
+            for (float ef : { 0.0f, 1.0f }) {
+                test_cases.emplace_back(new test_rope(GGML_TYPE_F32, {512, 64, 5, 1}, 64, mode, 512, fs, ef, 1.0f, false, 0, true));
+                test_cases.emplace_back(new test_rope(GGML_TYPE_F32, {128,  8, 3, 1}, 32, mode, 512, fs, ef, 1.0f, false, 0, true));
+            }
+        }
+        test_cases.emplace_back(new test_rope(GGML_TYPE_F32, {512, 64, 5, 1}, 64, mode, 512, 1.0f, 0.0f, 1.0f, false, 0, false)); // same shape, not flipped
+    }
+
     {
         bool all = true;
 
@@ -2628,6 +2655,10 @@ static bool test_backend(ggml_backend_t backend, test_mode mode, const char * op
         test_cases.emplace_back(new test_argsort(GGML_TYPE_F32, {8, 1, 1, 1}, order));
         test_cases.emplace_back(new test_argsort(GGML_TYPE_F32, {16, 10, 10, 10}, order));
         test_cases.emplace_back(new test_argsort(GGML_TYPE_F32, {60, 10, 10, 10}, order)); // qwen
+        test_cases.emplace_back(new test_argsort(GGML_TYPE_F32, {256, 1, 1, 1}, order));   // deepseek4 expert routing, decode
+        test_cases.emplace_back(new test_argsort(GGML_TYPE_F32, {256, 11, 1, 1}, order));  // deepseek4 expert routing, prefill
+        test_cases.emplace_back(new test_argsort(GGML_TYPE_F32, {1024, 3, 1, 1}, order));
+        test_cases.emplace_back(new test_argsort(GGML_TYPE_F32, {2048, 2, 1, 1}, order));  // > one workgroup (argsort_large)
     }
 
     test_cases.emplace_back(new test_sum_rows());
@@ -2690,6 +2721,22 @@ static bool test_backend(ggml_backend_t backend, test_mode mode, const char * op
                 test_cases.emplace_back(new test_flash_attn_ext(512, 512, 1, 16, kv, nb, true, 0.0f, 0.0f, prec, GGML_TYPE_F16, GGML_TYPE_F16));
             }
         }
+    }
+    // deepseek4 attention: HSK=HSV=512, 64 Q heads on 1 K/V head, attention SINKS, F32 accumulate, f16/q8_0 K/V
+    for (bool sinks : { false, true }) {
+        for (ggml_type type_KV : { GGML_TYPE_F16, GGML_TYPE_Q8_0 }) {
+            for (int nr2 : { 16, 64 }) {
+                for (int kv : { 256, 1024 }) {
+                    for (int nb : { 1, 11 }) {
+                        test_cases.emplace_back(new test_flash_attn_ext(512, 512, 1, nr2, kv, nb, true, 0.0f, 0.0f, GGML_PREC_F32, type_KV, type_KV, sinks));
+                    }
+                }
+            }
+        }
+        // sinks on ordinary shapes, to tell "sinks broken" from "this shape broken"
+        test_cases.emplace_back(new test_flash_attn_ext(128, 128, 8, 4, 512, 1,  true, 0.0f, 0.0f, GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_F16, sinks));
+        test_cases.emplace_back(new test_flash_attn_ext(128, 128, 8, 4, 512, 32, true, 0.0f, 0.0f, GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_F16, sinks));
+        test_cases.emplace_back(new test_flash_attn_ext(256, 256, 8, 2, 512, 1,  true, 0.0f, 0.0f, GGML_PREC_F32, GGML_TYPE_F16, GGML_TYPE_F16, sinks));
     }
     // asymmetric K/V head sizes (MLA)
     for (int nb : { 1, 32, }) {

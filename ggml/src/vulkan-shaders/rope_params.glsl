@@ -29,6 +29,7 @@ struct rope_params {
 
     uint a_offset;
     uint d_offset;
+    uint rope_offset; // ik flipped rope: rotate [rope_offset, rope_offset+n_dims), copy [0, rope_offset)
 };
 
 #endif // !defined(GGML_ROPE_PARAMS)
