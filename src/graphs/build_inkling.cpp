@@ -51,7 +51,7 @@ static ggml_tensor * inkling_sconv(
         int64_t        off,          // float offset of this stream in the packed cell
         int64_t        d_conv,       // K - 1
         ggml_tensor  * seq_ids,      // I32 {1, n_tokens}
-        bool           reset_state) {
+        ggml_tensor  * reset_mul) {  // F32 {1}: 0 -> start from a zero state, 1 -> carry the cached state
     const int64_t w = x->ne[0];
     const int64_t T = x->ne[1];
 
@@ -69,8 +69,10 @@ static ggml_tensor * inkling_sconv(
     ggml_tensor * state_flat = ggml_view_2d(ctx, state_all, d_conv*w, 1,
             state_all->nb[1], off*esz);
 
-    // pos-0 graphs are discarded from reuse, so a baked reset never runs at pos > 0
-    ggml_tensor * state_in = reset_state ? ggml_scale(ctx, state_flat, 0.0f) : state_flat;
+    // The reset is an INPUT, not a graph shape: INKLING is in neither llm_arch_is_hybrid nor
+    // llm_arch_is_recurrent, so a pos-0 graph is NOT discarded from reuse (llama.cpp reset_previous)
+    // and a baked ggml_scale(state, 0) would re-run on every same-shape batch that follows.
+    ggml_tensor * state_in = ggml_mul(ctx, state_flat, reset_mul);
     ggml_tensor * states   = ggml_reshape_3d(ctx, state_in, d_conv, w, 1);
 
     // fused: conv_raw carries the conv output followed by the updated taps
@@ -146,6 +148,7 @@ ggml_cgraph * llm_build_context::build_inkling() {
     lctx.inp_inkling_rel_idx_swa = nullptr;
     lctx.inp_inkling_vocab_mask  = nullptr;
     lctx.inp_inkling_shexp_idx   = nullptr;
+    lctx.inp_inkling_reset       = nullptr;
 
     bool has_swa_layer    = false;
     bool has_global_layer = false;
@@ -161,6 +164,12 @@ ggml_cgraph * llm_build_context::build_inkling() {
     cb(lctx.inp_s_seq_qnext, "inp_s_seq_qnext", -1);
     ggml_set_input(lctx.inp_s_seq_qnext);
     ggml_tensor * seq_ids = lctx.inp_s_seq_qnext;
+
+    // conv-state reset multiplier, filled per batch in llama_set_inputs (0 at pos 0, else 1)
+    lctx.inp_inkling_reset = ggml_new_tensor_1d(ctx0, GGML_TYPE_F32, 1);
+    cb(lctx.inp_inkling_reset, "inp_inkling_reset", -1);
+    ggml_set_input(lctx.inp_inkling_reset);
+    ggml_tensor * reset_mul = lctx.inp_inkling_reset;
 
     // log-N attention scaling, global (non-SWA) layers only: tau = 1 + alpha*log(max(pos+1)/n_floor, 1)
     ggml_tensor * tau = nullptr;
@@ -211,8 +220,6 @@ ggml_cgraph * llm_build_context::build_inkling() {
         shexp_idx = lctx.inp_inkling_shexp_idx;
     }
 
-    // states are zeroed at cache allocation; a pos-0 batch resets them explicitly
-    const bool reset_state = batch.pos && batch.pos[0] == 0;
 
     cur = inpL;
 
@@ -244,8 +251,8 @@ ggml_cgraph * llm_build_context::build_inkling() {
         cb(r, "inkling_attn_r", il);
 
         // k/v short convs on the flat projections, BEFORE the head reshape
-        k = inkling_sconv(ctx0, gf, k, layer.shortconv_k, state_all, off_k, d_conv, seq_ids, reset_state);
-        v = inkling_sconv(ctx0, gf, v, layer.shortconv_v, state_all, off_v, d_conv, seq_ids, reset_state);
+        k = inkling_sconv(ctx0, gf, k, layer.shortconv_k, state_all, off_k, d_conv, seq_ids, reset_mul);
+        v = inkling_sconv(ctx0, gf, v, layer.shortconv_v, state_all, off_v, d_conv, seq_ids, reset_mul);
         cb(k, "inkling_attn_k_sconv", il);
         cb(v, "inkling_attn_v_sconv", il);
 
@@ -323,7 +330,7 @@ ggml_cgraph * llm_build_context::build_inkling() {
         cb(attn_out, "inkling_attn_o", il);
 
         attn_out = inkling_sconv(ctx0, gf, attn_out, layer.shortconv_attn, state_all,
-                off_attn, d_conv, seq_ids, reset_state);
+                off_attn, d_conv, seq_ids, reset_mul);
         cb(attn_out, "inkling_attn_sconv", il);
 
         cur = ggml_add(ctx0, inpSA, attn_out);
@@ -437,7 +444,7 @@ ggml_cgraph * llm_build_context::build_inkling() {
         }
 
         ffn_out = inkling_sconv(ctx0, gf, ffn_out, layer.shortconv_mlp, state_all,
-                off_mlp, d_conv, seq_ids, reset_state);
+                off_mlp, d_conv, seq_ids, reset_mul);
         cb(ffn_out, "inkling_ffn_sconv", il);
 
         cur = ggml_add(ctx0, ffn_res, ffn_out);

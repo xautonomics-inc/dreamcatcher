@@ -1483,6 +1483,17 @@ static void llama_model_quantize_internal(const std::string & fname_inp, const s
         quantize &= name != LLM_TN(model.arch)(LLM_TENSOR_POS_EMBD,    "weight");
         quantize &= name != LLM_TN(model.arch)(LLM_TENSOR_TOKEN_TYPES, "weight");
 
+        // keep Inkling's short-conv kernels and relative-position table unquantized, as the
+        // reference does: the kernels are cast to F32 for ggml_ssm_conv and the rel table is
+        // transposed and gathered per row; a block-quantized copy of either is garbage.
+        if (model.arch == LLM_ARCH_INKLING) {
+            quantize &= name.find("shortconv_k.weight")    == std::string::npos;
+            quantize &= name.find("shortconv_v.weight")    == std::string::npos;
+            quantize &= name.find("shortconv_attn.weight") == std::string::npos;
+            quantize &= name.find("shortconv_mlp.weight")  == std::string::npos;
+            quantize &= name.find("attn_rel_proj.weight")  == std::string::npos;
+        }
+
         // do not quantize Mamba's small yet 2D weights
         // NOTE: can't use LLM_TN here because the layer number is not known
         quantize &= name.find("ssm_conv1d")        == std::string::npos;
