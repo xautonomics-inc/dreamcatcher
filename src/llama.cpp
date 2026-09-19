@@ -6314,7 +6314,7 @@ static void llama_set_inputs(llama_context & lctx, const llama_batch & batch) {
         int32_t * data = (int32_t *) lctx.inp_s_seq_qnext->data;
 
         for (int64_t j = 0; j < n_tokens; ++j) {
-            if (model.arch == LLM_ARCH_INKLING) {
+            if (lctx.model.arch == LLM_ARCH_INKLING) {
                 int32_t seq = (batch.seq_id && batch.seq_id[j]) ? batch.seq_id[j][0] : 0;
                 if (seq < 0 || seq >= ne0) {
                     seq = 0;
