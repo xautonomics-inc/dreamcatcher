@@ -209,6 +209,7 @@ target_include_directories(test-iq4-ks-kt-decode PRIVATE ${PROJECT_SOURCE_DIR}/g
 
 # per-op validation of every registered backend against the CPU reference
 llama_build_and_test(test-backend-ops.cpp)
+llama_target_and_test(test-flash-attn-banded.cpp)
 llama_build_and_test(test-quant-matmul.cpp LABEL "quant")
 
 llama_target_and_test(test-model-load-cancel.cpp  LABEL "model")
