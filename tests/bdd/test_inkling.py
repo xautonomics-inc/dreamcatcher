@@ -11,14 +11,23 @@ already bound (pytest-bdd dedupes on (feature filename, scenario name)).
 from pytest_bdd import scenario
 
 
-@scenario("features/inkling.feature", "CPU greedy generation matches the D0 oracle token-for-token")
+# D2 amendment (2026-09-19): the equality gate became a pre-registered
+# cross-lineage envelope, so the scenario titles below track the feature
+# file — a stale title here fails collection with ScenarioNotFound.
+@scenario(
+    "features/inkling.feature",
+    "CPU greedy generation stays within the cross-lineage envelope of the D0 oracle",
+)
 def test_inkling_d2_greedy_parity():
-    """D2: greedy token IDs and per-position log-probabilities vs the oracle."""
+    """D2: greedy metrics inside the pre-registered cross-lineage envelope."""
 
 
-@scenario("features/inkling.feature", "4-chunk perplexity reproduces the oracle per-chunk values")
+@scenario(
+    "features/inkling.feature",
+    "4-chunk perplexity falls within the envelope around the oracle per-chunk values",
+)
 def test_inkling_d2_ppl_parity():
-    """D2: the four per-chunk perplexity values vs the oracle log."""
+    """D2: per-chunk perplexity inside the envelope band around the oracle log."""
 
 
 @scenario(
