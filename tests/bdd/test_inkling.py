@@ -1,8 +1,9 @@
 """Bind the implemented Inkling scenarios.
 
-Only the two @d2 parity scenarios, the @d6 @ci synthetic-fixture smoke and
-the @fail-closed scenario have step definitions (steps/inkling_steps.py).
-The D1/D3/D4a/D4b/D4c lanes stay unbound until their steps exist — a
+The two @d2 parity scenarios, the @d6 @ci synthetic-fixture smoke, and
+the @fail-closed scenario have step definitions in steps/inkling_steps.py;
+the @d4c remote-experts scenario in steps/inkling_remote_experts_steps.py.
+The D1/D3/D4a/D4b lanes stay unbound until their steps exist — a
 whole-file scenarios() bind here would fail collection with
 StepDefinitionNotFoundError for the whole feature, so bind by scenario
 title. A later whole-file scenarios() call skips these as already bound
@@ -49,3 +50,12 @@ def test_inkling_fail_closed():
 )
 def test_inkling_d6_ci_fixture():
     """D6: the synthetic Inkling fixture loads and its graph runs on CPU."""
+
+
+@scenario(
+    "features/inkling.feature",
+    "Remote experts are byte-exact against in-process experts",
+)
+def test_inkling_d4c_remote_experts():
+    """D4c: expert-server --moe-form inkling vs in-process, byte-identical
+    tokens, per-step logits hashes and raw logits (steps/inkling_remote_experts_steps.py)."""
