@@ -1,0 +1,20 @@
+{
+  "metrics": {
+    "top1_disagreement": {
+      "drift": 15.25,
+      "ceiling": 16.50,
+      "ceiling_ci": 0.58,
+      "band": "masked_ceiling",
+      "finding": "drift × 2 (30.50 %) exceeds masked ceiling (16.50 %); fires rule 2 (under ceiling) and rule 3 (wider than half ceiling)",
+      "provenance": "nvidia calibration run 2026-09-19: llama-perplexity KL-divergence vs banded D0 oracle, 4x2048 chunks"
+    },
+    "rms_dp": {
+      "drift": 9.18,
+      "ceiling": 10.01,
+      "ceiling_ci": 0.50,
+      "band": "masked_ceiling",
+      "finding": "drift × 2 (18.36 %) exceeds masked ceiling (10.01 %); fires rule 2 (under ceiling) and rule 3 (wider than half ceiling)",
+      "provenance": "nvidia calibration run 2026-09-19: llama-perplexity KL-divergence vs banded D0 oracle, 4x2048 chunks"
+    }
+  }
+}

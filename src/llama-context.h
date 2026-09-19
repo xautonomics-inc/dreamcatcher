@@ -640,7 +640,7 @@ struct llama_context {
     struct ggml_tensor * inp_inkling_rel_idx_swa = nullptr; // I32 [n_kv, n_batch]
     struct ggml_tensor * inp_inkling_vocab_mask  = nullptr; // F32 [n_vocab]
     struct ggml_tensor * inp_inkling_shexp_idx   = nullptr; // I32 [n_expert_shared, n_batch]
-    struct ggml_tensor * inp_inkling_reset       = nullptr; // F32 [1]: 0 on a pos-0 batch (fresh conv state), else 1
+    struct ggml_tensor * inp_inkling_reset       = nullptr; // F32 [1, n_state_slots]: 0 on pos-0 (fresh conv state per sequence), else 1
     struct ggml_tensor * inp_inkling_q_pos       = nullptr; // I32 [n_batch]: batch.pos, banded-FA path only
     struct ggml_tensor * inp_inkling_kv_pos      = nullptr; // I32 [n_kv]: kv_self.cells[].pos (-1 empty), banded-FA path only
     struct ggml_tensor * inp_pos_bucket;    // I32 [n_batch|n_kv, n_batch]
