@@ -670,6 +670,7 @@ extern "C" {
         GGML_OP_CONV_2D_DW,
 
         GGML_OP_FLASH_ATTN_EXT,
+        GGML_OP_FLASH_ATTN_EXT_BANDED,
         GGML_OP_FLASH_ATTN_BACK,
         GGML_OP_SSM_CONV,
         GGML_OP_SSM_SCAN,
@@ -2524,6 +2525,52 @@ extern "C" {
             float                 scale,
             float                 max_bias,
             float                 softcap);
+
+    // Banded (sliding-window relative-position bias) flash attention.
+    //
+    // Same layout as ggml_flash_attn_ext. The relative-position bias is read from the
+    // rel_logits band instead of a full additive bias tensor broadcast over n_kv:
+    //
+    //   score(q, k) = q.k * scale + rel_logits[dist, head, q_row, batch_or_0]
+    //
+    // where dist = q_row + (n_kv - n_q) - k_col is the distance from the query to the
+    // key (the FA convention that aligns a short decode Q block to the tail of K).
+    // Entries outside [0, rel_extent) contribute no bias; the band is expected to
+    // encode the sliding-window cutoff as -INF beyond the window.
+    //
+    // rel_logits: [rel_extent, n_head, n_q_max, 1 or n_batch] (F32, F16, or BF16)
+    // mask:       optional, same constraints as ggml_flash_attn_ext (F16).
+    //
+    // Sources: src[0]=q src[1]=k src[2]=v src[3]=mask src[5]=rel_logits (same slot as the
+    // mainline reference), src[6]=q_pos, src[7]=kv_pos (optional, see _set_pos below).
+    // op_params: [0]=scale (f32), [3]=prec, [4]=window (i32), [5]=rel_extent (i32).
+    GGML_API struct ggml_tensor * ggml_flash_attn_ext_banded(
+            struct ggml_context * ctx,
+            struct ggml_tensor  * q,
+            struct ggml_tensor  * k,
+            struct ggml_tensor  * v,
+            struct ggml_tensor  * mask,
+            struct ggml_tensor  * rel_logits,
+            float                 scale,
+            int64_t               rel_extent);
+
+    // ik-fork extension (D3): explicit positions for the band lookup.
+    //   dist = q_pos[q_row] - kv_pos[k_col]      (both I32; kv_pos < 0 marks an empty cell, skipped)
+    // replaces the column-based default `dist = q_row + (n_kv - n_q) - k_col`. This fork's
+    // KV cache is padded (n_kv != kv_head + n_q) and its graphs are reused across ubatches
+    // keyed on shape, not kv_head, so a column-based distance cannot be made exact there;
+    // positions are graph INPUTS and stay correct under reuse, context shift and multi-seq.
+    // Pass NULL for both to keep the default convention.
+    GGML_API void ggml_flash_attn_ext_banded_set_pos(
+            struct ggml_tensor * a,
+            struct ggml_tensor * q_pos,
+            struct ggml_tensor * kv_pos);
+
+    // Sliding-window early-out: keys with dist outside [0, window) are excluded (-INF), the
+    // SWA cutoff. 0 (default) disables it; the mask still applies in either case.
+    GGML_API void ggml_flash_attn_ext_banded_set_window(
+            struct ggml_tensor * a,
+            int32_t              window);
 
     // Backend hint stored in ggml_flash_attn_ext op_params slot 4.
     // Negative values request the generic implementation instead of IQK FA.
