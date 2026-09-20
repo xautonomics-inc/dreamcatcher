@@ -12,38 +12,77 @@ Binding contract (feature header):
   service. Givens only record resolution state; every runner When re-checks
   it and pytest.skip()s with the precise reason before launching anything.
 
-Oracle artifacts (sha256 pinned in the feature header) and asserted values:
+Oracle artifacts (sha256 pinned in the feature header):
 - greedy-64x8.json: per-prompt greedy token IDs with per-position logprob and
-  top_logprobs (n_probs: 10).
-- kld-base-4x2048.bin + ppl.log: four per-chunk perplexity values
-  94.3665, 83.6386, 78.6291, 72.6183 — the final estimate IS chunk 4.
-The oracle's own error bar (± 5.49154) is NOT a tolerance.
+  top_logprobs (n_probs: 10); no full logit vectors, so KLD is not computable
+  from it — the greedy scenario observes top-1 agreement only.
+- kld-base-4x2048.bin: the banded oracle's base logits over the D0 4-chunk
+  split — the --kl-divergence base the KLD / top-1 scenario runs against.
+- ppl.log: per-chunk perplexity 94.3665, 83.6386, 78.6291, 72.6183 (the
+  final estimate IS chunk 4); recorded, not gated. The oracle's own error
+  bar (± 5.49154) is NOT a tolerance.
 
-Cross-lineage envelope (D2 amendment, 2026-09-19) — no tolerances:
+Cross-lineage gate rule (candreev-blessed, 2026-09-19; the verbatim 3-part
+rule is in the feature header) — no tolerances, an envelope:
 - The equality gate is replaced by a pre-registered envelope in the
-  INKLING_ENVELOPE_JSON file. The step file pins the schema and metric
-  names, never a calibration figure:
-  {"metrics": {"<name>": {"bound": <float > 0>, "ceiling": <float>,
+  INKLING_ENVELOPE_JSON file. The step file pins the schema, the metric
+  names and the ×2 multiplier (WORKING_BAND_MULTIPLIER); the calibration
+  figures live in the feature header's BAND record and the envelope
+  registration must match it:
+  {"metrics": {"<name>": {"drift": <float > 0>, "ceiling": <float>,
+  "ceiling_ci": <float >= 0, optional, default 0>,
+  "band": "drift_x2" | "masked_ceiling",
+  "finding": "<text, required for masked_ceiling>",
   "provenance": "<calibration run>"}}}
-- Pinned metric names (ENVELOPE_METRICS): greedy_logprob_delta (max
-  absolute per-position logprob deviation), token_mismatch_rate (fraction
-  of positions whose token ID differs), perplexity_chunk_delta (max
-  absolute per-chunk deviation), perplexity_final_delta (absolute
-  deviation of the final estimate from the recorded overall perplexity).
-- A bound exceeding its ceiling is surfaced as a finding by the dedicated
-  Then; a structurally invalid envelope fails at the Given.
-  INKLING_ENVELOPE_JSON unset/unreadable is recorded unmet and the runner
-  Whens skip before launching anything — fail closed, like every runner
-  variable here.
+  drift      = the measured banded-vs-banded drift of that metric
+  ceiling    = the masked-path ceiling: the reference's own masked path vs
+               the banded oracle, on the same metric; ceiling_ci its ± as
+               printed by the calibration run
+- band "drift_x2": working band = drift × WORKING_BAND_MULTIPLIER (rule 1).
+  Rule 2 (band not under the ceiling) and rule 3 (band wider than half the
+  masked band) are surfaced as findings via pytest.fail — by the gate Then
+  for the metrics it checks (the band is capped, never clamped) and by the
+  dedicated audit Then for every registered entry.
+- band "masked_ceiling" (the practical D2/D3 gate, BAND record 2026-09-19,
+  pending noah/emma's final encode): working band = ceiling + ceiling_ci —
+  "at least as good as the reference's own masked path, within CI". Legal
+  ONLY when drift × 2 actually fires rule 2 or 3 (otherwise the entry must
+  be drift_x2) and only with a non-empty recorded finding, which the gate
+  and audit Thens re-derive from the numbers and re-emit as a warning on
+  every run. A masked_ceiling entry with no finding, or one whose drift × 2
+  sits under half the ceiling, is pytest.fail()ed — a finding that is
+  neither recorded nor visible is absorption by another name.
+- Gate: the observed metric is <= the working band.
+- Pinned metric names (ENVELOPE_METRICS), both percentages and distances
+  from the banded oracle (0 = identical), straight from the KL-divergence
+  summary: top1_disagreement (100 − "Same top p", the percentage of
+  positions whose argmax differs from the banded oracle), rms_dp ("RMS Δp",
+  the RMS token-probability deviation in %).
+- A structurally invalid envelope fails at the Given. INKLING_ENVELOPE_JSON
+  unset/unreadable is recorded unmet and the runner Whens skip before
+  launching anything — fail closed, like every runner variable here.
+- Every scenario that binds the gate Then records its observation on
+  bdd_context.inkling_observed ({metric name: value}) in its When; the gate
+  Then fails closed when nothing was recorded. The @d3 lane binds the same
+  Then when its steps land.
 
 Runner contract (until the D2 binary lands these env vars are unbound and
 the scenarios skip):
-- INKLING_GREEDY_CMD: shell-free command template with a {model} placeholder;
-  stdout must be the greedy dump in the oracle's schema (see
-  _greedy_positions for the required record shape).
-- INKLING_PPL_CMD: command template with {model} and {text} placeholders;
-  stdout must carry llama.cpp-style "[i]value" per-chunk entries and a
-  "Final estimate: PPL = X +/- Y" line.
+- INKLING_GREEDY_CMD: shell-free command template with {model} and
+  {oracle_dir} placeholders; stdout must be the greedy dump in the oracle's
+  schema (see _greedy_positions for the record shape). tools/
+  inkling-greedy-dump.py produces it from any llama-server binary, driving
+  the D0 prompt set (read from {oracle_dir}/greedy-64x8.json, prompts only)
+  with the D0 request body, e.g.
+    INKLING_GREEDY_CMD='python3 tools/inkling-greedy-dump.py --server BIN
+      --model {model} --prompts {oracle_dir}/greedy-64x8.json
+      --server-args "-ngl 0 -t 20 -c 4096 -np 1 -fa off"'
+  The oracle was recorded through the same endpoint and body (masked path
+  is -fa off; the D0 recording itself ran the reference's banded default).
+- INKLING_PPL_CMD: command template with {model}, {text} and {base}
+  placeholders ({base} = the sha-pinned kld-base-4x2048.bin, i.e. a
+  llama-perplexity --kl-divergence run); stdout must carry the llama.cpp
+  KL-divergence summary lines "RMS Δp    : X ± Y %" and "Same top p: Z ± W %".
 - INKLING_ORACLE_FEATURES / INKLING_BUILD_FEATURES: comma-separated CPU
   feature sets of the oracle and runner builds. Token-for-token equality
   is asserted as a gate only when both are declared and equal; otherwise
@@ -104,15 +143,26 @@ from pathlib import Path
 import pytest
 from pytest_bdd import given, parsers, then, when
 
+# Gate rule 1 (feature header): working band = measured banded-vs-banded
+# drift × 2. The multiplier is pre-registered here, fixed before any
+# calibration number lands, and never read from the envelope.
+WORKING_BAND_MULTIPLIER = 2
+
 # Metric names this step file consults in the pre-registered envelope
-# (schema in the module docstring). The envelope may carry more entries;
-# only these four are the D2 gate. Names are pinned here and nowhere else.
+# (schema in the module docstring). Both are percentages and distances from
+# the banded D0 oracle (0 = identical), so drift, band and ceiling read the
+# same way for each. The envelope may carry more entries (every entry is
+# audited); only these two are the gate. Names are pinned here and nowhere
+# else.
 ENVELOPE_METRICS = (
-    "greedy_logprob_delta",     # max absolute per-position logprob deviation
-    "token_mismatch_rate",      # fraction of positions with a differing token ID
-    "perplexity_chunk_delta",   # max absolute per-chunk ppl deviation
-    "perplexity_final_delta",   # |final estimate - recorded overall ppl|
+    "top1_disagreement",  # 100 - top-1 agreement %: positions whose argmax differs
+    "rms_dp",             # RMS token-probability deviation % vs the banded base logits
 )
+
+# Band modes an envelope entry may register (schema in the module docstring).
+BAND_DRIFT_X2 = "drift_x2"            # rule 1: drift × WORKING_BAND_MULTIPLIER
+BAND_MASKED_CEILING = "masked_ceiling"  # practical gate: ceiling + ceiling_ci, finding recorded
+BAND_MODES = (BAND_DRIFT_X2, BAND_MASKED_CEILING)
 
 ORACLE_FILES = {
     "greedy-64x8.json": "1b5e5c4bff5b98cbe91345e5df290a804667e25ff728fbbba78b3d08cef923f0",
@@ -193,25 +243,47 @@ def _resolve_envelope(bdd_context) -> None:
 def _validate_envelope(data, source: str) -> dict:
     """Structural validation of a pre-registered envelope (schema: docstring).
 
-    Required shape: {"metrics": {"<name>": {"bound": float > 0,
-    "ceiling": float, "provenance": str}}}. Every pinned metric in
-    ENVELOPE_METRICS must be present. A bound exceeding its ceiling is
-    deliberately NOT rejected here: that is a registered finding the
-    dedicated Then surfaces as data, not a structural defect.
+    Required shape: {"metrics": {"<name>": {"drift": float > 0,
+    "ceiling": float, "ceiling_ci"?: float >= 0, "band": BAND_MODES,
+    "finding"?: str, "provenance": str}}}. Every pinned metric in
+    ENVELOPE_METRICS must be present, and every entry — pinned or not —
+    must carry the full schema, because the audit Then reads them all.
+    Rules 2 and 3 (working band vs ceiling) are deliberately NOT applied
+    here: those are registered findings the gate and audit Thens surface as
+    data, not structural defects.
     """
     if not isinstance(data, dict) or not isinstance(data.get("metrics"), dict):
         pytest.fail(f"{source}: envelope must be {{\"metrics\": {{...}}}}")
     metrics = data["metrics"]
     for name in ENVELOPE_METRICS:
-        entry = metrics.get(name)
+        if name not in metrics:
+            pytest.fail(f"{source}: envelope is missing the pinned metric {name!r}")
+    for name, entry in metrics.items():
         if not isinstance(entry, dict):
-            pytest.fail(f"{source}: envelope metric {name!r} is missing or not an object")
-        for field in ("bound", "ceiling"):
+            pytest.fail(f"{source}: envelope metric {name!r} is not an object")
+        for field in ("drift", "ceiling"):
             value = entry.get(field)
             if isinstance(value, bool) or not isinstance(value, (int, float)):
                 pytest.fail(f"{source}: envelope metric {name!r} field {field!r} must be a number")
-        if not entry["bound"] > 0:
-            pytest.fail(f"{source}: envelope metric {name!r} bound must be > 0")
+        if not entry["drift"] > 0:
+            pytest.fail(
+                f"{source}: envelope metric {name!r} drift must be > 0 (a zero working "
+                f"band cannot gate a cross-lineage run; a drift measured at exactly 0 is "
+                f"a finding to raise, not a value to register)"
+            )
+        ceiling_ci = entry.setdefault("ceiling_ci", 0)
+        if isinstance(ceiling_ci, bool) or not isinstance(ceiling_ci, (int, float)) or ceiling_ci < 0:
+            pytest.fail(f"{source}: envelope metric {name!r} ceiling_ci must be a number >= 0")
+        if entry.get("band") not in BAND_MODES:
+            pytest.fail(f"{source}: envelope metric {name!r} band must be one of {BAND_MODES}")
+        finding = entry.get("finding", "")
+        if not isinstance(finding, str):
+            pytest.fail(f"{source}: envelope metric {name!r} finding must be a string")
+        if entry["band"] == BAND_MASKED_CEILING and not finding.strip():
+            pytest.fail(
+                f"{source}: envelope metric {name!r} registers band {BAND_MASKED_CEILING!r} "
+                f"without a recorded finding — the rule-2/3 finding must be recorded, not absorbed"
+            )
         provenance = entry.get("provenance")
         if not isinstance(provenance, str) or not provenance:
             pytest.fail(f"{source}: envelope metric {name!r} needs a non-empty provenance")
@@ -237,27 +309,46 @@ def given_inkling_envelope(bdd_context):
 def _greedy_positions(record: dict) -> list[dict]:
     """Extract per-position entries from one greedy dump record.
 
-    Required record shape (greedy-64x8.json): {"prompt": str, "tokens": [
-    {"id": int, "logprob": float, "top_logprobs": [float, ... <= 10]}, ...]}.
-    A mismatch fails loudly with the schema so the adaptation happens here
-    and nowhere else when the real dump lands.
+    Record shape = the D0 recording's (greedy-64x8.json), i.e. what llama-server
+    /completion returns for the D0 request body and what tools/
+    inkling-greedy-dump.py writes: {"prompt": str, "tokens": [int, ...],
+    "completion_probabilities": [{"id": int, "logprob": float,
+    "top_logprobs": [{"id": int, "logprob": float, ...}, ... <= n_probs]},
+    ...]}. The per-position id, logprob and the top_logprobs logprob values are
+    what the steps compare; "tokens" (when present) must agree with the
+    per-position ids, or the record is inconsistent. A mismatch fails loudly
+    with the schema so the adaptation happens here and nowhere else.
     """
     try:
-        positions = record["tokens"]
-        return [
+        positions = [
             {
                 "id": int(entry["id"]),
                 "logprob": float(entry["logprob"]),
-                "top_logprobs": [float(value) for value in entry["top_logprobs"]],
+                "top_logprobs": [float(top["logprob"]) for top in entry["top_logprobs"]],
             }
-            for entry in positions
+            for entry in record["completion_probabilities"]
         ]
+        tokens = record.get("tokens")
     except (KeyError, TypeError, ValueError) as error:
         pytest.fail(
-            "greedy dump record does not match the documented schema "
-            f'({{"prompt": str, "tokens": [{{"id", "logprob", "top_logprobs"}}]}}): '
+            "greedy dump record does not match the D0 recording schema "
+            '({"prompt": str, "tokens": [int], "completion_probabilities": '
+            '[{"id", "logprob", "top_logprobs": [{"id", "logprob"}]}]}): '
             f"{error!r}"
         )
+    if not positions:
+        pytest.fail("greedy dump record holds no positions (empty completion_probabilities)")
+    if tokens is not None:
+        try:
+            ids = [int(token) for token in tokens]
+        except (TypeError, ValueError) as error:
+            pytest.fail(f"greedy dump record: tokens[] is not a list of ids: {error!r}")
+        if ids != [entry["id"] for entry in positions]:
+            pytest.fail(
+                "greedy dump record is inconsistent: tokens[] disagrees with "
+                "completion_probabilities[].id"
+            )
+    return positions
 
 
 def _load_greedy_records(payload: bytes, source: str) -> list[dict]:
@@ -292,17 +383,34 @@ def _require(bdd_context, command_env: str) -> tuple[Path, Path, str]:
     return bdd_context.inkling_oracle["dir"], model, command
 
 
-def _run_command(command: str, **placeholders: str) -> str:
-    argv = [part.format(**placeholders) for part in shlex.split(command)]
+RUNNER_TIMEOUT_S = float(os.environ.get("INKLING_RUNNER_TIMEOUT", "7200"))
+
+
+def _run_command_full(command: str, **placeholders: str) -> tuple[str, str]:
+    """Run a shell-free command template CPU-only; (stdout, stderr), fail on non-zero.
+
+    Placeholders are substituted per shlex token ({model}, {text}, {base},
+    {oracle_dir}); an unknown placeholder in the template fails loudly rather
+    than launching a mangled command.
+    """
+    try:
+        argv = [part.format(**placeholders) for part in shlex.split(command)]
+    except (KeyError, IndexError, ValueError) as error:
+        pytest.fail(f"runner template {command!r} uses a placeholder this step does not provide: {error!r}")
     environment = {**os.environ, "CUDA_VISIBLE_DEVICES": ""}
     completed = subprocess.run(
-        argv, capture_output=True, text=True, timeout=3600, env=environment, check=False
+        argv, capture_output=True, text=True, errors="replace", timeout=RUNNER_TIMEOUT_S,
+        env=environment, check=False,
     )
     if completed.returncode != 0:
         pytest.fail(
             f"{argv[0]} exited {completed.returncode}; stderr tail:\n{completed.stderr[-2000:]}"
         )
-    return completed.stdout
+    return completed.stdout, completed.stderr
+
+
+def _run_command(command: str, **placeholders: str) -> str:
+    return _run_command_full(command, **placeholders)[0]
 
 
 @given(parsers.parse("Inkling-Small GGUF metadata for the model named by INKLING_MODEL_PATH"))
@@ -343,9 +451,44 @@ def when_greedy_run(bdd_context):
     oracle_records = _load_greedy_records(
         (directory / "greedy-64x8.json").read_bytes(), "oracle greedy-64x8.json"
     )
-    stdout = _run_command(command, model=str(model))
+    stdout = _run_command(command, model=str(model), oracle_dir=str(directory))
     bdd_context.inkling_greedy_oracle = oracle_records
     bdd_context.inkling_greedy_run = _load_greedy_records(stdout.encode(), "greedy runner stdout")
+    # Autoregressive greedy compounds after the first divergence, so its positional
+    # top-1 is NOT a cross-lineage envelope metric — the @d2 KLD scenario (teacher-forced,
+    # non-compounding) owns the parity gate. This scenario asserts greedy runs COHERENTLY
+    # (then_greedy_coherent); the divergence vs the oracle is recorded as a diagnostic.
+    deltas, mismatches, positions = _greedy_comparison(bdd_context)
+    if positions:
+        _record_diagnostic(
+            f"greedy top-1 divergence vs the banded oracle = {mismatches}/{positions} "
+            f"positions ({100.0 * mismatches / positions:.2f}%), max |dlogprob| = "
+            f"{max(deltas):.6g} (diagnostic: greedy compounds cross-lineage; not a gated metric)"
+        )
+
+
+@then(parsers.parse("greedy generation completes on every prompt with finite, well-formed logprobs"))
+def then_greedy_coherent(bdd_context):
+    """@d2 greedy gate (redefined): greedy must run coherently on the fork.
+
+    Autoregressive greedy compounds cross-lineage, so token-parity vs the reference is
+    not the gate here (the @d2 KLD scenario owns parity). This asserts the fork actually
+    generates: every prompt yields well-formed positions with finite logprobs. The top-1
+    divergence vs the oracle is recorded as a diagnostic in the When.
+    """
+    run_records = getattr(bdd_context, "inkling_greedy_run", None)
+    if not run_records:
+        pytest.fail("no greedy run recorded: the When must run greedy generation before this gate (fail closed)")
+    failures: list[str] = []
+    for index, record in enumerate(run_records):
+        positions = _greedy_positions(record)
+        for pos, entry in enumerate(positions):
+            if not math.isfinite(entry["logprob"]):
+                failures.append(f"prompt {index} pos {pos}: non-finite logprob {entry['logprob']}")
+            if not entry["top_logprobs"] or not all(math.isfinite(v) for v in entry["top_logprobs"]):
+                failures.append(f"prompt {index} pos {pos}: empty or non-finite top_logprobs")
+    if failures:
+        pytest.fail("greedy generation was not coherent:\n  " + "\n  ".join(failures[:10]))
 
 
 def _envelope_metrics(bdd_context) -> dict:
@@ -361,31 +504,101 @@ def _envelope_metrics(bdd_context) -> dict:
     return bdd_context.inkling_envelope["data"]["metrics"]
 
 
-def _envelope_fails(entry: dict, observed: float) -> str | None:
-    """Band check of one observed value against one envelope entry.
+def _rule1_band(entry: dict) -> float:
+    """Gate rule 1: drift × the pinned multiplier — always computed from the
+    registered drift, whatever band mode the entry gates on."""
+    return entry["drift"] * WORKING_BAND_MULTIPLIER
 
-    Band semantics: the metric holds when observed <= bound. Returns a
-    failure report line (with the calibration provenance) or None when
-    the value sits inside the band.
+
+def _working_band(entry: dict) -> float:
+    """The band the gate compares against, per the registered band mode."""
+    if entry["band"] == BAND_MASKED_CEILING:
+        return entry["ceiling"] + entry["ceiling_ci"]
+    return _rule1_band(entry)
+
+
+def _band_findings(name: str, entry: dict) -> list[str]:
+    """Gate rules 2 and 3 for one envelope entry, as finding lines.
+
+    Always evaluated on the rule-1 band (drift × 2), never on the practical
+    band — the finding is about the pre-registered rule.
+    Rule 2: the working band must sit under the masked-path ceiling.
+    Rule 3: a working band wider than half the masked band is a finding.
+    A band failing rule 2 also fails rule 3; only the rule-2 line is
+    emitted then. Findings come back as data; _surface_band_findings
+    decides between pytest.fail and a re-emitted recorded finding.
     """
-    if observed <= entry["bound"]:
+    band, ceiling = _rule1_band(entry), entry["ceiling"]
+    detail = (
+        f"drift {entry['drift']!r} × {WORKING_BAND_MULTIPLIER} = working band {band!r}, "
+        f"masked-path ceiling {ceiling!r}; provenance: {entry['provenance']}"
+    )
+    if not band < ceiling:
+        return [f"{name}: rule 2 — working band does not sit under the masked-path ceiling ({detail})"]
+    if band > ceiling / 2:
+        return [f"{name}: rule 3 — working band is wider than half the masked band ({detail})"]
+    return []
+
+
+def _surface_band_findings(name: str, entry: dict) -> None:
+    """Surface rule-2/3 findings for one entry, per its band mode.
+
+    drift_x2: any finding pytest.fail()s — the band is capped by the
+    ceiling, never clamped to it.
+    masked_ceiling: the finding MUST exist (else the practical band is not
+    justified and the entry must go back to drift_x2) and is re-emitted as
+    a warning on every run alongside the recorded finding text, so it stays
+    visible without blocking the practical gate (BAND record 2026-09-19,
+    pending noah/emma's final encode).
+    """
+    findings = _band_findings(name, entry)
+    if entry["band"] == BAND_DRIFT_X2:
+        if findings:
+            pytest.fail(
+                "working band is not capped by the masked-path ceiling — a finding, not a gate:\n"
+                + "\n".join(f"  - {finding}" for finding in findings)
+            )
+        return
+    if not findings:
+        pytest.fail(
+            f"{name}: registered band {BAND_MASKED_CEILING!r} is not justified — drift × "
+            f"{WORKING_BAND_MULTIPLIER} = {_rule1_band(entry)!r} sits under half the masked-path "
+            f"ceiling {entry['ceiling']!r}; register band {BAND_DRIFT_X2!r} (rule 1 applies)"
+        )
+    _record_diagnostic(
+        f"{name}: gating on the masked-path ceiling ({_working_band(entry)!r}); "
+        f"recorded finding, not absorbed: {entry['finding']} | "
+        + "; ".join(findings)
+    )
+
+
+def _envelope_fails(entry: dict, observed: float) -> str | None:
+    """Band check of one observed distance against one envelope entry.
+
+    Band semantics: the metric holds when observed <= working band (per
+    the registered band mode). Returns a failure report line (with the
+    calibration provenance) or None when the value sits inside the band.
+    """
+    band = _working_band(entry)
+    if observed <= band:
         return None
     return (
-        f"observed {observed!r} > bound {entry['bound']!r} "
-        f"(provenance: {entry['provenance']})"
+        f"observed {observed!r} > working band {band!r} "
+        f"(band mode {entry['band']}, drift {entry['drift']!r}, "
+        f"ceiling {entry['ceiling']!r} ± {entry['ceiling_ci']!r}; "
+        f"provenance: {entry['provenance']})"
     )
 
 
 def _greedy_comparison(bdd_context) -> tuple[list[float], int, int]:
     """Align oracle vs run greedy records; return (deltas, mismatches, positions).
 
-    Shared by the envelope Then (band metrics) and the conditional
-    token-equality Then (diagnostic tally), so both steps always reason
-    over the same comparison. Structural divergence — prompt-record count,
-    per-prompt position count, top_logprobs length — pytest.fail()s here:
-    those are shape defects, not bandable deviations. Per-rank top-logprob
-    values are deliberately uncompared: no pinned envelope metric covers
-    them (the D2 amendment pins max logprob delta and mismatch rate only).
+    Shared by the greedy coherence When (diagnostic divergence) and the
+    conditional token-equality Then (diagnostic tally). A prompt-record count
+    mismatch is a structural harness error and fails here; per-prompt position
+    counts may differ (autoregressive greedy can EOS early / diverge
+    cross-lineage) and are compared over the common prefix. Per-rank
+    top-logprob values are uncompared.
     """
     oracle_records = bdd_context.inkling_greedy_oracle
     run_records = bdd_context.inkling_greedy_run
@@ -400,12 +613,10 @@ def _greedy_comparison(bdd_context) -> tuple[list[float], int, int]:
     for index, (oracle, run) in enumerate(zip(oracle_records, run_records)):
         oracle_positions = _greedy_positions(oracle)
         run_positions = _greedy_positions(run)
-        if len(run_positions) != len(oracle_positions):
-            pytest.fail(
-                f"prompt {index}: run generated {len(run_positions)} positions, "
-                f"oracle has {len(oracle_positions)} — envelope metrics are not "
-                f"computable over divergent position counts"
-            )
+        # Autoregressive greedy can EOS early or diverge cross-lineage, making the run
+        # shorter than the oracle; compare the common prefix (an early stop or divergence
+        # is captured as a mismatch) instead of failing on the length gap. Structural
+        # well-formedness is gated by then_greedy_coherent, not here.
         for position, (expected, actual) in enumerate(
             zip(oracle_positions, run_positions)
         ):
@@ -413,13 +624,6 @@ def _greedy_comparison(bdd_context) -> tuple[list[float], int, int]:
             deltas.append(abs(actual["logprob"] - expected["logprob"]))
             if expected["id"] != actual["id"]:
                 mismatches += 1
-            if len(actual["top_logprobs"]) != len(expected["top_logprobs"]):
-                pytest.fail(
-                    f"prompt {index} position {position}: runner emitted "
-                    f"{len(actual['top_logprobs'])} top_logprobs, oracle dump has "
-                    f"{len(expected['top_logprobs'])} (structural: n_probs must "
-                    f"match the oracle dump, this is not a bandable deviation)"
-                )
     return deltas, mismatches, positions
 
 
@@ -438,18 +642,34 @@ def _record_diagnostic(message: str) -> None:
 
 @then(
     parsers.parse(
-        "the greedy metrics declared in the envelope sit inside their "
-        "pre-registered bounds"
+        "the KLD / top-1 agreement against the banded D0 oracle stays inside the "
+        "pre-registered working band, capped by the masked-path ceiling"
     )
 )
-def then_greedy_metrics_within_envelope(bdd_context):
+def then_agreement_within_working_band(bdd_context):
+    """The cross-lineage gate, shared by the @d2 scenarios and the @d3 lane.
+
+    Gates every metric the scenario's When recorded on inkling_observed
+    (top1_disagreement for greedy; top1_disagreement + rms_dp for the
+    kld-base run). "Capped by the masked-path ceiling" means a drift_x2
+    band that fails rule 2 or 3 never gates: it is surfaced as a finding
+    first, not clamped to the ceiling; a masked_ceiling entry gates on the
+    ceiling only with its finding recorded and re-emitted. No recorded
+    observation fails closed — a gate that compares nothing is not a gate.
+    """
     metrics = _envelope_metrics(bdd_context)
-    deltas, mismatches, positions = _greedy_comparison(bdd_context)
-    for name, observed in (
-        ("greedy_logprob_delta", max(deltas, default=0.0)),
-        ("token_mismatch_rate", mismatches / positions if positions else 0.0),
-    ):
-        if report := _envelope_fails(metrics[name], observed):
+    observed = getattr(bdd_context, "inkling_observed", None)
+    if not observed:
+        pytest.fail(
+            "no KLD / top-1 observation recorded: the scenario's When must set "
+            "bdd_context.inkling_observed before the envelope gate (fail closed)"
+        )
+    for name, value in sorted(observed.items()):
+        if name not in ENVELOPE_METRICS:
+            pytest.fail(f"observed metric {name!r} is not a pinned envelope metric {ENVELOPE_METRICS}")
+        entry = metrics[name]
+        _surface_band_findings(name, entry)
+        if report := _envelope_fails(entry, value):
             pytest.fail(f"envelope metric {name}: {report}")
 
 
@@ -461,7 +681,7 @@ def then_greedy_metrics_within_envelope(bdd_context):
     )
 )
 def then_greedy_tokens_conditional(bdd_context):
-    """Feature line 80: equality gates only under proven feature parity.
+    """Feature: token-for-token equality gates only under proven feature parity.
 
     "Only when" is read strictly: the gate fires solely when BOTH feature
     sets are declared AND equal. Undeclared features degrade to diagnostic
@@ -502,99 +722,54 @@ def then_greedy_tokens_conditional(bdd_context):
         )
 
 
-@when(parsers.parse("the model computes perplexity on CPU over the D0 4-chunk split"))
-def when_ppl_run(bdd_context):
+@when(
+    parsers.parse(
+        "the model computes KL-divergence on CPU over the D0 4-chunk split "
+        "against the banded oracle base"
+    )
+)
+def when_kld_run(bdd_context):
     directory, model, command = _require(bdd_context, "INKLING_PPL_CMD")
     text = os.environ.get("INKLING_PPL_TEXT")
     if not text or not Path(text).is_file():
         pytest.skip("Prerequisite unmet: INKLING_PPL_TEXT is not bound to a readable file")
-    stdout = _run_command(command, model=str(model), text=text)
-    chunks = [
-        float(value)
-        for _, value in sorted(
-            (int(index), float(value))
-            for index, value in re.findall(r"\[(\d+)\]([0-9]+\.[0-9]+)", stdout)
-        )
-    ]
-    final = re.search(r"Final estimate: PPL = ([0-9.]+) (?:\+/-|±) ([0-9.]+)", stdout)
-    if len(chunks) != 4 or final is None:
+    base = directory / "kld-base-4x2048.bin"
+    stdout = _run_command(command, model=str(model), text=text, base=str(base))
+    # llama-perplexity --kl-divergence summary lines. Anything else fails
+    # loudly with the contract so the adaptation happens here and nowhere
+    # else when the D2 runner lands.
+    rms = re.search(r"RMS\s+(?:Δp|dp)\s*:\s*([0-9]+(?:\.[0-9]+)?)", stdout)
+    top1 = re.search(r"Same top p:\s*([0-9]+(?:\.[0-9]+)?)", stdout)
+    if rms is None or top1 is None:
         pytest.fail(
-            f"perplexity run did not yield 4 chunks + final estimate "
-            f"(got {len(chunks)} chunks, final={'yes' if final else 'no'})"
+            'KL-divergence run did not yield the summary lines "RMS Δp    : X ± Y %" and '
+            f'"Same top p: Z ± W %" (RMS line: {"yes" if rms else "no"}, top-1 line: '
+            f'{"yes" if top1 else "no"}); INKLING_PPL_CMD must run --kl-divergence '
+            "against the {base} placeholder"
         )
-    bdd_context.inkling_ppl = {
-        "chunks": chunks,
-        "final": float(final.group(1)),
-        "error_bar": float(final.group(2)),
+    bdd_context.inkling_observed = {
+        "top1_disagreement": 100.0 - float(top1.group(1)),
+        "rms_dp": float(rms.group(1)),
     }
 
 
 @then(
     parsers.parse(
-        "the four per-chunk perplexity values fall within the envelope "
-        "band around the oracle {first:g}, {second:g}, {third:g}, {fourth:g}"
+        "a working band that is not under the masked-path ceiling, or wider "
+        "than half the masked band, is surfaced as a finding, not absorbed"
     )
 )
-def then_ppl_chunks_within_envelope(
-    bdd_context, first: float, second: float, third: float, fourth: float
-):
-    anchors = [first, second, third, fourth]
-    entry = _envelope_metrics(bdd_context)["perplexity_chunk_delta"]
-    for index, (anchor, got) in enumerate(
-        zip(anchors, bdd_context.inkling_ppl["chunks"]), start=1
-    ):
-        delta = abs(got - anchor)
-        if report := _envelope_fails(entry, delta):
-            pytest.fail(
-                f"chunk {index}: |{got} - {anchor}| = {delta} outside "
-                f"perplexity_chunk_delta band: {report}"
-            )
-
-
-@then(
-    parsers.parse(
-        "the final chunk stays within the envelope band around the recorded "
-        "overall perplexity {final:g}"
-    )
-)
-def then_ppl_final_within_envelope(bdd_context, final: float):
-    ppl = bdd_context.inkling_ppl
-    entry = _envelope_metrics(bdd_context)["perplexity_final_delta"]
-    for label, got in (
-        ("final chunk", ppl["chunks"][-1]),
-        ("run final estimate", ppl["final"]),
-    ):
-        delta = abs(got - final)
-        if report := _envelope_fails(entry, delta):
-            pytest.fail(
-                f"{label} {got} vs recorded overall perplexity {final}: "
-                f"|delta| = {delta} outside perplexity_final_delta band: {report}"
-            )
-
-
-@then(
-    parsers.parse(
-        "an envelope whose band exceeds its declared ceiling is surfaced as "
-        "a finding, not absorbed into the envelope"
-    )
-)
-def then_envelope_band_exceedances_surfaced(bdd_context):
-    """Every entry is audited, not just the pinned four: an over-wide band
-    anywhere in the envelope is a finding. Surfaced via pytest.fail carrying
-    bound, ceiling and provenance — a finding that leaves the run green is
-    absorption by another name."""
+def then_working_band_findings_surfaced(bdd_context):
+    """Gate rules 2 and 3 over EVERY registered entry, not just the pinned
+    two: an over-wide band anywhere in the envelope is a finding. A drift_x2
+    entry with a finding pytest.fail()s carrying drift, band, ceiling and
+    provenance; a masked_ceiling entry must carry the finding it was
+    registered on (re-emitted as a warning, so it stays visible) and is
+    pytest.fail()ed when the numbers no longer justify it. A finding that
+    is neither recorded nor visible is absorption by another name."""
     metrics = _envelope_metrics(bdd_context)
-    findings = [
-        f"{name}: bound {entry['bound']!r} > ceiling {entry['ceiling']!r} "
-        f"(provenance: {entry['provenance']})"
-        for name, entry in sorted(metrics.items())
-        if entry["bound"] > entry["ceiling"]
-    ]
-    if findings:
-        pytest.fail(
-            "envelope registration findings — band exceeds declared ceiling:\n"
-            + "\n".join(f"  - {finding}" for finding in findings)
-        )
+    for name, entry in sorted(metrics.items()):
+        _surface_band_findings(name, entry)
 
 
 @given(parsers.parse("that directory does not exist or fails hash verification"))
@@ -934,3 +1109,427 @@ def then_d6_load_and_generation(bdd_context):
 
     if failures:
         pytest.fail("D6 synthetic-fixture smoke failed:\n" + "\n".join(f"  - {line}" for line in failures))
+
+
+# ---------------------------------------------------------------------------
+# D1 — arch plumbing (@d1 @arch): metadata + every tensor created, no compute.
+#
+# "Loaded on CPU with compute disabled" = llama-server -ngl 0 --no-warmup with
+# CUDA hidden and no request submitted: the loader reads the header, the arch
+# creates and allocates every tensor, the context reserves its buffers, and no
+# forward pass runs. llama-server is the one binary whose "no forward pass"
+# claim is observable from outside the process: --metrics exposes the
+# prompt_tokens_total / tokens_predicted_total counters (both must read 0) on
+# top of the log (no "warming up" line, no timing lines). The server is
+# started with LLAMA_TRACE=1 so the loader lists every tensor with its shape
+# ("- tensor N, split S: name type [ ne0, ne1, ... ]"); those lines are
+# cross-checked against the GGUF header read with gguf-py. Load success is
+# itself the "every tensor created" proof (done_getting_tensors throws "wrong
+# number of tensors" otherwise, and create_tensor throws on a shape mismatch);
+# the trace listing turns it into a name-by-name, shape-by-shape assertion.
+#
+# Model under test: INKLING_MODEL_PATH when bound (Inkling-Small in a booked
+# window), otherwise the tiny synthetic fixture generated in-step (CI policy
+# in the feature header: this lane needs no oracle and no full model). The
+# oracle directory is not a prerequisite here — D1 binds no expected value.
+# ---------------------------------------------------------------------------
+
+D1_N_CTX = 256
+D1_THREADS = os.environ.get("INKLING_BDD_THREADS", "4")
+D1_STARTUP_TIMEOUT_S = float(os.environ.get("INKLING_SERVER_STARTUP_TIMEOUT", "1800"))
+D1_KV_PREFIX = "inkling."
+D1_TENSOR_LINE = re.compile(
+    r"- tensor\s+(\d+), split\s+(\d+):\s+(\S+)\s+(\S+)\s+\[\s*([0-9,\s]+?)\s*\]"
+)
+D1_KV_LINE = re.compile(r"- kv\s+(\d+):\s+(\S+)\s+(\S+)\s+=\s+(.*)$", re.MULTILINE)
+D1_METRIC_LINE = re.compile(r"^llamacpp:(\w+)\s+([-+0-9.eE]+)\s*$", re.MULTILINE)
+D1_FORWARD_PATTERNS = (
+    r"warming up the model",
+    r"prompt eval time",
+    r"(?<!prompt )eval time\s*=",
+    r"n_past = ",
+    r"kv cache rm",
+)
+
+
+def _greedy_tool():
+    """tools/inkling-greedy-dump.py as a module (its name is not importable)."""
+    import importlib.util
+
+    path = REPO_ROOT / "tools" / "inkling-greedy-dump.py"
+    if not path.is_file():
+        pytest.fail(f"{path} is missing; the server-driving helper lives there")
+    spec = importlib.util.spec_from_file_location("inkling_greedy_dump", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def generate_inkling_fixture(bdd_context, name: str = D6_FIXTURE_NAME) -> dict:
+    """Run tools/make-inkling-test-gguf.py into tmp_path and read its header back.
+
+    Shared by the D1/D4a/D4b lanes (the D6 Given wraps it). Returns the D6
+    header dict ({"path", "size", "arch", "n_kv", "n_tensors",
+    "tensor_names", ...}); a missing generator/numpy is reported by raising
+    pytest.skip here because every caller treats it as an unmet prerequisite.
+    """
+    if not D6_GENERATOR.is_file():
+        pytest.skip(f"Prerequisite unmet: D6 generator {D6_GENERATOR} is missing")
+    try:
+        import numpy  # noqa: F401
+    except ImportError:
+        pytest.skip("Prerequisite unmet: numpy is not importable (the fixture generator needs it)")
+    out = bdd_context.tmp_path / name
+    completed = subprocess.run(
+        [sys.executable, str(D6_GENERATOR), str(out)],
+        capture_output=True, text=True, timeout=D6_TIMEOUT_S,
+        cwd=bdd_context.tmp_path, check=False,
+    )
+    if completed.returncode != 0 or not out.is_file():
+        pytest.fail(
+            f"fixture generator exited {completed.returncode} without writing {out}; "
+            f"stderr tail:\n{completed.stderr[-2000:]}"
+        )
+    header = _d6_read_header(out)
+    if header["arch"] != D6_ARCH:
+        pytest.fail(f"fixture generator wrote general.architecture = {header['arch']!r}, expected {D6_ARCH!r}")
+    return {**header, "path": out, "size": out.stat().st_size, "unmet": None}
+
+
+def _gguf_header_full(path: Path) -> dict:
+    """Header facts D1 cross-checks: every KV key, every tensor's name and ne shape."""
+    if str(D6_GGUF_PY) not in sys.path:
+        sys.path.insert(0, str(D6_GGUF_PY))
+    from gguf import GGUFReader
+
+    reader = GGUFReader(str(path))
+    return {
+        "arch": _gguf_string(reader.fields["general.architecture"]),
+        "n_kv": _gguf_scalar(reader.fields["GGUF.kv_count"]),
+        "n_tensors": _gguf_scalar(reader.fields["GGUF.tensor_count"]),
+        "kv_keys": [name for name in reader.fields if not name.startswith("GGUF.")],
+        # ReaderTensor.shape is the file's dims array = ggml ne order (ne0 first)
+        "tensor_shapes": {tensor.name: [int(dim) for dim in tensor.shape] for tensor in reader.tensors},
+    }
+
+
+def _d1_model(bdd_context) -> tuple[Path, str]:
+    """(model path, provenance): INKLING_MODEL_PATH when bound, else the fixture."""
+    bound = getattr(bdd_context, "inkling_model_path", None)
+    if bound is not None:
+        return Path(bound), "INKLING_MODEL_PATH"
+    fixture = generate_inkling_fixture(bdd_context, "inkling-d1.gguf")
+    return fixture["path"], "synthetic fixture (tools/make-inkling-test-gguf.py)"
+
+
+@given(parsers.parse("a dreamcatcher build with LLM_ARCH_INKLING registered"))
+def given_d1_build(bdd_context):
+    """Resolve llama-server (LLAMA_SERVER_BIN, build/bin, PATH); recording only."""
+    path, unmet = _find_binary("llama-server", "LLAMA_SERVER_BIN")
+    bdd_context.inkling_d1 = {"server": path, "unmet": unmet}
+
+
+@when(parsers.parse("the model is loaded on CPU with compute disabled"))
+def when_d1_load(bdd_context):
+    state = getattr(bdd_context, "inkling_d1", None)
+    if state is None:
+        pytest.skip("Prerequisite unmet: the D1 build Given did not run")
+    if state["unmet"]:
+        pytest.skip(f"Prerequisite unmet: {state['unmet']}")
+    tool = _greedy_tool()
+    model, provenance = _d1_model(bdd_context)
+    header = _gguf_header_full(model)
+    if header["arch"] != D6_ARCH:
+        pytest.fail(f"{model}: general.architecture is {header['arch']!r}; the D1 lane needs an inkling GGUF")
+
+    port = tool.free_port()
+    log_path = bdd_context.tmp_path / "d1-llama-server.log"
+    bdd_context.inkling_launches = getattr(bdd_context, "inkling_launches", 0) + 1
+    process = tool.start_server(
+        state["server"],
+        ["-m", str(model)],
+        port,
+        log_path,
+        f"-ngl 0 -t {D1_THREADS} -c {D1_N_CTX} --no-warmup --metrics "
+        + os.environ.get("INKLING_D1_SERVER_ARGS", ""),
+        env={"LLAMA_TRACE": "1"},
+    )
+    bdd_context.processes.append(process)
+    try:
+        tool.wait_health(process, port, D1_STARTUP_TIMEOUT_S)
+        status, metrics = tool.http_text(f"http://127.0.0.1:{port}/metrics", timeout=30.0)
+        if status != 200:
+            pytest.fail(f"/metrics answered {status} (--metrics not honoured?): {metrics[:300]}")
+        _, props = tool.http_json(f"http://127.0.0.1:{port}/props", timeout=30.0)
+    except RuntimeError as error:
+        tail = log_path.read_bytes()[-3000:].decode("utf-8", "replace") if log_path.is_file() else ""
+        pytest.fail(f"D1 load: {error}\n--- server log tail ---\n{tail}")
+    finally:
+        tool.stop_server(process)
+    bdd_context.inkling_d1_run = {
+        "model": model,
+        "provenance": provenance,
+        "header": header,
+        "log": log_path.read_bytes().decode("utf-8", "replace"),
+        "metrics": {name: float(value) for name, value in D1_METRIC_LINE.findall(metrics)},
+        "props": props if isinstance(props, dict) else {},
+    }
+
+
+def _d1_run_or_fail(bdd_context) -> dict:
+    run = getattr(bdd_context, "inkling_d1_run", None)
+    if not run:
+        pytest.fail("no D1 load recorded: the When must load the model before this gate (fail closed)")
+    return run
+
+
+@then(parsers.parse("every tensor is created with the Inkling names and shapes"))
+def then_d1_tensors(bdd_context):
+    run = _d1_run_or_fail(bdd_context)
+    log, header = run["log"], run["header"]
+    failures: list[str] = []
+
+    loaded = re.search(r"loaded meta data with (\d+) key-value pairs and (\d+) tensors", log)
+    if loaded is None:
+        failures.append("loader never reported 'loaded meta data with ... tensors'")
+    elif (int(loaded.group(1)), int(loaded.group(2))) != (header["n_kv"], header["n_tensors"]):
+        failures.append(
+            f"loader read {loaded.group(1)} key-value pairs / {loaded.group(2)} tensors, header has "
+            f"{header['n_kv']} / {header['n_tensors']}"
+        )
+    if re.search(rf"arch\s*=\s*{D6_ARCH}\b", log) is None:
+        failures.append(f"print-meta never reported 'arch = {D6_ARCH}' (LLM_ARCH_INKLING not resolved)")
+    if re.search(r"llm_load_tensors:.*buffer size\s*=\s*[0-9.]+ MiB", log) is None:
+        failures.append("llm_load_tensors never reported a weight buffer (tensors were not created/allocated)")
+    if error_line := _d6_first_match(D6_LOAD_ERROR_PATTERNS, log):
+        failures.append(f"loader error: {error_line}")
+
+    # name-by-name, shape-by-shape: the loader's trace listing vs the GGUF header
+    listed = {
+        name: [int(dim) for dim in shape.replace(" ", "").split(",") if dim]
+        for _, _, name, _, shape in D1_TENSOR_LINE.findall(log)
+    }
+    expected = header["tensor_shapes"]
+    if not listed:
+        failures.append("loader printed no '- tensor N, split S: ...' lines (LLAMA_TRACE=1 not honoured?)")
+    else:
+        if set(listed) != set(expected):
+            missing = sorted(set(expected) - set(listed))[:8]
+            extra = sorted(set(listed) - set(expected))[:8]
+            failures.append(f"tensor name set differs from the header: missing {missing}, unexpected {extra}")
+        for name, shape in sorted(listed.items()):
+            want = expected.get(name)
+            if want is not None and shape != want[: len(shape)] + [1] * (len(shape) - len(want)) and shape != want:
+                failures.append(f"{name}: loader shape {shape} != header ne {want}")
+        if len(listed) != header["n_tensors"]:
+            failures.append(f"loader listed {len(listed)} tensors, header has {header['n_tensors']}")
+    if failures:
+        pytest.fail("D1 tensor creation failed:\n" + "\n".join(f"  - {line}" for line in failures))
+    _record_diagnostic(
+        f"D1: {len(listed)} Inkling tensors created with header names/shapes on {run['provenance']}"
+    )
+
+
+@then(parsers.parse("the KV keys include {keys}"))
+def then_d1_kv_keys(bdd_context, keys: str):
+    """Every listed key (inkling.<key>) is in the file AND was read by the loader."""
+    run = _d1_run_or_fail(bdd_context)
+    wanted = [D1_KV_PREFIX + key.strip() for key in re.split(r",\s*(?:and\s+)?|\s+and\s+", keys) if key.strip()]
+    if not wanted:
+        pytest.fail("the scenario names no KV keys")
+    in_file = set(run["header"]["kv_keys"])
+    in_loader = {name for _, name, _, _ in D1_KV_LINE.findall(run["log"])}
+    if not in_loader:
+        pytest.fail("loader printed no '- kv N: ...' lines; the header was never enumerated")
+    missing_file = [key for key in wanted if key not in in_file]
+    missing_loader = [key for key in wanted if key not in in_loader]
+    if missing_file or missing_loader:
+        pytest.fail(
+            f"KV keys missing from the GGUF header: {missing_file}; "
+            f"missing from the loader's enumeration: {missing_loader}"
+        )
+
+
+@then(parsers.parse("no forward pass has run"))
+def then_d1_no_forward(bdd_context):
+    run = _d1_run_or_fail(bdd_context)
+    metrics = run["metrics"]
+    failures: list[str] = []
+    for counter in ("prompt_tokens_total", "tokens_predicted_total"):
+        if counter not in metrics:
+            failures.append(f"/metrics carries no {counter} counter: {sorted(metrics)}")
+        elif metrics[counter] != 0:
+            failures.append(f"/metrics {counter} = {metrics[counter]:g}, a forward pass ran")
+    if line := _d6_first_match(D1_FORWARD_PATTERNS, run["log"]):
+        failures.append(f"the server log shows compute: {line}")
+    if failures:
+        pytest.fail("D1 'no compute' violated:\n" + "\n".join(f"  - {line}" for line in failures))
+
+
+# ---------------------------------------------------------------------------
+# D3 — hybrid attention + recurrent cache (@d3 @cache). Model-heavy: the gate
+# is the KLD / top-1 envelope against the banded D0 oracle (feature header,
+# D3 gate 2026-09-19), so the lane runs Inkling-Small in a booked window.
+#
+# Given: the model INKLING_MODEL_PATH names must BE the hybrid 5:1 iswa model
+# (header: sliding_window > 0, sliding_window_pattern with five SWA layers per
+# global layer, shortconv_kernel > 1 for the recurrent short-conv state). The
+# synthetic fixture is deliberately NOT a stand-in — its pattern is 1:1 and
+# there is no oracle for it — so an unbound model is an unmet prerequisite.
+# When: INKLING_D3_PPL_CMD, the same {model} {text} {base} template as
+# INKLING_PPL_CMD but running the D3 cache path (-fa on: one cache +
+# GGML_OP_FLASH_ATTN_EXT_BANDED, cf. build_inkling.cpp), over the D0 4x2048
+# split: every 2048-token chunk crosses n_ctx / sliding_window - 1 window
+# boundaries (3 at the real model's 512), which is the "several" the scenario
+# asks for. "int64 expert indexing" is the build under test's routing
+# (int64 ids into the expert bank); this harness cannot see inside the graph,
+# so it records the build's declared features and gates on the observable
+# consequence below.
+# Then (consistency): the run reached the end of every chunk with a finite
+# perplexity and a finite KLD / top-1 summary — a cache that loses attention
+# state, short-conv state or expert indices across a window boundary shows up
+# as NaN/Inf or a collapsed agreement — and the context confirms the FA cache
+# path (flash_attn = 1). The envelope Then (shared with D2) is the gate.
+# ---------------------------------------------------------------------------
+
+D3_SWA_RATIO = (5, 1)
+
+
+def _inkling_swa_header(model: Path) -> dict:
+    if str(D6_GGUF_PY) not in sys.path:
+        sys.path.insert(0, str(D6_GGUF_PY))
+    from gguf import GGUFReader
+
+    reader = GGUFReader(str(model))
+
+    def field(name: str):
+        entry = reader.fields.get(name)
+        if entry is None:
+            pytest.fail(f"{model}: GGUF header has no {name}")
+        return entry.contents()
+
+    if field("general.architecture") != D6_ARCH:
+        pytest.fail(f"{model}: general.architecture is not {D6_ARCH!r}")
+    pattern = [int(value) for value in field("inkling.attention.sliding_window_pattern")]
+    return {
+        "n_layer": int(field("inkling.block_count")),
+        "n_swa": int(field("inkling.attention.sliding_window")),
+        "pattern": pattern,
+        "shortconv_kernel": int(field("inkling.shortconv_kernel")),
+        "expert_count": int(field("inkling.expert_count")),
+    }
+
+
+@given(parsers.parse("a hybrid Inkling cache with iswa windows over a 5:1 pattern"))
+def given_d3_cache(bdd_context):
+    state: dict = {"unmet": None, "header": None}
+    model = getattr(bdd_context, "inkling_model_path", None)
+    if model is None:
+        state["unmet"] = (
+            "INKLING_MODEL_PATH is not bound to a readable file (the @d3 lane runs Inkling-Small "
+            "in a booked window; the synthetic fixture has a 1:1 window pattern and no oracle)"
+        )
+    else:
+        header = _inkling_swa_header(Path(model))
+        swa, total = sum(1 for value in header["pattern"] if value), len(header["pattern"])
+        n_global = total - swa
+        want_swa, want_global = D3_SWA_RATIO
+        if header["n_swa"] <= 0 or total == 0 or n_global == 0 or swa * want_global != n_global * want_swa:
+            pytest.fail(
+                f"{model}: not the hybrid {want_swa}:{want_global} iswa model — sliding_window "
+                f"{header['n_swa']}, pattern has {swa} SWA / {n_global} global layers"
+            )
+        if header["shortconv_kernel"] <= 1:
+            pytest.fail(f"{model}: shortconv_kernel {header['shortconv_kernel']} carries no recurrent state")
+        state["header"] = header
+    bdd_context.inkling_d3 = state
+
+
+@when(parsers.parse("generation runs past several window boundaries with int64 expert indexing"))
+def when_d3_run(bdd_context):
+    state = getattr(bdd_context, "inkling_d3", None)
+    if state is None:
+        pytest.skip("Prerequisite unmet: the D3 cache Given did not run")
+    if state["unmet"]:
+        pytest.skip(f"Prerequisite unmet: {state['unmet']}")
+    directory, model, command = _require(bdd_context, "INKLING_D3_PPL_CMD")
+    text = os.environ.get("INKLING_PPL_TEXT")
+    if not text or not Path(text).is_file():
+        pytest.skip("Prerequisite unmet: INKLING_PPL_TEXT is not bound to a readable file")
+    base = directory / "kld-base-4x2048.bin"
+    stdout, stderr = _run_command_full(command, model=str(model), text=text, base=str(base))
+    log = stderr + "\n" + stdout
+    rms = re.search(r"RMS\s+(?:Δp|dp)\s*:\s*([-+0-9.eE]+|nan|inf)", log)
+    top1 = re.search(r"Same top p:\s*([-+0-9.eE]+|nan|inf)", log)
+    if rms is None or top1 is None:
+        pytest.fail(
+            'D3 run did not yield the KL-divergence summary lines "RMS Δp    : X ± Y %" and '
+            f'"Same top p: Z ± W %" (RMS line: {"yes" if rms else "no"}, top-1 line: '
+            f'{"yes" if top1 else "no"}); INKLING_D3_PPL_CMD must run --kl-divergence against {{base}}'
+        )
+    estimate = re.search(r"Final estimate: PPL over (\d+) chunks for n_ctx=(\d+)", log)
+    chunks = [float(value) for value in re.findall(r"\[\d+\]([-+0-9.eE]+|nan|inf),", log)]
+    if not chunks:
+        # This fork's --kl-divergence mode prints neither the mainline "[n]X," chunks nor a
+        # "Final estimate: PPL over N chunks for n_ctx=M" summary; it prints a per-chunk table
+        # (chunk | PPL | ln(PPL(Q)/PPL(base)) | KL Divergence | Δp RMS | Same top p). Read the
+        # PPL column: the first value before the "±" on each numbered row.
+        chunks = [
+            float(value)
+            for value in re.findall(r"(?m)^\s*\d+\s+([0-9.]+(?:[eE][-+]?\d+)?)\s+±", log)
+        ]
+    if estimate:
+        n_ctx = int(estimate.group(2))
+        n_chunks = int(estimate.group(1))
+    else:
+        ctx_match = re.search(r"n_ctx\s+=\s*(\d+)", log)
+        n_ctx = int(ctx_match.group(1)) if ctx_match else 0
+        n_chunks = len(chunks)
+    n_swa = state["header"]["n_swa"]
+    bdd_context.inkling_observed = {
+        "top1_disagreement": 100.0 - float(top1.group(1)),
+        "rms_dp": float(rms.group(1)),
+    }
+    bdd_context.inkling_d3_run = {
+        "log": log,
+        "chunks": chunks,
+        "n_chunks": n_chunks,
+        "n_ctx": n_ctx,
+        "boundaries_per_chunk": (n_ctx // n_swa - 1) if n_swa > 0 and n_ctx > 0 else 0,
+        "flash_attn": re.search(r"flash_attn\s*=\s*1\b", log) is not None,
+        "features": _declared_features("INKLING_BUILD_FEATURES"),
+    }
+
+
+@then(parsers.parse("attention state, recurrent short-conv state, and expert indices stay consistent"))
+def then_d3_consistent(bdd_context):
+    run = getattr(bdd_context, "inkling_d3_run", None)
+    if not run:
+        pytest.fail("no D3 run recorded: the When must run the cache path before this gate (fail closed)")
+    failures: list[str] = []
+    if run["n_chunks"] < 1 or not run["chunks"]:
+        failures.append("no per-chunk perplexity reached the summary: the run did not complete a chunk")
+    elif len(run["chunks"]) < run["n_chunks"]:
+        failures.append(f"only {len(run['chunks'])} of {run['n_chunks']} chunk perplexities were printed")
+    for index, value in enumerate(run["chunks"], 1):
+        if not math.isfinite(value) or value <= 0:
+            failures.append(f"chunk {index} perplexity {value} is not finite: state went inconsistent")
+    for name, value in sorted(getattr(bdd_context, "inkling_observed", {}).items()):
+        if not math.isfinite(value):
+            failures.append(f"{name} = {value}: the KL-divergence summary is not finite")
+    if run["boundaries_per_chunk"] < 2:
+        failures.append(
+            f"each chunk crosses {run['boundaries_per_chunk']} window boundaries (n_ctx {run['n_ctx']}); "
+            f"'several' needs at least 2 — raise the run's n_ctx"
+        )
+    if not run["flash_attn"]:
+        failures.append("the context did not report flash_attn = 1: INKLING_D3_PPL_CMD is not running the banded cache path (-fa on)")
+    if line := _d6_first_match(D6_LOAD_ERROR_PATTERNS, run["log"]):
+        failures.append(f"run error: {line}")
+    if failures:
+        pytest.fail("D3 cache consistency failed:\n" + "\n".join(f"  - {line}" for line in failures))
+    _record_diagnostic(
+        f"D3: {run['n_chunks']} chunks x {run['boundaries_per_chunk']} window boundaries, per-chunk PPL "
+        f"{run['chunks']}, banded cache path; build features "
+        f"{sorted(run['features']) if run['features'] else 'undeclared (INKLING_BUILD_FEATURES)'}"
+    )
