@@ -26,6 +26,7 @@ See [KNOWN-ISSUES.md](KNOWN-ISSUES.md) for the known-bad cases.
 | `qwen4exp` | verified; ring token-identical `[0,40)+[40,48)` on CPU (64/64), other splits/CUDA rings drift on near ties (see backends) | CUDA **verified** on `20c308ca`: monolith coherent 23.2 tok/s (`llama-server`), library ring coherent 17.4 tok/s, full-model forward pass byte-identical mono-vs-library (1224/1224 hashes). Ring token-exactness: `[0,40)+[40,48)` on CPU is **token-identical to the monolith (64/64)**; other splits and CUDA rings diverge at near-tie tokens (6/15) from attention-kernel path differences (`meta#98`), **not** from window metadata — the old "tail drops `per_layer_token_embd`" explanation was a wrong premise: `ple.layers = [1]` (block 1, always in the head), skipping the table in the tail is correct (`meta#91` fixed). `llama-server --model-dir` on the library is token-identical to the monolith (64/64, 1224/1224 hashes; `meta#90` fixed). Vulkan: **fixed** (was degenerate on every vendor) — root cause was a short `MULTI_ADD` `src0` descriptor range; NVIDIA coopmat1 verified coherent, agreeing with CUDA within rounding; **RDNA3 re-measure pending** (`meta#88`) |
 | `glm5next` | verified | CUDA **verified** on `20c308ca`: library head+tail ring generates coherently, 7.6 tok/s greedy (UD-IQ4_XS, 1383/1383 hashes vs monolith); the mono-vs-library runtime A/B is **done** — hidden states md5-identical mono vs library (the `GGML_ASSERT(lctx.logits != nullptr)` abort under `STAGE_EMIT=hidden` is fixed, `meta#93`). `--role server` times out awaiting a return edge (`meta#90`). Vulkan (any vendor): not measured for this arch |
 | `gemma4` | self-consistent (both stages agree) | CPU verified (Q4_K embedding); CUDA batched prefill known-bad (`meta#81`); Q6_K embedding known-bad (`meta#80`); Vulkan: measured on this model at the lane-9 checkpoint (pre-`20c308ca`) — RDNA4 and RDNA3 (RADV) FA sweep clean and token-exact on chat-formatted prompts, bare greedy prompt can differ from CPU by rounding (`meta#85`); NVIDIA (coopmat1): CPU-exact; Intel ANV: self-consistent, not CPU-exact; AMD RDNA3.5 (8060S APU): verified for the expert-server path with GLM-5.3-Flash experts |
+| `inkling` | verified on the synthetic fixture (head/tail ring token-identical 64/64, boundary byte-equal; `#4` KQ_mask fix); real-model ring not yet run | **CPU (`-ngl 0`) — cross-lineage envelope verified** on the real 152 GB UD-Q4_K_M (KL-divergence vs a banded D0 oracle): masked path 83.02% top-1 / RMS Δp 9.49%, banded (`-fa on`, `flash_attn=1`) 83.87% / 8.83%, both inside the pre-registered 17.08% / 10.51% band; banded agrees with the banded oracle better than masked; deterministic. Remote routed experts byte-exact vs in-process. **Greedy** diverges cross-lineage (compounds — not the parity metric; the envelope is; strict greedy parity shown on the llama.cpp-lineage port, 48/48 vs `ggml-org/llama.cpp#25731`). **Multimodal (audio/vision): unvalidated** — text-only port. CUDA-resident not measured (model exceeds GPU VRAM; run CPU-only). Vulkan not measured for this arch. Tracking: `#43`. |
 
 ### Card wording (drop-in, per architecture)
 
@@ -68,6 +69,22 @@ RTX 5060 Ti x4 coopmat1.
 > `meta#93`). Vulkan: not measured for this architecture on the published tree
 > (the RDNA3.5 APU proof was the expert-server path with GLM-5.3-Flash experts,
 > not a local Vulkan run).
+
+> **inkling — CPU cross-lineage envelope verified.** On the real 152 GB Inkling-Small
+> (UD-Q4_K_M), the masked-attention path reaches 83.02% top-1 agreement (RMS Δp 9.49%) and
+> the banded path (`-fa on`, `flash_attn=1`) 83.87% (8.83%), both inside the pre-registered
+> 17.08% / 10.51% working band, measured by KL-divergence against a banded D0 oracle (the
+> reference build's own masked-vs-banded self-disagreement); the banded path agrees with the
+> banded oracle better than masked. Remote routed experts are byte-exact vs in-process; the
+> head/tail stage ring is token-identical to the monolith on the synthetic fixture (real-model
+> ring not yet run). **Greedy** generation diverges from the reference cross-lineage — it
+> compounds after the first token difference — so parity is stated via the envelope above, not
+> greedy token-identity; strict greedy parity was demonstrated on the llama.cpp-lineage port
+> (48/48 vs upstream `ggml-org/llama.cpp#25731`). **Multimodal (audio/vision): unvalidated** —
+> this is the text-only port; the source repo's `mmproj-*` projectors are not included.
+> **CUDA-resident / Vulkan:** not measured for this architecture (the model exceeds fleet GPU
+> VRAM, so it is run CPU-only). Tracking: `#43`. Published library:
+> `huggingface.co/xautonomics/Inkling-Small-UD-Q4_K_M.LAYR.GGUF`.
 
 Common to all three: a layer library is loaded by `llama-server --model-dir`
 for single-process serving, or partitioned across `llama-stage-runner`
@@ -167,6 +184,33 @@ conditional on the quant variant and the backend.
 - **Card guidance:** until `meta#80` and `meta#81` are resolved, publish the
   `gemma4` card with the CPU + Q4_K-embedding path as the verified configuration
   and state the CUDA/Vulkan caveats explicitly.
+
+### `inkling`
+- **head/tail split (stage ring):** verified on the synthetic Inkling fixture — a head/tail
+  ring is token-identical to the monolith (64/64) with a byte-equal boundary hidden state,
+  after fixing `build_inkling` creating the global `KQ_mask` unconditionally (a stage window
+  holding only SWA layers pruned it and aborted at set-inputs; `#4`). Real-model ring not yet
+  measured.
+- **backends:**
+  - **CPU (`-ngl 0`):** cross-lineage envelope verified on the real 152 GB UD-Q4_K_M, measured
+    by KL-divergence against a banded D0 oracle — masked-attention path top-1 83.02% (RMS Δp
+    9.49%), banded path (`-fa on`, `flash_attn=1`) top-1 83.87% (8.83%), both inside the
+    pre-registered 17.08% / 10.51% band; deterministic across runs. Remote routed experts are
+    byte-exact vs in-process (`-fa` on/off).
+  - **greedy generation:** diverges from the reference cross-lineage. At ~83% per-position
+    agreement, autoregressive greedy diverges after ~6 tokens and compounds, so strict token
+    parity is unreachable on this fork and is not the acceptance metric (the KLD envelope is).
+    Strict greedy parity was demonstrated on the llama.cpp-lineage port (48/48 vs upstream
+    `ggml-org/llama.cpp#25731`).
+  - **CUDA-resident:** not measured — the model exceeds the fleet's GPU VRAM, so it is run
+    CPU-only even on the CUDA build.
+  - **Vulkan:** not measured for this architecture.
+  - **multimodal (audio/vision):** **unvalidated** — text-only port; the source repo's
+    `mmproj-*` projectors are not included or supported.
+- **Card guidance:** publish the `inkling` card with the CPU cross-lineage-envelope path as the
+  verified configuration, greedy as diagnostic (not a token-parity gate), and multimodal
+  explicitly marked unvalidated. Tracking issue: `#43`. Published library:
+  `huggingface.co/xautonomics/Inkling-Small-UD-Q4_K_M.LAYR.GGUF`.
 
 ## How to read "verified"
 
