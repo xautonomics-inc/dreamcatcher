@@ -94,6 +94,21 @@ Scenario steps support the following environment overrides:
 | `INKLING_REMOTE_EXPERTS_MODEL` | Inkling GGUF for the `@d4c` remote-experts scenario (e.g. Inkling-Small in a booked window) | Unbound; the tiny synthetic fixture is generated in-step by `tools/make-inkling-test-gguf.py` (needs numpy, pyyaml) |
 | `INKLING_REMOTE_EXPERTS_CLIENT_ARGS` | Extra `llama-expert-check` arguments for BOTH the in-process and the remote `@d4c` run (e.g. `-fa off`) | Empty |
 | `INKLING_REMOTE_EXPERTS_SERVER_ARGS` | Extra `llama-expert-server` arguments for the `@d4c` run; negative control only (`--moe-form moe_ffn` must fail the byte gate) | Empty; `--moe-form auto` |
+| `INKLING_MODEL_PATH` | Inkling-Small GGUF for the model-heavy lanes (`@d2`, `@d3`); also overrides the in-step fixture for `@d1` and is the monolith of a bound `INKLING_LIB_DIR` | Unbound; runner Whens skip |
+| `INKLING_ORACLE_DIR` | D0 oracle artifact directory (sha256-pinned `greedy-64x8.json`, `kld-base-4x2048.bin`, `ppl.log`) | Unbound; `@d2`/`@d3` skip, `@fail-closed` runs |
+| `INKLING_ENVELOPE_JSON` | Pre-registered cross-lineage envelope (`@d2`, `@d3` gate) | `tests/bdd/fixtures/inkling-envelope.json` |
+| `INKLING_GREEDY_CMD` | `@d2` greedy runner template, placeholders `{model}` `{oracle_dir}`; stdout = the D0-schema dump. Wired: `python3 tools/inkling-greedy-dump.py --server BIN --model {model} --prompts {oracle_dir}/greedy-64x8.json --server-args "-ngl 0 -t 20 -c 4096 -np 1 -fa off"` | Unbound; skips |
+| `INKLING_PPL_CMD` | `@d2` KLD runner template, placeholders `{model}` `{text}` `{base}` (a `llama-perplexity -fa off --kl-divergence --kl-divergence-base {base}` run over the 4x2048 split; `{base}` must be a working COPY of the oracle base, see `tests/bdd/fixtures/inkling-window.env.example`) | Unbound; skips |
+| `INKLING_D3_PPL_CMD` | `@d3` cache-lane runner template, same placeholders as `INKLING_PPL_CMD` but running the banded cache path (`-fa on`) | Unbound; skips |
+| `INKLING_PPL_TEXT` | Perplexity text file for the KLD runs (the D0 4-chunk split source) | Unbound; skips |
+| `INKLING_ORACLE_FEATURES` / `INKLING_BUILD_FEATURES` | Comma-separated CPU feature sets of the oracle and the runner build; token-for-token equality gates only when both are declared and equal | Unbound; diagnostic |
+| `INKLING_LIB_DIR` | `@d4a`: a layer library sliced with `tools/layer-distribution` (parts carry `inkling.dense_block_count`); needs `INKLING_MODEL_PATH` as its monolith | Unbound; the fixture is generated and sliced in-step |
+| `INKLING_LIBRARY_SERVER_ARGS` | `@d4a`: extra `llama-server` arguments for BOTH the `--model-dir` and the `-m` server (e.g. `-fa off`) | Empty |
+| `INKLING_STAGE_RING_MODEL` | `@d4b`: Inkling GGUF for the head+tail ring (split at its `dense_block_count`) | Unbound; the fixture is generated and sliced in-step |
+| `INKLING_STAGE_RING_CLIENT_ARGS` | `@d4b`: extra `llama-expert-check` arguments for the monolith greedy reference | Empty |
+| `INKLING_BDD_THREADS` | CPU threads for the servers / stages the Inkling fixture lanes start (`-t`, `STAGE_THREADS`) | `4` |
+| `INKLING_SERVER_STARTUP_TIMEOUT` / `INKLING_RUNNER_TIMEOUT` | Seconds to wait for a server `/health` / for one runner command (a 152 GB load and a 4-chunk KLD run take minutes) | `1800` / `7200` |
+| `INKLING_D1_SERVER_ARGS` | `@d1`: extra `llama-server` arguments for the load-only run | Empty |
 | `BDD_SERVER_URL` | Owned live `llama-server` used by serve smoke checks | Unbound; scenarios skip |
 | `BDD_REASONING_ONLY_URL` | Owned fixture endpoint for reasoning-only smoke behavior | Unbound; scenario skips |
 | `BDD_LIB_DIR` | Directory of pre-sliced layer library | Auto-generated synthetic library |

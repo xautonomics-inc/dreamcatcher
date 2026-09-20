@@ -88,6 +88,10 @@ writer.add_float32("inkling.logit_scale_denom", LOGIT_SCALE_DENOM)
 writer.add_uint32("inkling.log_scaling_n_floor", LOG_N_FLOOR)
 writer.add_float32("inkling.log_scaling_alpha", LOG_ALPHA)
 writer.add_uint32("inkling.unpadded_vocab_size", UNPADDED_VOCAB)
+# The real checkpoint carries inkling.vocab_size next to unpadded_vocab_size (it is in the
+# D1 KV-key list of tests/bdd/features/inkling.feature). The gpt2 vocab loader ignores it
+# (only the no_vocab path reads it), so it is metadata parity, not behaviour.
+writer.add_uint32("inkling.vocab_size", N_VOCAB)
 
 # tokenizer metadata (minimal BPE-ish to satisfy vocab init)
 writer.add_string("tokenizer.ggml.model", "gpt2")

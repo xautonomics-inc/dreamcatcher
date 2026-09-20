@@ -2,6 +2,7 @@
 #include "../llama-model.h"
 #include "../llama-context.h"
 #include "../llama-experts-remote.h"
+#include "llm_stage.h"
 
 #include <vector>
 
@@ -149,6 +150,10 @@ ggml_cgraph * llm_build_context::build_inkling() {
     }
     ggml_build_forward_expand(gf, inpL);
 
+    // --- multi-stage pipeline: a head stage emits the post-window residual, not logits ---
+    const llama_stage_cfg sc = llama_stage_get_cfg(n_layer);
+    const bool stage_emit    = sc.active && sc.emit_hidden && llama_stage_consumes_last(sc, n_layer);
+
     // Create per-layer inputs only if a layer ACTUALLY uses them. An input that is
     // created but never referenced is pruned by the graph allocator, leaving a null
     // buffer that llama_set_inputs then asserts on
@@ -171,8 +176,19 @@ ggml_cgraph * llm_build_context::build_inkling() {
         if (hparams.is_swa(il)) { has_swa_layer = true; } else { has_global_layer = true; }
     }
 
-    ggml_tensor * KQ_mask     = build_inp_KQ_mask();
     ggml_tensor * KQ_mask_swa = (hparams.n_swa > 0 && has_swa_layer) ? build_inp_KQ_mask_swa() : nullptr;
+
+    // The global mask is read by every global layer, and by an SWA layer only when there is
+    // no SWA mask for it to use. Same rule as tau / rel_idx above: build it only when a layer
+    // of THIS window reads it. A stage window holding only SWA layers (the ring's head window
+    // [0, dense_block_count) on the fixture) otherwise carries an unreferenced KQ_mask that the
+    // allocator prunes, and llama_set_inputs then asserts on its null buffer
+    // (llama.cpp: GGML_ASSERT(ggml_backend_buffer_is_host(lctx.inp_KQ_mask->buffer))).
+    // llm_build_context::init() nulls lctx.inp_KQ_mask before every build and llama_set_inputs
+    // fills it only when set, so an unbuilt mask is simply absent. A monolith always has a
+    // global layer, so it builds the mask exactly as before.
+    const bool needs_kq_mask = has_global_layer || (has_swa_layer && KQ_mask_swa == nullptr);
+    ggml_tensor * KQ_mask    = needs_kq_mask ? build_inp_KQ_mask() : nullptr;
 
     GGML_ASSERT(!kv_self.s_l.empty() && kv_self.s_l[0] != nullptr);
     const int64_t n_state_slots = kv_self.s_l[0]->ne[1];
@@ -327,6 +343,7 @@ ggml_cgraph * llm_build_context::build_inkling() {
         cb(rel, "inkling_rel_logits", il);
 
         ggml_tensor * kq_mask_cur = is_swa && KQ_mask_swa ? KQ_mask_swa : KQ_mask;
+        GGML_ASSERT(kq_mask_cur != nullptr && "inkling: no KQ mask was built for this layer");
         const int n_swa_l = is_swa ? (int) hparams.n_swa : 0;
 
         ggml_tensor * attn_out = nullptr;
@@ -562,6 +579,17 @@ ggml_cgraph * llm_build_context::build_inkling() {
 
         cur = lctx.cvec.apply_to(ctx0, cur, il);
         cb(cur, "l_out", il);
+    }
+
+    if (stage_emit) {
+        // STAGE EMIT: export the post-window residual hidden state (all rows) for the
+        // next stage; skip output_norm + lm_head. Named "result_norm" so the existing
+        // embeddings extraction (POOLING_NONE -> lctx.embd) picks it up. NOTE: in emit
+        // mode llama_get_embeddings_ith therefore returns the PRE-norm residual, by design.
+        // An emitting stage hands every row to the next stage, so it never trims to out_ids.
+        cb(cur, "result_norm", -1);
+        ggml_build_forward_expand(gf, cur);
+        return gf;
     }
 
     // conv states need every layer to see ALL tokens, so trim outputs only after the
