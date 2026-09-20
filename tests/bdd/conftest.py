@@ -167,6 +167,7 @@ from steps.expert_server_steps import *
 from steps.gslot_runtime_steps import *
 from steps.inkling_steps import *
 from steps.inkling_remote_experts_steps import *
+from steps.inkling_library_steps import *
 from steps.layer_library_steps import *
 from steps.release_checks_steps import *
 from steps.serve_library_steps import *
