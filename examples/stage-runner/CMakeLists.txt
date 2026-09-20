@@ -12,6 +12,31 @@ target_include_directories(${TARGET} PRIVATE
 target_compile_definitions(${TARGET} PRIVATE STAGE_SERVER)
 target_compile_features(${TARGET} PRIVATE cxx_std_17)
 
+# RoCEv2 (Scope-B) forward-path option for the ring roles. stage_rdma.cpp is a
+# self-contained TU: it includes ggml-rpc/transport.h (socket_t) but NOT httplib,
+# so the runner's httplib `socket_t = int` never collides (the engine boundary is
+# the whole-file translation-unit split). It reaches the socket_t symbols through
+# the ggml-transport OBJECT library — NOT by compiling transport.cpp a second
+# time, which under the per-source GGML_RPC_RDMA define would produce a TCP-only
+# ABI mismatch with the RDMA-enabled transport inside libggml. Default OFF: with
+# the option off the runner is byte-identical to before (RDMA-off parity gate).
+include(CMakeDependentOption)
+cmake_dependent_option(STAGE_RDMA_TRANSPORT
+    "stage-runner: RoCEv2 (Scope-B) forward path via ggml-rpc transport"
+    OFF "GGML_RPC;TARGET ggml-transport" OFF)
+if (STAGE_RDMA_TRANSPORT)
+    target_compile_definitions(${TARGET} PRIVATE STAGE_RDMA_TRANSPORT=1)
+    target_sources(${TARGET} PRIVATE stage_rdma.cpp)
+    target_include_directories(${TARGET} PRIVATE ${CMAKE_SOURCE_DIR}/ggml/src)
+    target_link_libraries(${TARGET} PRIVATE ggml-transport)
+    if (NOT GGML_RPC_RDMA)
+        # Loud fallback guard: GGML_RPC_RDMA off means transport.cpp compiled
+        # without the RDMA tier; the runner's STAGE_RDMA_TRANSPORT code then
+        # negotiates nothing and stays on TCP. WARNING so it survives quiet builds.
+        message(WARNING "stage-runner: RDMA transport requested but ggml-rpc has no RDMA tier -> TCP only")
+    endif()
+endif()
+
 # Expert-tensor disaggregation (P1): the expert-server role and the
 # byte-exactness / overhead harness. Both are additive - the llama-stage-runner
 # target above is untouched.
@@ -30,3 +55,8 @@ add_executable(${TARGET} expert-check.cpp)
 install(TARGETS ${TARGET} RUNTIME)
 target_link_libraries(${TARGET} PRIVATE common llama ${CMAKE_THREAD_LIBS_INIT})
 target_compile_features(${TARGET} PRIVATE cxx_std_17)
+
+# Golden-bytes regression for the STG2 forward-edge framing lives in
+# test-staged-wire.cpp (source stays here, next to stage-wire-framing.h and
+# test-data/stg2-frame.golden); it is registered with add_test in
+# tests/CMakeLists.txt, the subtree that has CTest enabled.

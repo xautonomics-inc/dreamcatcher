@@ -127,9 +127,14 @@ static void run_server_pipelined(model_bundle & b, const std::string & connect_t
     int  fd = -1, rfd = -1;
     bool stop = false;
 
+    // stage_close() (not raw close): with the RDMA engine on, fd is registered in
+    // g_conns and the stage_conn must be erased + torn down exactly once, else the
+    // QP leaks on every reconnect. Without the engine it is exactly the old
+    // shutdown+close. shutdown() stays for rfd: a worker parked in recv_mtp_msg
+    // must wake with EOF (QP teardown does not touch the raw control-recv path).
     auto ring_close = [&]() {
-        if (fd  >= 0) { shutdown(fd,  SHUT_RDWR); close(fd);  fd  = -1; }
-        if (rfd >= 0) { shutdown(rfd, SHUT_RDWR); close(rfd); rfd = -1; }
+        if (fd  >= 0) { shutdown(fd,  SHUT_RDWR); stage_close(fd); fd  = -1; }
+        if (rfd >= 0) { shutdown(rfd, SHUT_RDWR); stage_close(rfd); rfd = -1; }
     };
     auto ring_connect = [&]() -> bool {             // clears every stage's KV (per-connection reset)
         ring_close();

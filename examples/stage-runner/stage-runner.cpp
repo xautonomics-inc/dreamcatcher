@@ -31,6 +31,11 @@
 #include "gslot_client.h"
 #include "ggml.h"
 #include "ggml-backend.h"
+#ifdef STAGE_RDMA_TRANSPORT
+// Opaque Scope-B link API. Deliberately exposes no socket_t/httplib types —
+// stage_rdma.cpp is the TU boundary that includes ggml-rpc/transport.h.
+#  include "stage_rdma.h"
+#endif
 // NOTE: the mainline driver included "../../src/llama-ext.h" for the custom
 // llama_*_pre_norm staging API. ik_llama exposes the public embeddings API
 // instead (llama_get_embeddings_ith / llama_set_embeddings), so that include is
@@ -45,6 +50,12 @@
 #include <cstring>
 #include <map>
 #include <string>
+#ifdef STAGE_RDMA_TRANSPORT
+#include <memory>
+#include <mutex>
+#include <shared_mutex>
+#include <unordered_map>
+#endif
 #include <vector>
 
 #include <arpa/inet.h>
@@ -75,6 +86,7 @@ struct hidden_blob {
         seq.resize(rows); pos.resize(rows); data.resize((size_t) rows * embd);
     }
 };
+#include "stage-wire-framing.h"   // STG2 framing single source of truth (test-staged-wire shares it)
 
 // ---- socket helpers ----
 static bool send_all(int fd, const void * b, size_t n) {
@@ -87,20 +99,30 @@ static bool recv_all(int fd, void * b, size_t n) {
     while (n) { ssize_t k = recv(fd, p, n, 0); if (k <= 0) return false; p += k; n -= (size_t) k; }
     return true;
 }
+#ifdef STAGE_RDMA_TRANSPORT
+// defined with the transport block below (tcp_connect / tcp_listen_accept)
+static std::shared_ptr<stage_conn> conn_for(int fd);
+static bool send_hidden_conn(stage_conn * c, const hidden_blob & h);
+static bool recv_hidden_conn(stage_conn * c, hidden_blob & h);
+#endif
 static bool send_hidden(int fd, const hidden_blob & h) {
-    int32_t hdr[3] = { STAGE_MAGIC, h.n_rows, h.n_embd };
-    return send_all(fd, hdr, sizeof(hdr)) &&
-           send_all(fd, h.seq.data(),  h.n_rows * sizeof(int32_t)) &&
-           send_all(fd, h.pos.data(),  h.n_rows * sizeof(int32_t)) &&
-           send_all(fd, h.data.data(), h.data.size() * sizeof(float));
+#ifdef STAGE_RDMA_TRANSPORT
+    if (auto c = conn_for(fd)) {
+        if (stage_conn_is_rdma(c.get())) return send_hidden_conn(c.get(), h);
+        // TCP control conn from the engine: caps handshake already done at connect.
+        return framing_send(fd, h);
+    }
+#endif
+    return framing_send(fd, h);
 }
 static bool recv_hidden(int fd, hidden_blob & h) {
-    int32_t hdr[3];
-    if (!recv_all(fd, hdr, sizeof(hdr)) || hdr[0] != STAGE_MAGIC) return false;
-    h.resize(hdr[1], hdr[2]);
-    return recv_all(fd, h.seq.data(),  h.n_rows * sizeof(int32_t)) &&
-           recv_all(fd, h.pos.data(),  h.n_rows * sizeof(int32_t)) &&
-           recv_all(fd, h.data.data(), h.data.size() * sizeof(float));
+#ifdef STAGE_RDMA_TRANSPORT
+    if (auto c = conn_for(fd)) {
+        if (stage_conn_is_rdma(c.get())) return recv_hidden_conn(c.get(), h);
+        return framing_recv(fd, h);
+    }
+#endif
+    return framing_recv(fd, h);
 }
 // back edge: C sampled tokens (one per slot) + a global eog flag
 static bool send_tokens(int fd, const std::vector<int32_t> & toks, int32_t eog) {
@@ -167,7 +189,124 @@ static bool caps_hello_shim(int fd, bool client_first) {
     if (client_first) return send_all(fd, zeros, sizeof(zeros)) && recv_all(fd, peer, sizeof(peer));
     return recv_all(fd, peer, sizeof(peer)) && send_all(fd, zeros, sizeof(zeros));
 }
+#ifdef STAGE_RDMA_TRANSPORT
+// ---- Scope-B (RoCEv2) forward path. tcp_connect / tcp_listen_accept bring up a
+// stage_conn (TCP control + optional RC QP via the ggml-rpc transport), register
+// the control fd in g_conns, and hand that fd back so the whole int-fd pipeline
+// below keeps working unchanged: send_hidden/recv_hidden route the FORWARD edge
+// over one-sided RDMA WRITE when negotiated; the token/MTP back-edge always rides
+// raw send/recv on the same fd (the QP is WRITE-only, the control plane is TCP).
+// With STAGE_RDMA unset, no device, or a peer that does not negotiate, is_rdma()
+// stays false and every call falls through to the byte stream — same wire as the
+// shim below (socket_t::get_caps emits the same all-zero blob on a non-RDMA
+// build). Guarded by a shared_mutex AND shared_ptr ownership: with STAGE_SERVER=1
+// the forward edge is touched from httplib worker threads, so connect/accept/close
+// writers and the send_hidden/recv_hidden readers genuinely race. Two distinct
+// races, two mechanisms: (1) map structure (find during insert is UB) -> the lock;
+// (2) conn lifetime — conn_for used to return the raw pointer after dropping the
+// lock, so a stage_close on another thread (e.g. the server pipe's rx thread on a
+// dead return edge) could free it mid-send_hidden -> the map holds shared_ptr, and
+// callers keep the reference alive across the I/O. stage_close then only drops its
+// own reference; actual teardown waits for the last in-flight user. shutdown() in
+// ring_close (stage-server.h) makes any such in-flight I/O return promptly. ----
+static std::unordered_map<int, std::shared_ptr<stage_conn>> g_conns;
+static std::shared_mutex g_conns_mtx;
+// The C API hands out stage_conn* to be closed via stage_conn_close (opaque type:
+// no delete). The shared_ptr deleter makes that happen exactly once, on the last
+// reference. Declared before the insert sites below.
+static std::shared_ptr<stage_conn> stage_conn_shared(stage_conn * c) {
+    return c ? std::shared_ptr<stage_conn>(c, stage_conn_close) : nullptr;
+}
+static std::shared_ptr<stage_conn> conn_for(int fd) {
+    std::shared_lock<std::shared_mutex> lk(g_conns_mtx);
+    auto it = g_conns.find(fd); return it == g_conns.end() ? nullptr : it->second;
+}
+
+static void pack_hidden(const hidden_blob & h, std::vector<uint8_t> & buf) {
+    const size_t rb = (size_t) h.n_rows * sizeof(int32_t);
+    buf.resize(3 * sizeof(int32_t) + 2 * rb + h.data.size() * sizeof(float));
+    uint8_t * p = buf.data();
+    const int32_t hdr[3] = { STAGE_MAGIC, h.n_rows, h.n_embd };
+    memcpy(p, hdr, sizeof(hdr)); p += sizeof(hdr);
+    memcpy(p, h.seq.data(), rb); p += rb;
+    memcpy(p, h.pos.data(), rb); p += rb;
+    memcpy(p, h.data.data(), h.data.size() * sizeof(float));
+}
+static bool unpack_hidden(const void * buf, size_t nb, hidden_blob & h) {
+    if (nb < 3 * sizeof(int32_t)) return false;
+    const uint8_t * p = (const uint8_t *) buf;
+    int32_t hdr[3]; memcpy(hdr, p, sizeof(hdr)); p += sizeof(hdr);
+    if (hdr[0] != STAGE_MAGIC) return false;
+    h.resize(hdr[1], hdr[2]);
+    const size_t rb = (size_t) h.n_rows * sizeof(int32_t);
+    if (nb < 3 * sizeof(int32_t) + 2 * rb + h.data.size() * sizeof(float)) return false;
+    memcpy(h.seq.data(), p, rb); p += rb;
+    memcpy(h.pos.data(), p, rb); p += rb;
+    memcpy(h.data.data(), p, h.data.size() * sizeof(float));
+    return true;
+}
+// Forward a hidden blob over a stage_conn: a blob that fits a decode/bulk slot is
+// WRITTEN inline; an oversize blob (large prefill) WRITES a tiny doorbell (encoded
+// negative n_rows) then ships the bytes over the control socket, so the receiver —
+// which only ever polls the QP — always learns which transport carried the payload.
+static bool send_hidden_conn(stage_conn * c, const hidden_blob & h) {
+    std::vector<uint8_t> buf; pack_hidden(h, buf);
+    if (stage_conn_is_rdma(c)) {
+        if (buf.size() <= stage_conn_slot_cap(c))
+            return stage_conn_write(c, buf.data(), (uint32_t) buf.size());   // INLINE
+        const int32_t door[3] = { STAGE_MAGIC, -h.n_rows - 1, h.n_embd };    // doorbell: TCP follows
+        const uint64_t nb = buf.size();
+        return stage_conn_write(c, door, sizeof(door))
+            && stage_conn_send(c, &nb, sizeof(nb)) && stage_conn_send(c, buf.data(), buf.size());
+    }
+    const uint64_t nb = buf.size();   // TCP-only conn: length-prefixed contiguous blob
+    return stage_conn_send(c, &nb, sizeof(nb)) && stage_conn_send(c, buf.data(), buf.size());
+}
+static bool recv_hidden_conn(stage_conn * c, hidden_blob & h) {
+    if (stage_conn_is_rdma(c)) {
+        uint32_t len = 0; const void * p = stage_conn_read(c, &len);
+        if (!p || len < 3 * sizeof(int32_t)) return false;
+        int32_t hdr[3]; memcpy(hdr, p, sizeof(hdr));
+        if (hdr[0] != STAGE_MAGIC) return false;
+        if (hdr[1] >= 0) return unpack_hidden(p, len, h);                     // INLINE
+        uint64_t nb = 0;                                                      // doorbell -> TCP payload
+        if (!stage_conn_recv(c, &nb, sizeof(nb))) return false;
+        std::vector<uint8_t> buf(nb);
+        if (!stage_conn_recv(c, buf.data(), nb)) return false;
+        return unpack_hidden(buf.data(), nb, h);
+    }
+    uint64_t nb = 0;
+    if (!stage_conn_recv(c, &nb, sizeof(nb))) return false;
+    std::vector<uint8_t> buf(nb);
+    if (!stage_conn_recv(c, buf.data(), nb)) return false;
+    return unpack_hidden(buf.data(), nb, h);
+}
+// Close a stage link by fd: drop the map entry exactly once. The shared_ptr
+// deleter runs stage_conn_close when the last reference (here or an in-flight
+// send_hidden/recv_hidden user) goes away. Unmapped fds (never happens on the
+// stage edge when the engine is on; belt for raw fds) fall through to close().
+static void stage_close(int fd) {
+    std::shared_ptr<stage_conn> c;
+    {
+        std::unique_lock<std::shared_mutex> lk(g_conns_mtx);
+        auto it = g_conns.find(fd);
+        if (it != g_conns.end()) { c = std::move(it->second); g_conns.erase(it); }
+    }
+    if (!c && fd >= 0) close(fd);
+}
+#else
+static void stage_close(int fd) { if (fd >= 0) close(fd); }
+#endif
 static int tcp_listen_accept(int port) {
+#ifdef STAGE_RDMA_TRANSPORT
+    stage_conn * c = stage_conn_listen(port);
+    if (!stage_conn_ok(c)) { if (c) stage_conn_close(c); return -1; }
+    int fd = stage_conn_fd(c);
+    bool rdma = stage_conn_is_rdma(c);            // read BEFORE publish: after the map insert another thread may close
+    { auto sc = stage_conn_shared(c); std::unique_lock<std::shared_mutex> lk(g_conns_mtx); g_conns[fd] = sc; }
+    fprintf(stderr, "stage: accepted :%d fd=%d forward=%s\n", port, fd, rdma ? "RDMA" : "TCP");
+    return fd;
+#else
     int s = socket(AF_INET, SOCK_STREAM, 0);
     int one = 1; setsockopt(s, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
     sockaddr_in a{}; a.sin_family = AF_INET; a.sin_addr.s_addr = INADDR_ANY; a.sin_port = htons(port);
@@ -185,10 +324,32 @@ static int tcp_listen_accept(int port) {
         close(s);
         return c;
     }
+#endif
 }
 static int g_connect_timeout_ms = 10000;   // --connect-timeout: dial-out retry budget before descriptive exit
 
 static int tcp_connect(const std::string & host, int port) {
+#ifdef STAGE_RDMA_TRANSPORT
+    stage_conn * c = nullptr;
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(g_connect_timeout_ms);
+    while (std::chrono::steady_clock::now() < deadline) {  // retry: downstream stage may not be listening yet
+        c = stage_conn_connect(host.c_str(), port);
+        if (stage_conn_ok(c)) break;
+        if (c) stage_conn_close(c);
+        c = nullptr; usleep(100000);
+    }
+    if (!c) {
+        // Same message as the TCP path: tests/bdd asserts on it for the unreachable-downstream scenario.
+        fprintf(stderr, "stage: connection to %s:%d failed within --connect-timeout %d ms (downstream unreachable)\n",
+                host.c_str(), port, g_connect_timeout_ms);
+        return -1;
+    }
+    int fd = stage_conn_fd(c);
+    bool rdma = stage_conn_is_rdma(c);            // read BEFORE publish (see accept path)
+    { auto sc = stage_conn_shared(c); std::unique_lock<std::shared_mutex> lk(g_conns_mtx); g_conns[fd] = sc; }
+    fprintf(stderr, "stage: connected %s:%d fd=%d forward=%s\n", host.c_str(), port, fd, rdma ? "RDMA" : "TCP");
+    return fd;
+#else
     int s = socket(AF_INET, SOCK_STREAM, 0);
     sockaddr_in a{}; a.sin_family = AF_INET; a.sin_port = htons(port);
     inet_pton(AF_INET, host.c_str(), &a.sin_addr);
@@ -210,6 +371,7 @@ static int tcp_connect(const std::string & host, int port) {
             host.c_str(), port, g_connect_timeout_ms);
     close(s);
     return -1;
+#endif
 }
 
 // ---- model ----
@@ -759,9 +921,9 @@ int main(int argc, char ** argv) {
         int fd = tcp_listen_accept(listen_port); if (fd < 0) break;
         llama_kv_cache_clear(b.ctx); // fresh KV per client
         hidden_blob h, dummy;
-        if (!recv_hidden(fd, h)) { close(fd); continue; }
+        if (!recv_hidden(fd, h)) { stage_close(fd); continue; }
         while (!g_gslot.open(gslot::now_ms_monotonic())) { usleep(2000); }
-        if (!run_hidden(b, h, false, dummy)) { fprintf(stderr,"stage[tail]: prefill failed\n"); close(fd); continue; }
+        if (!run_hidden(b, h, false, dummy)) { fprintf(stderr,"stage[tail]: prefill failed\n"); stage_close(fd); continue; }
         g_gslot.handoff();
         // output rows == input rows; the last row of each seq carries its logits.
         int C = 0; for (int v : h.seq) C = (v+1 > C) ? v+1 : C;
@@ -791,7 +953,7 @@ int main(int argc, char ** argv) {
         double agg = (double) dsteps * C / sec;
         fprintf(stderr, "stage[tail]: decode %d steps x %d slots in %.2fs = %.2f tok/s agg, %.2f t/s/slot\n",
                 dsteps, C, sec, agg, agg / C);
-        close(fd);
+        stage_close(fd);
       }
     } else if (role == "relay") {
         // chain middle stage: recv hidden from upstream -> run window -> forward to
@@ -801,7 +963,7 @@ int main(int argc, char ** argv) {
         std::string dh = connect_to.substr(0, c); int dp = atoi(connect_to.substr(c + 1).c_str());
         for (;;) {
             int fd_up = tcp_listen_accept(listen_port); if (fd_up < 0) break;
-            int fd_down = tcp_connect(dh, dp); if (fd_down < 0) { close(fd_up); continue; }
+            int fd_down = tcp_connect(dh, dp); if (fd_down < 0) { stage_close(fd_up); continue; }
             llama_kv_cache_clear(b.ctx);
             hidden_blob in, out; long steps = 0;
             for (;;) {
@@ -817,7 +979,7 @@ int main(int argc, char ** argv) {
                 if (eog) break;
             }
             g_gslot.yield();
-            close(fd_up); close(fd_down);
+            stage_close(fd_up); stage_close(fd_down);
             fprintf(stderr, "stage[relay]: client done (%ld steps)\n", steps);
         }
     } else {
